@@ -1,0 +1,79 @@
+[build-system]
+build-backend = "uv_build"
+requires = [ "uv-build>=0.10.9,<0.11" ]
+
+[project]
+name = "discogskit"
+version = "0.1.0"
+description = "Discogs Data Dumps Toolkit"
+readme = "README.md"
+keywords = [ "cli", "discogs", "discogs-dump", "music-database" ]
+license = "Apache-2.0"
+authors = [ { name = "Jean-Marc Fontaine", email = "jm@jmfontaine.net" } ]
+requires-python = ">=3.10"
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Database",
+]
+dependencies = [
+  "adbc-driver-postgresql>=1.10.0",
+  "lxml>=6.0.2",
+  "psycopg>=3.3.3",
+  "pyarrow>=23.0.1",
+  "rapidgzip>=0.16.0",
+  "rich>=14.3.3",
+  "typer>=0.24.1",
+]
+scripts.discogskit = "discogskit:cli.app"
+
+[dependency-groups]
+dev = [
+  "deadcode>=2.4.1",
+  "deptry>=0.24",
+  "lxml-stubs>=0.5.1",
+  "prek>=0.3.5",
+  "pyproject-fmt>=2.18.1",
+  "pyright>=1.1.408",
+  "pytest>=9.0.2",
+  "pytest-cov>=7",
+  "ruff>=0.15.6",
+  "testcontainers[postgres]>=4.14.1",
+  "ty>=0.0.23",
+]
+
+[tool.pyproject-fmt]
+keep_full_version = true
+max_supported_python = "3.14"
+
+[tool.ty]
+analysis.allowed-unresolved-imports = [ "rapidgzip" ]
+
+[tool.pytest]
+ini_options.testpaths = [ "tests" ]
+ini_options.markers = [
+  "integration: integration tests (SQLite lifecycle, PostgreSQL via testcontainers)",
+]
+ini_options.filterwarnings = [ "ignore::ResourceWarning" ]
+
+[tool.coverage]
+run.omit = [ "src/discogskit/cli.py" ]
+run.source = [ "discogskit" ]
+
+[tool.deadcode]
+ignore_names = [
+  "_callback",         # Typer app.callback()
+  "_version_callback", # Typer Option callback
+  "convert",           # Typer app.command()
+  "load",              # Typer app.command()
+  "render",            # Rich ProgressColumn override
+  "return_value",      # mock attribute setup
+  "root_tag",          # dataclass field used at runtime
+]

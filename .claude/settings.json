@@ -1,0 +1,43 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "just format && just lint-fix && just type-check && just test-unit || { echo 'Quality checks failed - fix issues before completing' >&2; exit 2; }"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(discogskit:*)",
+      "Bash(find:*)",
+      "Bash(gh api:*)",
+      "Bash(gh run:*)",
+      "Bash(grep:*)",
+      "Bash(just dead-code:*)",
+      "Bash(just deps-unused:*)",
+      "Bash(just format-check:*)",
+      "Bash(just format:*)",
+      "Bash(just lint-fix:*)",
+      "Bash(just lint:*)",
+      "Bash(just test-cov:*)",
+      "Bash(just test-integration:*)",
+      "Bash(just test-unit:*)",
+      "Bash(just test:*)",
+      "Bash(just type-check:*)",
+      "Bash(just verify-types:*)",
+      "Bash(prek run:*)",
+      "Bash(uv add:*)",
+      "Bash(uv run:*)",
+      "Bash(uv sync:*)",
+      "Bash(wc:*)",
+      "mcp__plugin_context7_context7__query-docs",
+      "mcp__plugin_context7_context7__resolve-library-id",
+      "Read(//tmp/**)"
+    ]
+  }
+}

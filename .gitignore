@@ -1,0 +1,8 @@
+__pycache__
+.coverage
+.pytest_cache
+.ruff_cache
+.venv
+benchmarks/alternatives/
+benchmarks/output/
+benchmarks/results/
