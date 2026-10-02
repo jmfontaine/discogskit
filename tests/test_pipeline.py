@@ -101,6 +101,32 @@ def _run_or_fail_on_hang(config, writer, timeout=30.0):
         raise errors[0]
 
 
+def _single_chunk_config(gz_path):
+    from discogskit import pipeline
+
+    return pipeline.PipelineConfig(
+        chunk_mb=1,
+        entity="artists",
+        gz_path=gz_path,
+        keep_xml=True,
+        parse_workers=1,
+        profile=False,
+        progress=False,
+        strict=False,
+        write_queue=2,
+    )
+
+
+def _run_and_close(config, writer):
+    """Run the pipeline the way the CLI does: ``close()`` always follows ``run()``."""
+    from discogskit import pipeline
+
+    try:
+        return pipeline.run(config, writer)
+    finally:
+        writer.close()
+
+
 # ------------------------------------------------------------------------------------------------------------------------
 # Unit tests
 # ------------------------------------------------------------------------------------------------------------------------
@@ -126,6 +152,52 @@ class TestFmtTime:
 
     def test_float_truncated(self):
         assert _fmt_time(42.9) == "42s"
+
+
+class TestPipelineRunWriters:
+    """``pipeline.run`` calls ``write_chunk`` on the writer thread, unlike the
+    per-writer tests, which drive every method from the test thread."""
+
+    def test_jsonl(self, tmp_path, artists_gz):
+        from discogskit.writers.jsonl import JSONLWriter
+
+        result = _run_and_close(
+            _single_chunk_config(artists_gz), JSONLWriter(str(tmp_path / "out"))
+        )
+
+        assert result.total_records == 2
+        lines = (
+            (tmp_path / "out" / "artists" / "artists.jsonl").read_text().splitlines()
+        )
+        assert [json.loads(line)["name"] for line in lines] == ["Test", "Other"]
+
+    def test_parquet(self, tmp_path, artists_gz):
+        import pyarrow.parquet as pq
+
+        from discogskit.writers.parquet import ParquetWriter
+
+        result = _run_and_close(
+            _single_chunk_config(artists_gz), ParquetWriter(str(tmp_path / "out"))
+        )
+
+        assert result.total_records == 2
+        table = pq.read_table(tmp_path / "out" / "artists" / "artists.parquet")
+        assert table.column("name").to_pylist() == ["Test", "Other"]
+
+    def test_sqlite(self, tmp_path, artists_gz):
+        import sqlite3
+
+        from discogskit.writers.sqlite import SQLiteWriter
+
+        db_path = tmp_path / "out.db"
+        result = _run_and_close(
+            _single_chunk_config(artists_gz), SQLiteWriter(str(db_path))
+        )
+
+        assert result.total_records == 2
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute("SELECT id, name FROM artists ORDER BY id").fetchall()
+        assert rows == [(1, "Test"), (2, "Other")]
 
 
 # ------------------------------------------------------------------------------------------------------------------------
@@ -279,6 +351,21 @@ class TestPipelineRun:
         time.sleep(0.5)
         assert writer.active_at_close == 0
         assert writer.writes_after_close == 0
+
+    def test_postgresql_writer(self, artists_gz, pg_dsn):
+        """``pipeline.run`` with PostgreSQLWriter, whose chunks land on the writer thread."""
+        import psycopg
+
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        result = _run_and_close(
+            _single_chunk_config(artists_gz), PostgreSQLWriter(pg_dsn, overwrite=True)
+        )
+
+        assert result.total_records == 2
+        with psycopg.connect(pg_dsn) as conn:
+            rows = conn.execute("SELECT id, name FROM artists ORDER BY id").fetchall()
+        assert rows == [(1, "Test"), (2, "Other")]
 
     def test_writer_error_does_not_hang(self, tmp_path):
         """A writer failing on chunk 1 of more chunks than the backlog holds re-raises."""

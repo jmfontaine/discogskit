@@ -91,7 +91,10 @@ class SQLiteWriter:
 
     def __init__(self, path: str, *, fk: bool = False, overwrite: bool = False) -> None:
         self._path = path
-        self._conn = sqlite3.connect(path)
+        # pipeline.run calls write_chunk on its writer thread, while setup/finalize/
+        # close run on the caller's thread. Uses never overlap: the writer thread is
+        # idle whenever the caller touches the connection.
+        self._conn = sqlite3.connect(path, check_same_thread=False)
         self._fk = fk
         self._overwrite = overwrite
         self._insert_sql: dict[str, str] = {}
