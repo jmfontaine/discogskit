@@ -32,6 +32,11 @@ def make_split_finder(
     def find_split_points(
         file_path: str, target_chunk_bytes: int
     ) -> list[tuple[int, int]]:
+        # A negative size makes the search below step backwards forever.
+        if target_chunk_bytes <= 0:
+            raise ValueError(
+                f"target_chunk_bytes must be positive, got {target_chunk_bytes}"
+            )
         with open(file_path, "rb") as f:
             mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
             try:

@@ -1,10 +1,11 @@
-"""Tests for CLI error handling — tracebacks must never leak to users."""
+"""Tests for CLI error handling and option validation."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import patch
 
+import click
 import pytest
 from typer.testing import CliRunner
 
@@ -77,3 +78,38 @@ class TestNoTracebacks:
         ):
             result = runner.invoke(app, ["load", str(gz)])
         assert "disk full" in result.output
+
+
+_COUNT_OPTIONS = {
+    "convert": ["--chunk-mb", "--parse-workers", "--write-queue"],
+    "load": [
+        "--chunk-mb",
+        "--index-workers",
+        "--parse-workers",
+        "--write-queue",
+        "--write-workers",
+    ],
+}
+
+
+class TestOptionMinimums:
+    @pytest.mark.parametrize(
+        "command, option, value",
+        [
+            (command, option, value)
+            for command, options in _COUNT_OPTIONS.items()
+            for option in options
+            for value in ("0", "-1")
+        ],
+    )
+    def test_below_one_is_a_usage_error(
+        self, tmp_path: Path, command: str, option: str, value: str
+    ) -> None:
+        """Rejected before any work: a negative --chunk-mb used to loop forever."""
+        gz = _make_gz(tmp_path)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = runner.invoke(app, [command, str(gz), option, value])
+        assert result.exit_code == 2
+        # Typer colors the error panel when it detects CI (GITHUB_ACTIONS).
+        assert option in click.unstyle(result.output)
+        run.assert_not_called()
