@@ -142,11 +142,12 @@ def _collect_system_info() -> dict[str, Any]:
 
 def _human_size(size_bytes: int) -> str:
     """Format byte count as human-readable string."""
+    size = float(size_bytes)
     for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(size_bytes) < 1024:
-            return f"{size_bytes:.2f} {unit}"
-        size_bytes /= 1024  # type: ignore[assignment]
-    return f"{size_bytes:.2f} PB"
+        if abs(size) < 1024:
+            return f"{size:.2f} {unit}"
+        size /= 1024
+    return f"{size:.2f} PB"
 
 
 # ---------------------------------------------------------------------------

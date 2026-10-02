@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from importlib.metadata import version
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 import typer
 from rich.table import Table
@@ -107,7 +107,7 @@ def _print_result(
         status("Get wait", f"{pd['get_wait']:.2f}s")
         console.print()
 
-        table_timings: dict[str, float] = pd.get("table_timings", {})  # type: ignore[assignment]
+        table_timings = cast(dict[str, float], pd.get("table_timings", {}))
         flush_total = sum(table_timings.values())
 
         tbl = Table(
