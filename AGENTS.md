@@ -32,7 +32,7 @@ just deps-unused        # Find unused/undeclared deps
 
 The core is a multi-process pipeline in `src/discogskit/pipeline.py`:
 
-1. **Decompress** — `rapidgzip` parallel decompression of .xml.gz
+1. **Decompress** — `rapidgzip` parallel decompression of .xml.gz; a `filelock.ReadWriteLock` on `<name>.xml.lock` lets concurrent runs share the XML (write lock to decompress/delete, read lock to read)
 2. **Split** — Memory-mapped scanning for XML element boundaries, producing byte-range chunks (`entities/_split.py`)
 3. **Parse** — `multiprocessing.Pool` workers parse chunks with lxml, emit Arrow IPC buffers
 4. **Write** — Single writer thread (one-worker `ThreadPoolExecutor`) deserializes IPC and writes to target format; a bounded backlog of pending write futures gives backpressure and re-raises writer errors immediately
@@ -45,7 +45,7 @@ Multiprocessing is used because lxml is CPU-bound and holds the GIL. Arrow IPC i
 - **`entities/`** — One module per Discogs entity (artists, labels, masters, releases). Each defines table schemas, XML→Arrow parsing, and DDL for SQL targets. Releases is the most complex (12 normalized tables).
 - **`writers/`** — Output format implementations (parquet, jsonl, sqlite, postgresql). Factory in `__init__.py` selects writer by format string.
 - **`cli.py`** — Typer CLI with `convert` and `load` commands.
-- **`decompress.py`** — Gzip decompression wrapper using rapidgzip.
+- **`decompress.py`** — Gzip decompression wrapper using rapidgzip; `ensure_xml` returns an `XmlLease` the pipeline holds while it reads the XML.
 
 ### Entity pattern
 

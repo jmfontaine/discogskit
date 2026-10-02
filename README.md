@@ -14,7 +14,7 @@ and PostgreSQL.
 
 ## Installation
 
-Requires Python 3.10+.
+Requires Python 3.10+. Tested on Linux and macOS; Windows support is untested.
 
 ```bash
 pipx install discogskit
@@ -51,6 +51,12 @@ uvx discogskit
 ╰──────────────────────────────────────────────────────────────────────────────────────╯
 
 ```
+
+Both commands decompress each `.xml.gz` to a `.xml` next to it, and delete the `.xml` afterwards unless `--keep-xml` is
+set. An existing `.xml` is reused. Runs on the same dump can overlap, e.g. a `convert` and a `load`: one decompresses
+while the others wait, then they all read the same `.xml`. A run that finishes while another still reads it leaves it
+in place for that run. They coordinate through a `<name>.xml.lock` file, which stays next to the dump; delete it only
+while no run is using that dump.
 
 ### discogskit convert
 

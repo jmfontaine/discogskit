@@ -238,138 +238,143 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
         status("Write queue", str(config.write_queue))
         status("Source", str(gz_path))
 
-    # Stage 1: Decompress
+    # Stage 1: Decompress. The lease keeps other runs from deleting or
+    # rewriting the XML while this run reads it.
     t0 = time.perf_counter()
-    decompress.ensure_xml(gz_path, xml_path, parse_workers)
+    xml_lease = decompress.ensure_xml(gz_path, xml_path, parse_workers)
     t_decompress = time.perf_counter() - t0
 
-    # Stage 2: Split. Runs before writer.setup() so an input without records
-    # fails before --overwrite drops the existing output.
-    t_split_start = time.perf_counter()
-    splits = entity.find_split_points(xml_path, chunk_bytes)
-    t_split = time.perf_counter() - t_split_start
-    worker_args = [ChunkArgs(str(xml_path), s, e, config.strict) for s, e in splits]
-    n_chunks = len(splits)
-    if not use_progress:
-        status("Chunks", f"{n_chunks} chunks, {parse_workers} workers")
-
-    # Create bare tables (no PK, no FK, no indexes).
-    # Indexes are built AFTER bulk load (Stage 4) — inserting into indexed
-    # tables triggers per-row index maintenance which is dramatically slower.
-    writer.setup(entity)
-
-    # Stage 3: Parallel parse + write
-    #
-    # Main thread: drains pool.imap_unordered → submits each IPC dict to a
-    # one-worker writer executor and keeps the Future in `pending`.
-    # Writer thread: runs the writes in submission order → flushes to the target.
-    #
-    # Backpressure: once more than write_queue chunks wait behind the in-flight
-    # write, the main thread blocks on the oldest Future, which stops it from
-    # consuming pool results, which stops workers from starting new chunks.
-    # This naturally limits memory to ~write_queue × ~150 MB of IPC data.
-    # Waiting on a Future also re-raises a writer error in the main thread.
-    t1 = time.perf_counter()
-
-    # Set up progress bar (if enabled).
-    # redirect_stdout/stderr ensures that any print() calls from writer
-    # setup/finalize or subprocess warnings render above the bar cleanly.
-    progress_bar: _ProgressBar | None = None
-    progress_ctx: Progress | None = None
-    if use_progress:
-        progress_ctx = Progress(
-            TextColumn("  [bold]{task.fields[label]:<14s}[/]"),
-            BarColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            TextColumn("[dim]·[/]"),
-            _ElapsedEstTotalColumn(),
-            console=console,
-            redirect_stderr=True,
-            redirect_stdout=True,
-            transient=True,
-        )
-        task_id = progress_ctx.add_task(
-            "",
-            label="Load",
-            total=None,
-        )
-        progress_bar = _ProgressBar(progress_ctx, task_id, total=n_chunks)
-        progress_ctx.start()
-
-    chunk_writer = _ChunkWriter(
-        writer, entity, n_chunks, profile=config.profile, progress_bar=progress_bar
-    )
-    pending: deque[Future[None]] = deque()
-    # put_blocked measures how long the main thread waits for the writer to
-    # catch up. High put_blocked = write-bound pipeline.  See --profile output.
-    put_blocked = 0.0
-    write_executor = ThreadPoolExecutor(
-        max_workers=1, thread_name_prefix="discogskit-writer"
-    )
-    # Workers ignore SIGINT so they don't dump tracebacks on Ctrl+C;
-    # the parent handles the interrupt and terminates workers cleanly.
-    pool = Pool(
-        parse_workers,
-        initargs=(signal.SIGINT, signal.SIG_IGN),
-        initializer=signal.signal,
-    )
     try:
-        for ipc_dict in pool.imap_unordered(entity.extract_chunk_to_ipc, worker_args):
-            pending.append(write_executor.submit(chunk_writer.write, ipc_dict))
-            # Writes finish in order; reap finished ones so errors surface early.
-            while pending and pending[0].done():
-                pending.popleft().result()
-            if config.profile:
-                t_put = time.perf_counter()
-            while len(pending) > config.write_queue + 1:
-                pending.popleft().result()  # blocks until the writer catches up
-            if config.profile:
-                put_blocked += time.perf_counter() - t_put
-        while pending:
-            pending.popleft().result()
-    except BaseException as exc:
-        # Stop the progress bar first to restore terminal state
-        if progress_ctx is not None:
-            progress_ctx.stop()
-        pool.terminate()
-        pool.join()
-        if isinstance(exc, KeyboardInterrupt):
-            # Clean up decompressed XML unless user wants to keep it. Done
-            # before the write wait so a second Ctrl+C can't skip it.
-            if not config.keep_xml:
-                xml_path.unlink(missing_ok=True)
-            # The in-flight write can't be interrupted; say why we pause.
-            console.print(
-                "\n  [yellow]Interrupted — waiting for the in-flight write to finish …[/]"
+        # Stage 2: Split. Runs before writer.setup() so an input without records
+        # fails before --overwrite drops the existing output.
+        t_split_start = time.perf_counter()
+        splits = entity.find_split_points(xml_path, chunk_bytes)
+        t_split = time.perf_counter() - t_split_start
+        worker_args = [ChunkArgs(str(xml_path), s, e, config.strict) for s, e in splits]
+        n_chunks = len(splits)
+        if not use_progress:
+            status("Chunks", f"{n_chunks} chunks, {parse_workers} workers")
+
+        # Create bare tables (no PK, no FK, no indexes).
+        # Indexes are built AFTER bulk load (Stage 4) — inserting into indexed
+        # tables triggers per-row index maintenance which is dramatically slower.
+        writer.setup(entity)
+
+        # Stage 3: Parallel parse + write
+        #
+        # Main thread: drains pool.imap_unordered → submits each IPC dict to a
+        # one-worker writer executor and keeps the Future in `pending`.
+        # Writer thread: runs the writes in submission order → flushes to the target.
+        #
+        # Backpressure: once more than write_queue chunks wait behind the in-flight
+        # write, the main thread blocks on the oldest Future, which stops it from
+        # consuming pool results, which stops workers from starting new chunks.
+        # This naturally limits memory to ~write_queue × ~150 MB of IPC data.
+        # Waiting on a Future also re-raises a writer error in the main thread.
+        t1 = time.perf_counter()
+
+        # Set up progress bar (if enabled).
+        # redirect_stdout/stderr ensures that any print() calls from writer
+        # setup/finalize or subprocess warnings render above the bar cleanly.
+        progress_bar: _ProgressBar | None = None
+        progress_ctx: Progress | None = None
+        if use_progress:
+            progress_ctx = Progress(
+                TextColumn("  [bold]{task.fields[label]:<14s}[/]"),
+                BarColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                TextColumn("[dim]·[/]"),
+                _ElapsedEstTotalColumn(),
+                console=console,
+                redirect_stderr=True,
+                redirect_stdout=True,
+                transient=True,
             )
-        # Drop queued writes and wait for the in-flight one, so the writer is
-        # idle before the caller closes it.
-        write_executor.shutdown(cancel_futures=True)
-        raise
-    else:
-        pool.close()
-        pool.join()
-        write_executor.shutdown()
+            task_id = progress_ctx.add_task(
+                "",
+                label="Load",
+                total=None,
+            )
+            progress_bar = _ProgressBar(progress_ctx, task_id, total=n_chunks)
+            progress_ctx.start()
+
+        chunk_writer = _ChunkWriter(
+            writer, entity, n_chunks, profile=config.profile, progress_bar=progress_bar
+        )
+        pending: deque[Future[None]] = deque()
+        # put_blocked measures how long the main thread waits for the writer to
+        # catch up. High put_blocked = write-bound pipeline.  See --profile output.
+        put_blocked = 0.0
+        write_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="discogskit-writer"
+        )
+        # Workers ignore SIGINT so they don't dump tracebacks on Ctrl+C;
+        # the parent handles the interrupt and terminates workers cleanly.
+        pool = Pool(
+            parse_workers,
+            initargs=(signal.SIGINT, signal.SIG_IGN),
+            initializer=signal.signal,
+        )
+        try:
+            for ipc_dict in pool.imap_unordered(
+                entity.extract_chunk_to_ipc, worker_args
+            ):
+                pending.append(write_executor.submit(chunk_writer.write, ipc_dict))
+                # Writes finish in order; reap finished ones so errors surface early.
+                while pending and pending[0].done():
+                    pending.popleft().result()
+                if config.profile:
+                    t_put = time.perf_counter()
+                while len(pending) > config.write_queue + 1:
+                    pending.popleft().result()  # blocks until the writer catches up
+                if config.profile:
+                    put_blocked += time.perf_counter() - t_put
+            while pending:
+                pending.popleft().result()
+        except BaseException as exc:
+            # Stop the progress bar first to restore terminal state
+            if progress_ctx is not None:
+                progress_ctx.stop()
+            pool.terminate()
+            pool.join()
+            if isinstance(exc, KeyboardInterrupt):
+                # Clean up decompressed XML unless user wants to keep it. Done
+                # before the write wait so a second Ctrl+C can't skip it.
+                xml_lease.release(remove_xml=not config.keep_xml)
+                # The in-flight write can't be interrupted; say why we pause.
+                console.print(
+                    "\n  [yellow]Interrupted — waiting for the in-flight write to finish …[/]"
+                )
+            # Drop queued writes and wait for the in-flight one, so the writer is
+            # idle before the caller closes it.
+            write_executor.shutdown(cancel_futures=True)
+            raise
+        else:
+            pool.close()
+            pool.join()
+            write_executor.shutdown()
+        finally:
+            if progress_ctx is not None:
+                progress_ctx.stop()
+
+        total = chunk_writer.total
+        # Load time covers splitting and parse + write, but not writer setup.
+        t_load = t_split + time.perf_counter() - t1
+
+        if use_progress and t_load > 0:
+            rate = total / t_load
+            status("Load", f"{total:,} records, {rate:,.0f} rec/s", f"[{t_load:.2f}s]")
+
+        # Stage 4: Indexes
+        t2 = time.perf_counter()
+        writer.finalize(entity)
+        t_indexes = time.perf_counter() - t2
+
+        # Stage 5: Cleanup
+        xml_lease.release(remove_xml=not config.keep_xml)
     finally:
-        if progress_ctx is not None:
-            progress_ctx.stop()
-
-    total = chunk_writer.total
-    # Load time covers splitting and parse + write, but not writer setup.
-    t_load = t_split + time.perf_counter() - t1
-
-    if use_progress and t_load > 0:
-        rate = total / t_load
-        status("Load", f"{total:,} records, {rate:,.0f} rec/s", f"[{t_load:.2f}s]")
-
-    # Stage 4: Indexes
-    t2 = time.perf_counter()
-    writer.finalize(entity)
-    t_indexes = time.perf_counter() - t2
-
-    # Stage 5: Cleanup
-    if not config.keep_xml:
-        xml_path.unlink(missing_ok=True)
+        # Errors other than Ctrl+C keep the XML; release() is a no-op if done.
+        xml_lease.release(remove_xml=False)
 
     t_total = t_decompress + t_load + t_indexes
 
