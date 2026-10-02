@@ -243,7 +243,17 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
     decompress.ensure_xml(gz_path, xml_path, parse_workers)
     t_decompress = time.perf_counter() - t0
 
-    # Stage 2: Create bare tables (no PK, no FK, no indexes).
+    # Stage 2: Split. Runs before writer.setup() so an input without records
+    # fails before --overwrite drops the existing output.
+    t_split_start = time.perf_counter()
+    splits = entity.find_split_points(xml_path, chunk_bytes)
+    t_split = time.perf_counter() - t_split_start
+    worker_args = [ChunkArgs(str(xml_path), s, e, config.strict) for s, e in splits]
+    n_chunks = len(splits)
+    if not use_progress:
+        status("Chunks", f"{n_chunks} chunks, {parse_workers} workers")
+
+    # Create bare tables (no PK, no FK, no indexes).
     # Indexes are built AFTER bulk load (Stage 4) — inserting into indexed
     # tables triggers per-row index maintenance which is dramatically slower.
     writer.setup(entity)
@@ -260,11 +270,6 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
     # This naturally limits memory to ~write_queue × ~150 MB of IPC data.
     # Waiting on a Future also re-raises a writer error in the main thread.
     t1 = time.perf_counter()
-    splits = entity.find_split_points(xml_path, chunk_bytes)
-    worker_args = [ChunkArgs(str(xml_path), s, e, config.strict) for s, e in splits]
-    n_chunks = len(splits)
-    if not use_progress:
-        status("Chunks", f"{n_chunks} chunks, {parse_workers} workers")
 
     # Set up progress bar (if enabled).
     # redirect_stdout/stderr ensures that any print() calls from writer
@@ -350,7 +355,8 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
             progress_ctx.stop()
 
     total = chunk_writer.total
-    t_load = time.perf_counter() - t1
+    # Load time covers splitting and parse + write, but not writer setup.
+    t_load = t_split + time.perf_counter() - t1
 
     if use_progress and t_load > 0:
         rate = total / t_load
