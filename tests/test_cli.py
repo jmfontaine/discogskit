@@ -80,6 +80,25 @@ class TestNoTracebacks:
         assert "disk full" in result.output
 
 
+class TestUncompressedXmlInput:
+    @pytest.mark.parametrize("command", ["convert", "load"])
+    def test_rejected_before_any_work(self, tmp_path: Path, command: str) -> None:
+        """`.xml` used to be accepted, then failed decompression (issue #15)."""
+        gz = _make_gz(tmp_path)
+        xml = tmp_path / "discogs_20260301_labels.xml"
+        xml.write_bytes(b"<labels></labels>")
+        with (
+            patch("discogskit.cli.pipeline.run") as run,
+            patch("discogskit.cli.get_writer"),
+        ):
+            result = runner.invoke(app, [command, str(gz), str(xml)])
+        assert result.exit_code == 1
+        output = " ".join(click.unstyle(result.output).split())
+        assert "uncompressed .xml input is not supported" in output
+        run.assert_not_called()
+        assert xml.read_bytes() == b"<labels></labels>"
+
+
 _COUNT_OPTIONS = {
     "convert": ["--chunk-mb", "--parse-workers", "--write-queue"],
     "load": [

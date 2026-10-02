@@ -59,7 +59,13 @@ def _resolve_jobs(paths: list[Path]) -> list[tuple[Path, str]]:
                 if not p.exists():
                     console.print(f"[red]Error:[/] file not found: {p}")
                     raise typer.Exit(1) from None
-                if p.name.endswith((".xml.gz", ".xml")):
+                if p.name.endswith(".xml"):
+                    console.print(
+                        f"[red]Error:[/] {p}: uncompressed .xml input is not supported;"
+                        " pass the original .xml.gz dump"
+                    )
+                    raise typer.Exit(1) from None
+                if p.name.endswith(".xml.gz"):
                     jobs.append((p, detect_entity(p.name)))
         except ValueError as exc:
             console.print(f"[red]Error:[/] {exc}")
