@@ -52,8 +52,9 @@ uvx discogskit
 
 ```
 
-Both commands decompress each `.xml.gz` to a `.xml` next to it, and delete the `.xml` afterwards unless `--keep-xml` is
-set. An existing `.xml` is reused. Runs on the same dump can overlap, e.g. a `convert` and a `load`: one decompresses
+Both commands decompress each `.xml.gz` to a `.xml` next to it, and delete the `.xml` after a successful run unless
+`--keep-xml` is set. A failed or interrupted run (including Ctrl+C) keeps it, and the next run reuses an existing `.xml`
+instead of decompressing again. Runs on the same dump can overlap, e.g. a `convert` and a `load`: one decompresses
 while the others wait, then they all read the same `.xml`. A run that finishes while another still reads it leaves it
 in place for that run. They coordinate through a `<name>.xml.lock` file, which stays next to the dump; delete it only
 while no run is using that dump.
