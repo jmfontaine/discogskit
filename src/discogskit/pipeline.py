@@ -279,14 +279,14 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
             TextColumn("[dim]·[/]"),
             _ElapsedEstTotalColumn(),
             console=console,
-            transient=True,
-            redirect_stdout=True,
             redirect_stderr=True,
+            redirect_stdout=True,
+            transient=True,
         )
         task_id = progress_ctx.add_task(
             "",
-            total=None,
             label="Load",
+            total=None,
         )
         progress_bar = _ProgressBar(progress_ctx, task_id, total=n_chunks)
         progress_ctx.start()
@@ -305,8 +305,8 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
     # the parent handles the interrupt and terminates workers cleanly.
     pool = Pool(
         parse_workers,
-        initializer=signal.signal,
         initargs=(signal.SIGINT, signal.SIG_IGN),
+        initializer=signal.signal,
     )
     try:
         for ipc_dict in pool.imap_unordered(entity.extract_chunk_to_ipc, worker_args):

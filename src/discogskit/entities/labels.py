@@ -222,14 +222,14 @@ assert set(TABLE_WEIGHTS) == set(TABLE_ORDER), (
 # ------------------------------------------------------------------------------------------------------------------------
 
 LABELS_ENTITY = EntityDef(
-    name="labels",
-    root_tag="label",
-    table_order=TABLE_ORDER,
-    schemas=SCHEMAS,
-    table_weights=TABLE_WEIGHTS,
     extract_chunk_to_ipc=extract_chunk_to_ipc,
     find_split_points=find_split_points,
     fk_column="label_id",
+    name="labels",
+    root_tag="label",
+    schemas=SCHEMAS,
+    table_order=TABLE_ORDER,
+    table_weights=TABLE_WEIGHTS,
 )
 
 register(LABELS_ENTITY)

@@ -35,8 +35,8 @@ def _callback(
         typer.Option(
             "--version",
             callback=_version_callback,
-            is_eager=True,
             help="Show version and exit.",
+            is_eager=True,
         ),
     ] = None,
 ) -> None:
@@ -112,8 +112,8 @@ def _print_result(
         flush_total = sum(table_timings.values())
 
         tbl = Table(
-            title=f"Per-table flush ({flush_total:.2f}s)",
             show_edge=False,
+            title=f"Per-table flush ({flush_total:.2f}s)",
             title_style="bold",
         )
         tbl.add_column("Table", style="cyan")
@@ -230,15 +230,15 @@ def convert(
             )
 
             config = pipeline.PipelineConfig(
-                gz_path=gz_path,
-                entity=entity_name,
-                parse_workers=parse_workers,
                 chunk_mb=chunk_mb,
-                write_queue=write_queue,
+                entity=entity_name,
+                gz_path=gz_path,
+                keep_xml=keep_xml,
+                parse_workers=parse_workers,
                 profile=profile,
                 progress=progress,
                 strict=strict,
-                keep_xml=keep_xml,
+                write_queue=write_queue,
             )
             result = pipeline.run(config, writer)
 
@@ -249,8 +249,8 @@ def convert(
                 entity_name,
                 n_tables,
                 entity_def,
-                verb="converted",
                 target=f"{fmt} files",
+                verb="converted",
                 verbose=verbose,
             )
     except (DecompressError, OutputExistsError) as exc:
@@ -354,12 +354,12 @@ def load(
     try:
         writer = get_writer(
             dsn,
-            overwrite=overwrite,
-            unlogged=pg_unlogged,
-            tune=pg_tune,
-            write_workers=write_workers,
-            index_workers=index_workers,
             fk=pg_fk,
+            index_workers=index_workers,
+            overwrite=overwrite,
+            tune=pg_tune,
+            unlogged=pg_unlogged,
+            write_workers=write_workers,
         )
     # Writer construction can fail many ways (bad DSN, driver, connection).
     except Exception as exc:  # noqa: BLE001
@@ -374,15 +374,15 @@ def load(
             )
 
             config = pipeline.PipelineConfig(
-                gz_path=gz_path,
-                entity=entity_name,
-                parse_workers=parse_workers,
                 chunk_mb=chunk_mb,
-                write_queue=write_queue,
+                entity=entity_name,
+                gz_path=gz_path,
+                keep_xml=keep_xml,
+                parse_workers=parse_workers,
                 profile=profile,
                 progress=progress,
                 strict=strict,
-                keep_xml=keep_xml,
+                write_queue=write_queue,
             )
             result = pipeline.run(config, writer)
 

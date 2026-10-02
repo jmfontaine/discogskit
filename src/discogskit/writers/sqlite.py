@@ -142,9 +142,9 @@ class SQLiteWriter:
             ddl = generate_ddl(
                 t,
                 entity.schemas[t],
-                pk_column=pk_col,
                 fk_column=fk_col if t != root and self._fk else None,
                 fk_ref_table=root if t != root and self._fk else None,
+                pk_column=pk_col,
             )
             cur.execute(ddl)
 

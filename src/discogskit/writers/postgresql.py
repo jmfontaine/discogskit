@@ -177,7 +177,7 @@ class _Closeable(Protocol):
 
 def _close_with_timeout(conn: _Closeable, timeout: float, log: logging.Logger) -> None:
     """Call ``conn.close()`` in a thread, abandoning it after *timeout* seconds."""
-    t = Thread(target=conn.close, daemon=True)
+    t = Thread(daemon=True, target=conn.close)
     t.start()
     t.join(timeout)
     if t.is_alive():

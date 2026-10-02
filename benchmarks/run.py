@@ -198,9 +198,9 @@ def _xml2db_python_cmd(input_path: Path, output_dir: Path) -> list[str]:
 
 TOOLS: dict[str, ToolDef] = {
     "discogskit": ToolDef(
-        name="discogskit",
         build_cmd=_discogskit_cmd,
         default_runs=3,
+        name="discogskit",
         version_cmd=[
             "uv",
             "run",
@@ -211,9 +211,9 @@ TOOLS: dict[str, ToolDef] = {
         ],
     ),
     "xml2db-python": ToolDef(
-        name="xml2db-python",
         build_cmd=_xml2db_python_cmd,
         default_runs=1,
+        name="xml2db-python",
     ),
 }
 
@@ -277,7 +277,7 @@ def _get_version(tool: ToolDef) -> str:
         return "unknown"
     try:
         return subprocess.check_output(
-            tool.version_cmd, text=True, stderr=subprocess.STDOUT
+            tool.version_cmd, stderr=subprocess.STDOUT, text=True
         ).strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         return "unknown"
@@ -309,7 +309,7 @@ def _run_once(
     cmd = tool.build_cmd(input_path, output_dir)
 
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False
+        delete=False, mode="w", suffix=".txt"
     ) as time_file:
         time_output_path = Path(time_file.name)
 
@@ -350,13 +350,13 @@ def _run_once(
         )
 
     return RunResult(
-        run_number=run_number,
         command=" ".join(cmd),
-        wall_clock_seconds=stats.get("wall_clock_seconds", 0.0),
-        user_time_seconds=stats.get("user_time_seconds", 0.0),
-        system_time_seconds=stats.get("system_time_seconds", 0.0),
-        max_rss_mb=stats.get("max_rss_mb", 0.0),
         exit_code=stats.get("exit_code", result.returncode),
+        max_rss_mb=stats.get("max_rss_mb", 0.0),
+        run_number=run_number,
+        system_time_seconds=stats.get("system_time_seconds", 0.0),
+        user_time_seconds=stats.get("user_time_seconds", 0.0),
+        wall_clock_seconds=stats.get("wall_clock_seconds", 0.0),
     )
 
 
@@ -436,7 +436,7 @@ def _print_results_table(results: list[BenchmarkResult]) -> None:
             baseline_median = r.stats["wall_clock"]["median"]
             break
 
-    table = Table(show_header=True, header_style="bold")
+    table = Table(header_style="bold", show_header=True)
     table.add_column("Tool")
     table.add_column("Wall Clock", justify="right")
     table.add_column("User", justify="right")
@@ -480,7 +480,7 @@ def _save_results(
     results_dir: Path,
 ) -> Path:
     """Save benchmark results as JSON and return the file path."""
-    results_dir.mkdir(parents=True, exist_ok=True)
+    results_dir.mkdir(exist_ok=True, parents=True)
 
     timestamp = datetime.now(timezone.utc)
     file_stem = input_path.stem.replace(".xml", "")
@@ -537,7 +537,7 @@ app = typer.Typer(help="Benchmark discogskit against alternatives.")
 def main(
     input_file: Annotated[
         Path,
-        typer.Option("--input", "-i", help="Path to Discogs dump file.", exists=True),
+        typer.Option("--input", "-i", exists=True, help="Path to Discogs dump file."),
     ],
     runs: Annotated[
         int,
@@ -603,7 +603,7 @@ def main(
 
     # Create output base directory
     output_base = SCRIPT_DIR / "output"
-    output_base.mkdir(parents=True, exist_ok=True)
+    output_base.mkdir(exist_ok=True, parents=True)
 
     # Run benchmarks
     results: list[BenchmarkResult] = []

@@ -28,7 +28,7 @@ TOOLS: dict[str, dict[str, Any]] = {
 def _run(cmd: list[str], cwd: Path | None = None) -> bool:
     """Run a command, return True on success."""
     try:
-        subprocess.run(cmd, cwd=cwd, check=True, capture_output=True)
+        subprocess.run(cmd, capture_output=True, check=True, cwd=cwd)
         return True
     except subprocess.CalledProcessError as e:
         console.print(f"  [red]Error:[/] {e.stderr.decode()[:200]}")
@@ -80,7 +80,7 @@ def main(
     force: bool = typer.Option(False, help="Re-clone tools even if they exist."),
 ) -> None:
     """Set up all benchmark competitor tools."""
-    ALTERNATIVES_DIR.mkdir(parents=True, exist_ok=True)
+    ALTERNATIVES_DIR.mkdir(exist_ok=True, parents=True)
 
     console.print("[bold]Setting up benchmark alternatives...[/]\n")
 
