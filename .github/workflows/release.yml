@@ -6,8 +6,16 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Linux and macOS; nothing is built or published unless every check passes.
+  qa:
+    name: QA
+    uses: ./.github/workflows/qa.yml
+    with:
+      macos: true
+
   build:
     name: Build wheel and sdist
+    needs: [qa]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

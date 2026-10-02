@@ -5,7 +5,16 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:
+    inputs:
+      macos:
+        description: Also run tests and the type check on macOS
+        default: false
+        type: boolean
   workflow_dispatch:
+
+# Linux job names must stay as they are: the main ruleset requires them by name.
+# Naming a job after matrix values also stops GitHub appending "(ubuntu-latest)".
 
 jobs:
   lint:
@@ -55,8 +64,13 @@ jobs:
         run: uv run deadcode src tests
 
   typecheck:
-    name: Type check
-    runs-on: ubuntu-latest
+    # ty checks against the platform it runs on, so it runs on each OS.
+    name: Type check${{ matrix.os == 'macos-latest' && ' (macOS)' || '' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ inputs.macos && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v7
 
@@ -73,11 +87,12 @@ jobs:
         run: uv run ty check
 
   test:
-    name: Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: Test (Python ${{ matrix.python-version }}${{ matrix.os == 'macos-latest' && ', macOS' || '' }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: ${{ inputs.macos && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
