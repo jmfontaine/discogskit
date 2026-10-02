@@ -88,3 +88,16 @@ class TestSplitFinder:
 
         with pytest.raises(ValueError, match="No .* boundary found"):
             find_splits(str(f), 1024)
+
+    # 0 and -1 terminate even without the check (with wrong splits), so a
+    # regression fails here instead of hanging like --chunk-mb -1 (-1 MiB) did.
+    @pytest.mark.parametrize("target_chunk_bytes", [0, -1])
+    def test_non_positive_chunk_size_raises(
+        self, tmp_path, find_splits, target_chunk_bytes
+    ):
+        items = b"".join(f"<item>{i}</item>\n".encode() for i in range(3))
+        f = tmp_path / "test.xml"
+        f.write_bytes(b"<?xml version='1.0'?>\n<items>\n" + items + b"</items>")
+
+        with pytest.raises(ValueError, match=f"got {target_chunk_bytes}$"):
+            find_splits(str(f), target_chunk_bytes)

@@ -151,15 +151,17 @@ def convert(
     # Performance tuning
     parse_workers: Annotated[
         int,
-        typer.Option(help="Number of parallel parse workers"),
+        typer.Option(help="Number of parallel parse workers", min=1),
     ] = max(1, CPUS // 2),
     chunk_mb: Annotated[
         int,
-        typer.Option(help="Split XML into chunks of roughly this size (MB)"),
+        typer.Option(help="Split XML into chunks of roughly this size (MB)", min=1),
     ] = 256,
     write_queue: Annotated[
         int,
-        typer.Option(help="Max chunks buffered in memory before writes must catch up"),
+        typer.Option(
+            help="Max chunks buffered in memory before writes must catch up", min=1
+        ),
     ] = 2,
     # Behavior
     keep_xml: Annotated[
@@ -284,23 +286,25 @@ def load(
     # Performance tuning
     parse_workers: Annotated[
         int,
-        typer.Option(help="Number of parallel parse workers"),
+        typer.Option(help="Number of parallel parse workers", min=1),
     ] = max(1, CPUS // 2),
     write_workers: Annotated[
         int,
-        typer.Option(help="Number of parallel database write workers"),
+        typer.Option(help="Number of parallel database write workers", min=1),
     ] = 1,
     index_workers: Annotated[
         int,
-        typer.Option(help="Number of parallel index creation workers"),
+        typer.Option(help="Number of parallel index creation workers", min=1),
     ] = 2,
     chunk_mb: Annotated[
         int,
-        typer.Option(help="Split XML into chunks of roughly this size (MB)"),
+        typer.Option(help="Split XML into chunks of roughly this size (MB)", min=1),
     ] = 256,
     write_queue: Annotated[
         int,
-        typer.Option(help="Max chunks buffered in memory before writes must catch up"),
+        typer.Option(
+            help="Max chunks buffered in memory before writes must catch up", min=1
+        ),
     ] = 2,
     # Behavior
     keep_xml: Annotated[
