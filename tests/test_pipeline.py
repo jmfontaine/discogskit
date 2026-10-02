@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import gzip
 import json
 import threading
@@ -224,6 +225,32 @@ class TestPipelineRunInputValidation:
         with sqlite3.connect(db_path) as conn:
             rows = conn.execute("SELECT id, name FROM artists ORDER BY id").fetchall()
         assert rows == [(1, "Test"), (2, "Other")]
+
+
+class TestPipelineRunXmlCleanup:
+    @pytest.mark.parametrize("error", [KeyboardInterrupt, RuntimeError])
+    def test_failed_run_keeps_xml(self, tmp_path, artists_gz, error):
+        """Ctrl+C or any other failure keeps the XML for the next run to reuse."""
+
+        class FailingWriter:
+            def close(self):
+                pass
+
+            def finalize(self, entity):
+                pass
+
+            def setup(self, entity):
+                pass
+
+            def write_chunk(self, ipc_dict, entity, table_timings=None):
+                raise error
+
+        config = dataclasses.replace(_single_chunk_config(artists_gz), keep_xml=False)
+
+        with pytest.raises(error):
+            _run_and_close(config, FailingWriter())
+
+        assert artists_gz.with_suffix("").read_bytes() == _ARTISTS_GZ_XML
 
 
 # ------------------------------------------------------------------------------------------------------------------------

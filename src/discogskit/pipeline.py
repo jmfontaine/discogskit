@@ -338,9 +338,6 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
             pool.terminate()
             pool.join()
             if isinstance(exc, KeyboardInterrupt):
-                # Clean up decompressed XML unless user wants to keep it. Done
-                # before the write wait so a second Ctrl+C can't skip it.
-                xml_lease.release(remove_xml=not config.keep_xml)
                 # The in-flight write can't be interrupted; say why we pause.
                 console.print(
                     "\n  [yellow]Interrupted — waiting for the in-flight write to finish …[/]"
@@ -370,10 +367,11 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
         writer.finalize(entity)
         t_indexes = time.perf_counter() - t2
 
-        # Stage 5: Cleanup
+        # Stage 5: Cleanup. Only a successful run deletes the XML.
         xml_lease.release(remove_xml=not config.keep_xml)
     finally:
-        # Errors other than Ctrl+C keep the XML; release() is a no-op if done.
+        # A failed or interrupted run keeps the complete XML for the next run to
+        # reuse; release() is a no-op if the cleanup above already ran.
         xml_lease.release(remove_xml=False)
 
     t_total = t_decompress + t_load + t_indexes
