@@ -9,8 +9,8 @@ creating the module and adding an import here.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import pyarrow as pa
 
@@ -58,8 +58,7 @@ def detect_entity(filename: str) -> str:
     """
     stem = filename
     for suffix in (".gz", ".xml"):
-        if stem.endswith(suffix):
-            stem = stem[: -len(suffix)]
+        stem = stem.removesuffix(suffix)
     entity = stem.rsplit("_", 1)[-1]
     if entity not in ENTITIES:
         raise ValueError(
@@ -71,7 +70,15 @@ def detect_entity(filename: str) -> str:
 
 
 # Import entity modules to trigger registration.
-from discogskit.entities import artists as _artists  # noqa: E402, F401 — imported after ENTITIES dict for registration side-effects
-from discogskit.entities import labels as _labels  # noqa: E402, F401 — imported after ENTITIES dict for registration side-effects
-from discogskit.entities import masters as _masters  # noqa: E402, F401 — imported after ENTITIES dict for registration side-effects
-from discogskit.entities import releases as _releases  # noqa: E402, F401 — imported after ENTITIES dict for registration side-effects
+from discogskit.entities import (
+    artists as _artists,  # noqa: F401 — imported after ENTITIES dict for registration side-effects
+)
+from discogskit.entities import (
+    labels as _labels,  # noqa: F401 — imported after ENTITIES dict for registration side-effects
+)
+from discogskit.entities import (
+    masters as _masters,  # noqa: F401 — imported after ENTITIES dict for registration side-effects
+)
+from discogskit.entities import (
+    releases as _releases,  # noqa: F401 — imported after ENTITIES dict for registration side-effects
+)

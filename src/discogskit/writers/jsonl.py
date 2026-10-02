@@ -53,12 +53,13 @@ class JSONLWriter:
         t0 = time.perf_counter()
         for table_name in entity.table_order:
             path = entity_dir / f"{table_name}{ext}"
+            # File lifetime is managed by finalize()/close(), not a with-block.
             if self._compression == "gzip":
-                self._files[table_name] = gzip.open(path, "wt", encoding="utf-8")
+                self._files[table_name] = gzip.open(path, "wt", encoding="utf-8")  # noqa: SIM115
             elif self._compression == "bzip2":
-                self._files[table_name] = bz2.open(path, "wt", encoding="utf-8")
+                self._files[table_name] = bz2.open(path, "wt", encoding="utf-8")  # noqa: SIM115
             else:
-                self._files[table_name] = open(path, "w", encoding="utf-8")  # noqa: SIM115 — file lifetime managed by close_all(), not a with-block
+                self._files[table_name] = open(path, "w", encoding="utf-8")  # noqa: SIM115
         codec = f", {self._compression}" if self._compression != "none" else ""
         status(
             "Create",

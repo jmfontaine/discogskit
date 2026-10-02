@@ -13,7 +13,8 @@ from rich.table import Table
 from discogskit import pipeline
 from discogskit._console import console, status
 from discogskit.decompress import DecompressError
-from discogskit.entities import detect_entity, get as get_entity
+from discogskit.entities import detect_entity
+from discogskit.entities import get as get_entity
 from discogskit.writers import OutputExistsError, get_writer
 
 CPUS = os.cpu_count() or 1
@@ -29,7 +30,7 @@ def _version_callback(value: bool) -> None:
 
 @app.callback()
 def _callback(
-    version: Annotated[  # noqa: ARG001
+    version: Annotated[
         bool | None,
         typer.Option(
             "--version",
@@ -258,7 +259,8 @@ def convert(
     except KeyboardInterrupt:
         console.print("\n  [yellow]Interrupted — cleaning up …[/]")
         raise typer.Exit(130) from None
-    except Exception as exc:
+    # Top-level error boundary: any failure becomes a one-line error and exit 1.
+    except Exception as exc:  # noqa: BLE001
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1) from None
     finally:
@@ -359,7 +361,8 @@ def load(
             index_workers=index_workers,
             fk=pg_fk,
         )
-    except Exception as exc:
+    # Writer construction can fail many ways (bad DSN, driver, connection).
+    except Exception as exc:  # noqa: BLE001
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1) from None
     verbose = not progress or profile
@@ -392,7 +395,8 @@ def load(
     except KeyboardInterrupt:
         console.print("\n  [yellow]Interrupted — cleaning up …[/]")
         raise typer.Exit(130) from None
-    except Exception as exc:
+    # Top-level error boundary: any failure becomes a one-line error and exit 1.
+    except Exception as exc:  # noqa: BLE001
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1) from None
     finally:

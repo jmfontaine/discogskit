@@ -33,7 +33,7 @@ class TestGenerateDDL:
         assert "PRIMARY KEY" in ddl
         # PK column should not have DEFAULT
         lines = ddl.split("\n")
-        id_line = [line for line in lines if "id" in line and "PRIMARY KEY" in line][0]
+        id_line = next(line for line in lines if "id" in line and "PRIMARY KEY" in line)
         assert "DEFAULT" not in id_line
 
     def test_fk_column(self):

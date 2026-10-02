@@ -33,13 +33,15 @@ def ensure_xml(gz_path: Path, xml_path: Path, workers: int) -> None:
         return
     t0 = time.perf_counter()
     try:
-        with rapidgzip.open(str(gz_path), parallelization=workers) as fin:
-            with open(xml_path, "wb") as fout:
-                while True:
-                    chunk = fin.read(4 * 1024 * 1024)
-                    if not chunk:
-                        break
-                    fout.write(chunk)
+        with (
+            rapidgzip.open(str(gz_path), parallelization=workers) as fin,
+            open(xml_path, "wb") as fout,
+        ):
+            while True:
+                chunk = fin.read(4 * 1024 * 1024)
+                if not chunk:
+                    break
+                fout.write(chunk)
     except KeyboardInterrupt:  # pragma: no cover
         # Remove partial XML so it won't be treated as cached on next run
         xml_path.unlink(missing_ok=True)

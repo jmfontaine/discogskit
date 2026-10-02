@@ -6,8 +6,7 @@ import os
 
 import pytest
 
-from discogskit.entities import get
-from discogskit.entities import ChunkArgs
+from discogskit.entities import ChunkArgs, get
 from discogskit.entities.artists import extract_chunk_to_ipc as artists_extract
 
 

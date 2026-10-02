@@ -12,7 +12,7 @@ and parse with iterparse.
 from __future__ import annotations
 
 import mmap
-from typing import Callable
+from collections.abc import Callable
 
 
 def make_split_finder(

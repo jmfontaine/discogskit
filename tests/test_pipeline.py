@@ -92,7 +92,7 @@ def _run_or_fail_on_hang(config, writer, timeout=30.0):
         except BaseException as exc:  # noqa: BLE001
             errors.append(exc)
 
-    thread = threading.Thread(target=target, daemon=True)
+    thread = threading.Thread(daemon=True, target=target)
     thread.start()
     thread.join(timeout)
     if thread.is_alive():

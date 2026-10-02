@@ -16,14 +16,14 @@ repos:
       - id: actionlint
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: e05c5c0818279e5ac248ac9e954431ba58865e61  # frozen: v0.15.7
+    rev: f12be1ebaa5351c1fc76472de98db2c3446c8253  # frozen: v0.16.10
     hooks:
       - id: ruff-format
       - id: ruff-check
         args: [--fix]
 
   - repo: https://github.com/tox-dev/pyproject-fmt
-    rev: 351049b3123420b82f0e6389dc9c3ac15c7c72ae  # frozen: v2.20.0
+    rev: 59e7b26529dc6f15c43063064b8b06ded60d0910  # frozen: v2.29.4
     hooks:
       - id: pyproject-fmt
 

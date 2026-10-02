@@ -64,8 +64,8 @@ ini_options.markers = [
 ini_options.filterwarnings = [ "ignore::ResourceWarning" ]
 
 [tool.coverage]
-run.omit = [ "src/discogskit/cli.py" ]
 run.source = [ "discogskit" ]
+run.omit = [ "src/discogskit/cli.py" ]
 
 [tool.deadcode]
 ignore_names = [

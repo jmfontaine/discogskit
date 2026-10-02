@@ -235,7 +235,7 @@ class PostgreSQLWriter:
             if conflict:
                 from discogskit.writers import OutputExistsError
 
-                example = sorted(conflict)[0]
+                example = min(conflict)
                 raise OutputExistsError(
                     f"Tables already exist in the database "
                     f"(e.g. {example}). Use --overwrite to replace them."

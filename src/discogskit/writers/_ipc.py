@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pyarrow as pa
-import pyarrow.ipc as ipc
+from pyarrow import ipc
 
 
 def deserialize_batches(ipc_bytes: bytes) -> list[pa.RecordBatch]:

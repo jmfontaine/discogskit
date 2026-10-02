@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pyarrow as pa
-import pyarrow.ipc as ipc
+from pyarrow import ipc
 
 from discogskit.writers._ipc import deserialize_batches
 

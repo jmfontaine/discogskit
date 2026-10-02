@@ -75,7 +75,8 @@ from rich.text import Text
 
 from discogskit import decompress
 from discogskit._console import console, status
-from discogskit.entities import ChunkArgs, EntityDef, get as get_entity
+from discogskit.entities import ChunkArgs, EntityDef
+from discogskit.entities import get as get_entity
 from discogskit.writers import Writer
 
 

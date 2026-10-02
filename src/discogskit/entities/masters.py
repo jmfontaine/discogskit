@@ -11,8 +11,8 @@ from collections.abc import Callable
 from io import BytesIO
 
 import pyarrow as pa
-import pyarrow.ipc as ipc
 from lxml import etree
+from pyarrow import ipc
 
 from discogskit.entities import ChunkArgs, EntityDef, register
 from discogskit.entities._split import make_split_finder

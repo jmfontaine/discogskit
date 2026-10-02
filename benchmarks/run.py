@@ -316,7 +316,7 @@ def _run_once(
     full_cmd = time_cmd + ["-v", "-o", str(time_output_path)] + cmd
 
     try:
-        result = subprocess.run(full_cmd, capture_output=True, text=True)
+        result = subprocess.run(full_cmd, capture_output=True, check=False, text=True)
     except FileNotFoundError:
         if sys.platform == "darwin":
             console.print(
@@ -377,7 +377,8 @@ def run_benchmark(
     if tool.setup:
         try:
             tool.setup()
-        except Exception:
+        # A competitor tool's setup can fail in any way; skip that tool, keep benchmarking.
+        except Exception:  # noqa: BLE001
             console.print(f"[red]Error:[/] {tool.name} setup failed")
             return None
 

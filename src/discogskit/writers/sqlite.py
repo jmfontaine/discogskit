@@ -113,7 +113,7 @@ class SQLiteWriter:
             if conflict:
                 from discogskit.writers import OutputExistsError
 
-                example = sorted(conflict)[0]
+                example = min(conflict)
                 raise OutputExistsError(
                     f"Tables already exist in {self._path} "
                     f"(e.g. {example}). Use --overwrite to replace them."
