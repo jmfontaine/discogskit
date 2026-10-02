@@ -200,6 +200,32 @@ class TestPipelineRunWriters:
         assert rows == [(1, "Test"), (2, "Other")]
 
 
+class TestPipelineRunInputValidation:
+    def test_input_without_records_keeps_existing_tables(self, tmp_path, artists_gz):
+        """An input with no records fails before ``--overwrite`` drops existing tables."""
+        import sqlite3
+
+        from discogskit.writers.sqlite import SQLiteWriter
+
+        db_path = tmp_path / "out.db"
+        _run_and_close(_single_chunk_config(artists_gz), SQLiteWriter(str(db_path)))
+
+        empty_gz = tmp_path / "empty" / "artists.xml.gz"
+        empty_gz.parent.mkdir()
+        with gzip.open(empty_gz, "wb") as f:
+            f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n</artists>")
+
+        with pytest.raises(ValueError, match="No b'<artist>' elements found"):
+            _run_and_close(
+                _single_chunk_config(empty_gz),
+                SQLiteWriter(str(db_path), overwrite=True),
+            )
+
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute("SELECT id, name FROM artists ORDER BY id").fetchall()
+        assert rows == [(1, "Test"), (2, "Other")]
+
+
 # ------------------------------------------------------------------------------------------------------------------------
 # Integration tests — full pipeline.run()
 # ------------------------------------------------------------------------------------------------------------------------
