@@ -3,7 +3,7 @@
 Architecture
 ============
 
-The pipeline has 5 stages.  Stages 1-3 overlap via a producer/consumer queue::
+The pipeline has 5 stages.  Stages 1-3 overlap via a bounded backlog of pending writes::
 
     .xml.gz file
         |  [Stage 1: Decompress]  rapidgzip (parallel)
@@ -18,9 +18,9 @@ The pipeline has 5 stages.  Stages 1-3 overlap via a producer/consumer queue::
         |         envelope, parses with lxml iterparse, and produces
         |         Arrow IPC buffers (one per normalized table).
         |              |
-        |              v  queue.Queue (bounded, backpressure)
+        |              v  bounded backlog of pending writes (backpressure)
         |              |
-        +---> [Stage 3b: Writer thread]
+        +---> [Stage 3b: Writer thread]  one-worker ThreadPoolExecutor
                   Deserializes IPC, calls writer.write_chunk() which
                   uses ADBC's COPY protocol under the hood.
                        |
@@ -40,20 +40,25 @@ Key design decisions
   IPC byte buffers which cross process boundaries efficiently.
 - **Arrow IPC as inter-process format**: compact (columnar, no copies on
   deserialization), avoids pickling overhead. Buffers are ~150 MB per chunk;
-  the bounded queue (default depth 2) caps memory at ~300 MB.
+  the bounded backlog (default depth 2) caps memory at ~300 MB.
 - **Writer thread**: decouples parsing from database writes.  Without it,
   the main process would sequentially consume an IPC dict and flush it,
-  leaving parse workers idle during flushes. The bounded queue provides
-  backpressure: if the writer falls behind, ``put()`` blocks and parse
-  workers naturally pause.
+  leaving parse workers idle during flushes. The bounded backlog provides
+  backpressure: if the writer falls behind, the main thread waits on the
+  oldest pending write and parse workers naturally pause.
+- **Write futures**: each chunk write is a ``Future``, so a writer error
+  reaches the main thread as soon as the oldest write fails. Writes queued
+  behind a failed one are skipped. Any failure (writer, parser, Ctrl+C)
+  terminates the pool, cancels queued writes and waits for the in-flight
+  one, so the writer is idle before the caller closes it.
 """
 
 from __future__ import annotations
 
-import queue
 import signal
-import threading
 import time
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from multiprocessing import Pool
 from pathlib import Path
@@ -154,63 +159,64 @@ class PipelineResult:
     total_records: int
 
 
-def _writer_thread_fn(
-    writer: Writer,
-    write_q: queue.Queue,
-    n_chunks: int,
-    result: dict,
-    entity: EntityDef,
-    *,
-    profile: bool = False,
-    progress_bar: _ProgressBar | None = None,
-) -> None:
-    """Writer thread: pull IPC dicts from queue, write via the writer."""
-    try:
-        total = 0
-        t_start = time.perf_counter()
-        get_wait = 0.0
-        table_timings = {} if profile else None
+class _ChunkWriter:
+    """Writes one chunk per call and accumulates load statistics.
 
-        while True:
-            t_get = time.perf_counter()
-            ipc_dict = write_q.get()
-            if ipc_dict is None:
-                break
-            if profile:
-                get_wait += time.perf_counter() - t_get
-            t_chunk = time.perf_counter()
-            chunk_count = writer.write_chunk(
-                ipc_dict, entity, table_timings if profile else None
+    Runs only on the single writer-executor thread; ``run()`` reads the
+    statistics after the executor has shut down.
+    """
+
+    def __init__(
+        self,
+        writer: Writer,
+        entity: EntityDef,
+        n_chunks: int,
+        *,
+        profile: bool,
+        progress_bar: _ProgressBar | None,
+    ) -> None:
+        self.chunks_done = 0
+        self.entity = entity
+        # Writer idle time between chunks. High get_wait = parse-bound pipeline.
+        self.get_wait = 0.0
+        self.n_chunks = n_chunks
+        self.progress_bar = progress_bar
+        self.table_timings: dict[str, float] | None = {} if profile else None
+        self.total = 0
+        self.writer = writer
+        self._failed = False
+        self._t_idle = self._t_start = time.perf_counter()
+
+    def write(self, ipc_dict: dict[str, bytes]) -> None:
+        if self._failed:
+            # run() re-raises the earlier failure; writing later chunks would
+            # land data after the reported error.
+            return
+        t_chunk = time.perf_counter()
+        self.get_wait += t_chunk - self._t_idle
+        try:
+            chunk_count = self.writer.write_chunk(
+                ipc_dict, self.entity, self.table_timings
             )
-            chunk_elapsed = time.perf_counter() - t_chunk
-            total += chunk_count
-            elapsed = time.perf_counter() - t_start
-            result["chunks_done"] = result.get("chunks_done", 0) + 1
+        except BaseException:
+            self._failed = True
+            raise
+        self._t_idle = time.perf_counter()
+        chunk_elapsed = self._t_idle - t_chunk
+        elapsed = self._t_idle - self._t_start
+        self.total += chunk_count
+        self.chunks_done += 1
 
-            if progress_bar is not None:
-                avg_rate = total / elapsed if elapsed > 0 else 0
-                progress_bar.update(chunk_count, avg_rate)
-            else:
-                print(
-                    f"  chunk {result['chunks_done']}/{n_chunks}: "
-                    f"{chunk_count:,} {entity.name} ({total:,} total) "
-                    f"[{chunk_count / chunk_elapsed:,.0f} rec/s chunk, "
-                    f"{total / elapsed:,.0f} rec/s avg]"
-                )
-
-        result["total"] = total
-        if profile:
-            assert table_timings is not None
-            # For multi-writer, timings accumulate inside the writer;
-            # merge them into table_timings so both paths produce the same output.
-            get_timings = getattr(writer, "get_table_timings", None)
-            if get_timings is not None:  # pragma: no cover
-                for k, v in get_timings().items():
-                    table_timings[k] = table_timings.get(k, 0.0) + v
-            result["table_timings"] = table_timings
-            result["get_wait"] = get_wait
-    except Exception as exc:
-        result["error"] = exc
+        if self.progress_bar is not None:
+            avg_rate = self.total / elapsed if elapsed > 0 else 0
+            self.progress_bar.update(chunk_count, avg_rate)
+        else:
+            print(
+                f"  chunk {self.chunks_done}/{self.n_chunks}: "
+                f"{chunk_count:,} {self.entity.name} ({self.total:,} total) "
+                f"[{chunk_count / chunk_elapsed:,.0f} rec/s chunk, "
+                f"{self.total / elapsed:,.0f} rec/s avg]"
+            )
 
 
 def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
@@ -243,13 +249,15 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
 
     # Stage 3: Parallel parse + write
     #
-    # Main thread: drains pool.imap_unordered → puts IPC dicts into queue.
-    # Writer thread: pulls IPC dicts from queue → flushes to the database.
+    # Main thread: drains pool.imap_unordered → submits each IPC dict to a
+    # one-worker writer executor and keeps the Future in `pending`.
+    # Writer thread: runs the writes in submission order → flushes to the target.
     #
-    # The bounded queue couples them with backpressure: if the writer falls
-    # behind, put() blocks, which stops the main thread from consuming pool
-    # results, which stops workers from starting new chunks. This naturally
-    # limits memory to ~write_queue × ~150 MB of IPC data.
+    # Backpressure: once more than write_queue chunks wait behind the in-flight
+    # write, the main thread blocks on the oldest Future, which stops it from
+    # consuming pool results, which stops workers from starting new chunks.
+    # This naturally limits memory to ~write_queue × ~150 MB of IPC data.
+    # Waiting on a Future also re-raises a writer error in the main thread.
     t1 = time.perf_counter()
     splits = entity.find_split_points(xml_path, chunk_bytes)
     worker_args = [ChunkArgs(str(xml_path), s, e, config.strict) for s, e in splits]
@@ -282,19 +290,16 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
         progress_bar = _ProgressBar(progress_ctx, task_id, total=n_chunks)
         progress_ctx.start()
 
-    write_q = queue.Queue(maxsize=config.write_queue)
-    writer_result = {}
-    writer_thread = threading.Thread(
-        target=_writer_thread_fn,
-        args=(writer, write_q, n_chunks, writer_result, entity),
-        kwargs={"profile": config.profile, "progress_bar": progress_bar},
-        daemon=True,
+    chunk_writer = _ChunkWriter(
+        writer, entity, n_chunks, profile=config.profile, progress_bar=progress_bar
     )
-    writer_thread.start()
-
-    # put_blocked measures how long the main thread waits for queue space.
-    # High put_blocked = write-bound pipeline.  See --profile output.
+    pending: deque[Future[None]] = deque()
+    # put_blocked measures how long the main thread waits for the writer to
+    # catch up. High put_blocked = write-bound pipeline.  See --profile output.
     put_blocked = 0.0
+    write_executor = ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="discogskit-writer"
+    )
     # Workers ignore SIGINT so they don't dump tracebacks on Ctrl+C;
     # the parent handles the interrupt and terminates workers cleanly.
     pool = Pool(
@@ -304,34 +309,46 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
     )
     try:
         for ipc_dict in pool.imap_unordered(entity.extract_chunk_to_ipc, worker_args):
+            pending.append(write_executor.submit(chunk_writer.write, ipc_dict))
+            # Writes finish in order; reap finished ones so errors surface early.
+            while pending and pending[0].done():
+                pending.popleft().result()
             if config.profile:
                 t_put = time.perf_counter()
-            write_q.put(ipc_dict)  # blocks if queue full (backpressure)
+            while len(pending) > config.write_queue + 1:
+                pending.popleft().result()  # blocks until the writer catches up
             if config.profile:
                 put_blocked += time.perf_counter() - t_put
-    except KeyboardInterrupt:  # pragma: no cover
+        while pending:
+            pending.popleft().result()
+    except BaseException as exc:
         # Stop the progress bar first to restore terminal state
         if progress_ctx is not None:
             progress_ctx.stop()
         pool.terminate()
         pool.join()
-        # Clean up decompressed XML unless user wants to keep it
-        if not config.keep_xml:
-            xml_path.unlink(missing_ok=True)
+        if isinstance(exc, KeyboardInterrupt):
+            # Clean up decompressed XML unless user wants to keep it. Done
+            # before the write wait so a second Ctrl+C can't skip it.
+            if not config.keep_xml:
+                xml_path.unlink(missing_ok=True)
+            # The in-flight write can't be interrupted; say why we pause.
+            console.print(
+                "\n  [yellow]Interrupted — waiting for the in-flight write to finish …[/]"
+            )
+        # Drop queued writes and wait for the in-flight one, so the writer is
+        # idle before the caller closes it.
+        write_executor.shutdown(cancel_futures=True)
         raise
     else:
         pool.close()
         pool.join()
+        write_executor.shutdown()
+    finally:
+        if progress_ctx is not None:
+            progress_ctx.stop()
 
-    write_q.put(None)  # sentinel tells writer thread to exit
-    writer_thread.join()
-
-    if progress_ctx is not None:
-        progress_ctx.stop()
-
-    if "error" in writer_result:
-        raise writer_result["error"]
-    total = writer_result.get("total", 0)
+    total = chunk_writer.total
     t_load = time.perf_counter() - t1
 
     if use_progress and t_load > 0:
@@ -351,10 +368,18 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
 
     profile_data = None
     if config.profile:
+        table_timings = chunk_writer.table_timings
+        assert table_timings is not None
+        # For multi-writer, timings accumulate inside the writer;
+        # merge them into table_timings so both paths produce the same output.
+        get_timings = getattr(writer, "get_table_timings", None)
+        if get_timings is not None:  # pragma: no cover
+            for k, v in get_timings().items():
+                table_timings[k] = table_timings.get(k, 0.0) + v
         profile_data = {
             "put_blocked": put_blocked,
-            "get_wait": writer_result.get("get_wait", 0),
-            "table_timings": writer_result.get("table_timings", {}),
+            "get_wait": chunk_writer.get_wait,
+            "table_timings": table_timings,
         }
 
     return PipelineResult(

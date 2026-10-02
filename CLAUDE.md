@@ -35,7 +35,7 @@ The core is a multi-process pipeline in `src/discogskit/pipeline.py`:
 1. **Decompress** — `rapidgzip` parallel decompression of .xml.gz
 2. **Split** — Memory-mapped scanning for XML element boundaries, producing byte-range chunks (`entities/_split.py`)
 3. **Parse** — `multiprocessing.Pool` workers parse chunks with lxml, emit Arrow IPC buffers
-4. **Write** — Single writer thread deserializes IPC and writes to target format via bounded queue (backpressure)
+4. **Write** — Single writer thread (one-worker `ThreadPoolExecutor`) deserializes IPC and writes to target format; a bounded backlog of pending write futures gives backpressure and re-raises writer errors immediately
 5. **Index/Cleanup** — Parallel index creation for DB targets, optional XML cleanup
 
 Multiprocessing is used because lxml is CPU-bound and holds the GIL. Arrow IPC is the inter-process format (no pickling overhead).

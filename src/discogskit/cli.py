@@ -256,9 +256,7 @@ def convert(
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1) from None
     except KeyboardInterrupt:
-        console.print(
-            "\n  [yellow]Interrupted — cleaning up (Ctrl-C again to force quit) …[/]"
-        )
+        console.print("\n  [yellow]Interrupted — cleaning up …[/]")
         raise typer.Exit(130) from None
     except Exception as exc:
         console.print(f"[red]Error:[/] {exc}")
@@ -392,9 +390,7 @@ def load(
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1) from None
     except KeyboardInterrupt:
-        console.print(
-            "\n  [yellow]Interrupted — cleaning up (Ctrl-C again to force quit) …[/]"
-        )
+        console.print("\n  [yellow]Interrupted — cleaning up …[/]")
         raise typer.Exit(130) from None
     except Exception as exc:
         console.print(f"[red]Error:[/] {exc}")

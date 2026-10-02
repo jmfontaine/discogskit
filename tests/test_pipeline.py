@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import gzip
 import json
+import threading
+import time
 
 import pytest
 
 from discogskit.pipeline import _fmt_time
-
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Helpers
@@ -38,6 +39,66 @@ def artists_gz(tmp_path):
     with gzip.open(gz_path, "wb") as f:
         f.write(_ARTISTS_GZ_XML)
     return gz_path
+
+
+# Enough artists for several 1 MB chunks, so more chunks exist than the write
+# backlog (write_queue + the in-flight write) can hold.
+_MANY_ARTISTS = 60_000
+
+
+def _many_artists_gz(gz_path, bad_id_at=None):
+    """Write a multi-chunk artists .xml.gz; ``bad_id_at`` gets a non-numeric id."""
+    body = b"".join(
+        b"<artist>\n  <id>%s</id>\n  <name>Artist %d</name>\n"
+        b"  <data_quality>Correct</data_quality>\n</artist>\n"
+        % (b"x" if i == bad_id_at else b"%d" % i, i)
+        for i in range(1, _MANY_ARTISTS + 1)
+    )
+    # 1 MB chunks: need more than write_queue (2) + 1 in-flight chunks.
+    assert len(body) > 4 * 1024 * 1024
+    with gzip.open(gz_path, "wb", compresslevel=1) as f:
+        f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
+        f.write(body)
+        f.write(b"</artists>")
+    return gz_path
+
+
+def _multi_chunk_config(gz_path):
+    from discogskit import pipeline
+
+    return pipeline.PipelineConfig(
+        chunk_mb=1,
+        entity="artists",
+        gz_path=gz_path,
+        keep_xml=True,
+        parse_workers=2,
+        profile=False,
+        progress=False,
+        strict=False,
+        write_queue=2,
+    )
+
+
+def _run_or_fail_on_hang(config, writer, timeout=30.0):
+    """Run the pipeline on a helper thread so a hang fails the test, not the suite."""
+    from discogskit import pipeline
+
+    errors: list[BaseException] = []
+
+    def target():
+        try:
+            pipeline.run(config, writer)
+        # Hand any error to the test thread, which re-raises it.
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        pytest.fail(f"pipeline.run did not return within {timeout}s")
+    if errors:
+        raise errors[0]
 
 
 # ------------------------------------------------------------------------------------------------------------------------
@@ -175,34 +236,76 @@ class TestPipelineRun:
         xml_path = artists_gz.with_suffix("")
         assert xml_path.exists()
 
-    def test_writer_error_propagated(self, tmp_path, artists_gz):
-        """Writer thread errors are re-raised in the main thread."""
-        from discogskit import pipeline
+    def test_parse_error_stops_writer_before_close(self, tmp_path):
+        """A worker parse error surfaces as-is and leaves the writer idle for close()."""
 
-        class FailingWriter:
-            def setup(self, entity):
-                pass
+        class SlowTrackingWriter:
+            """Writer slower than the parser, so writes are queued when parsing fails."""
 
-            def write_chunk(self, ipc_dict, entity, table_timings=None):
-                raise RuntimeError("intentional failure")
+            def __init__(self):
+                self.active_at_close = 0
+                self.active_writes = 0
+                self.closed = False
+                self.writes_after_close = 0
+
+            def close(self):
+                self.active_at_close = self.active_writes
+                self.closed = True
 
             def finalize(self, entity):
                 pass
 
+            def setup(self, entity):
+                pass
+
+            def write_chunk(self, ipc_dict, entity, table_timings=None):
+                if self.closed:
+                    self.writes_after_close += 1
+                self.active_writes += 1
+                time.sleep(0.2)
+                self.active_writes -= 1
+                return 0
+
+        gz_path = _many_artists_gz(tmp_path / "artists.xml.gz", bad_id_at=_MANY_ARTISTS)
+        writer = SlowTrackingWriter()
+
+        with pytest.raises(ValueError, match="invalid literal for int"):
+            try:
+                _run_or_fail_on_hang(_multi_chunk_config(gz_path), writer)
+            finally:
+                writer.close()  # mirrors the CLI's `finally: writer.close()`
+
+        # A regressed writer is mid-write at close(); give it time to start another.
+        time.sleep(0.5)
+        assert writer.active_at_close == 0
+        assert writer.writes_after_close == 0
+
+    def test_writer_error_does_not_hang(self, tmp_path):
+        """A writer failing on chunk 1 of more chunks than the backlog holds re-raises."""
+
+        class FailingWriter:
+            def __init__(self):
+                self.calls = 0
+
             def close(self):
                 pass
 
-        config = pipeline.PipelineConfig(
-            chunk_mb=1,
-            entity="artists",
-            gz_path=artists_gz,
-            keep_xml=False,
-            parse_workers=1,
-            profile=False,
-            progress=False,
-            strict=False,
-            write_queue=2,
-        )
+            def finalize(self, entity):
+                pass
 
-        with pytest.raises(RuntimeError, match="intentional failure"):
-            pipeline.run(config, FailingWriter())
+            def setup(self, entity):
+                pass
+
+            def write_chunk(self, ipc_dict, entity, table_timings=None):
+                self.calls += 1
+                time.sleep(0.3)  # let later chunks queue behind this write
+                raise RuntimeError("disk full")
+
+        gz_path = _many_artists_gz(tmp_path / "artists.xml.gz")
+        writer = FailingWriter()
+
+        with pytest.raises(RuntimeError, match="disk full"):
+            _run_or_fail_on_hang(_multi_chunk_config(gz_path), writer)
+
+        # Chunks queued behind the failed write must not be written.
+        assert writer.calls == 1
