@@ -144,6 +144,11 @@ discogskit convert --format parquet --keep-xml discogs_20260301_releases.xml.gz
 
 Load Discogs XML dumps into a database.
 
+In PostgreSQL, tables are created in the current schema, the first existing schema on `search_path` (usually
+`public`). Without `--overwrite`, the load stops if any of its tables already exist there. With `--overwrite`, the
+existing tables are dropped and recreated, all in one transaction; if your own views or foreign keys depend on them,
+the load stops and lists those objects instead of dropping them.
+
 | Database | Versions |
 |----------|----------|
 | SQLite | 3.x |

@@ -220,27 +220,42 @@ class PostgreSQLWriter:
         self._setup_called = False
 
     def setup(self, entity: EntityDef) -> None:
-        """Apply tuning, drop/create tables, set up ADBC connections."""
+        """Apply tuning, drop/create tables in the current schema, set up ADBC."""
         import adbc_driver_postgresql.dbapi as adbc_pg
+        import psycopg
+
+        from discogskit.writers import OutputExistsError
+
+        # Unqualified CREATE TABLE lands in current_schema(); every check and drop
+        # names it explicitly, so a same-named table elsewhere on search_path is
+        # never mistaken for ours.
+        row = self._conn.execute("SELECT current_schema()").fetchone()
+        schema = row[0] if row else None
+        if schema is None:
+            raise ValueError(
+                "No schema to create tables in: search_path names no existing schema"
+            )
 
         if not self._overwrite:
             existing = {
                 row[0]
                 for row in self._conn.execute(
                     "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+                    "WHERE table_schema = %s AND table_type = 'BASE TABLE'",
+                    (schema,),
                 )
             }
             conflict = existing & set(entity.table_order)
             if conflict:
-                from discogskit.writers import OutputExistsError
-
                 example = min(conflict)
                 raise OutputExistsError(
-                    f"Tables already exist in the database "
+                    f"Tables already exist in schema {schema} "
                     f"(e.g. {example}). Use --overwrite to replace them."
                 )
 
+        # Before the DDL: if tuning fails (ALTER SYSTEM needs superuser), the
+        # existing tables are still intact. A refused drop below still resets
+        # it, in close().
         if self._tune:
             status("Tune", "max_wal_size=16GB, checkpoint_completion_target=0.9")
             self._conn.execute("ALTER SYSTEM SET max_wal_size = '16GB'")
@@ -248,16 +263,28 @@ class PostgreSQLWriter:
             self._conn.execute("SELECT pg_reload_conf()")
             self._tuning_applied = True
 
-        # Drop and recreate tables
+        # Drop and recreate tables in one transaction, so a refused drop leaves
+        # every table as it was. One DROP for all tables: foreign keys between
+        # them don't block it, and PostgreSQL lists every outside dependent.
         t_ddl = time.perf_counter()
-        for t in reversed(entity.table_order):
-            self._conn.execute(
-                sql.SQL("DROP TABLE IF EXISTS {} CASCADE").format(sql.Identifier(t))
-            )
-        for t in entity.table_order:
-            self._conn.execute(
-                generate_ddl(t, entity.schemas[t], unlogged=self._unlogged)
-            )
+        tables = sql.SQL(", ").join(
+            sql.Identifier(schema, t) for t in entity.table_order
+        )
+        with self._conn.transaction():
+            try:
+                self._conn.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(tables))
+            except psycopg.errors.DependentObjectsStillExist as exc:
+                detail = exc.diag.message_detail or ""
+                dependents = "".join(f"\n  {line}" for line in detail.splitlines())
+                raise OutputExistsError(
+                    f"Can't overwrite tables in schema {schema}: other objects "
+                    f"depend on them.{dependents}\n"
+                    "Drop or change those objects first, or load into another schema."
+                ) from None
+            for t in entity.table_order:
+                self._conn.execute(
+                    generate_ddl(t, entity.schemas[t], unlogged=self._unlogged)
+                )
 
         n_tables = len(entity.table_order)
         mode_label = "unlogged " if self._unlogged else ""

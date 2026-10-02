@@ -3,11 +3,25 @@
 from __future__ import annotations
 
 import os
+import uuid
+from urllib.parse import urlsplit
 
 import pytest
 
 from discogskit.entities import ChunkArgs, get
 from discogskit.entities.artists import extract_chunk_to_ipc as artists_extract
+
+
+def _load(dsn, entity, ipc_dict, **options):
+    from discogskit.writers.postgresql import PostgreSQLWriter
+
+    writer = PostgreSQLWriter(dsn, **options)
+    try:
+        writer.setup(entity)
+        writer.write_chunk(ipc_dict, entity)
+        writer.finalize(entity)
+    finally:
+        writer.close()
 
 
 @pytest.mark.integration
@@ -283,6 +297,155 @@ class TestPostgreSQLWriter:
                 "WHERE constraint_type = 'FOREIGN KEY' AND table_schema = 'public'"
             ).fetchall()
             assert len(fks) == len(entity.table_order) - 1
+
+
+@pytest.mark.integration
+class TestOverwriteSafety:
+    """``--overwrite`` replaces only discogskit's own tables, in the schema it loads into."""
+
+    @pytest.fixture()
+    def entity(self):
+        return get("artists")
+
+    @pytest.fixture()
+    def ipc_dict(self, artists_xml_file):
+        size = os.path.getsize(artists_xml_file)
+        return artists_extract(ChunkArgs(str(artists_xml_file), 0, size))
+
+    @pytest.fixture()
+    def schemas(self, pg_dsn):
+        """Fresh ``target`` and ``other`` schemas, and a DSN with search_path = target, other."""
+        import psycopg
+        from psycopg import sql
+
+        suffix = uuid.uuid4().hex[:8]
+        target, other = f"target_{suffix}", f"other_{suffix}"
+        with psycopg.connect(pg_dsn, autocommit=True) as conn:
+            for name in (target, other):
+                conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(name)))
+        yield target, other, f"{pg_dsn}?options=-csearch_path%3D{target}%2C{other}"
+        with psycopg.connect(pg_dsn, autocommit=True) as conn:
+            for name in (target, other):
+                conn.execute(
+                    sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(name))
+                )
+
+    def test_refuses_to_drop_tables_other_objects_depend_on(
+        self, entity, ipc_dict, schemas
+    ):
+        import psycopg
+        from psycopg import sql
+
+        from discogskit.writers import OutputExistsError
+
+        target, _, dsn = schemas
+        _load(dsn, entity, ipc_dict, overwrite=True)
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute("CREATE VIEW artist_names AS SELECT name FROM artists")
+            conn.execute("CREATE VIEW alias_names AS SELECT * FROM artist_aliases")
+
+        with pytest.raises(OutputExistsError) as excinfo:
+            _load(dsn, entity, ipc_dict, overwrite=True)
+        # Every blocker is listed, not just the first table's.
+        assert "artist_names" in str(excinfo.value)
+        assert "alias_names" in str(excinfo.value)
+
+        # All or nothing: no table was dropped, not even ones the view doesn't use.
+        with psycopg.connect(dsn) as conn:
+            counts = {
+                t: conn.execute(
+                    sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(target, t))
+                ).fetchone()
+                for t in entity.table_order
+            }
+            view = conn.execute("SELECT COUNT(*) FROM artist_names").fetchone()
+        assert counts["artists"] == (2,)
+        assert counts["artist_aliases"] == (1,)
+        assert view == (2,)
+
+    def test_loads_into_current_schema_leaving_same_names_elsewhere_alone(
+        self, entity, ipc_dict, schemas
+    ):
+        """search_path = target, other: unqualified DROP would hit other.artists."""
+        import psycopg
+        from psycopg import sql
+
+        target, other, dsn = schemas
+        other_artists = sql.Identifier(other, "artists")
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute(sql.SQL("CREATE TABLE {} (id integer)").format(other_artists))
+            conn.execute(sql.SQL("INSERT INTO {} VALUES (42)").format(other_artists))
+
+        _load(dsn, entity, ipc_dict, overwrite=False)
+
+        with psycopg.connect(dsn) as conn:
+            loaded = conn.execute(
+                sql.SQL("SELECT COUNT(*) FROM {}").format(
+                    sql.Identifier(target, "artists")
+                )
+            ).fetchone()
+            untouched = conn.execute(
+                sql.SQL("SELECT id FROM {}").format(other_artists)
+            ).fetchall()
+        assert loaded == (2,)
+        assert untouched == [(42,)]
+
+    def test_existing_tables_in_current_schema_need_overwrite(
+        self, entity, ipc_dict, schemas
+    ):
+        from discogskit.writers import OutputExistsError
+
+        _, _, dsn = schemas
+        _load(dsn, entity, ipc_dict, overwrite=False)
+
+        with pytest.raises(OutputExistsError, match="--overwrite"):
+            _load(dsn, entity, ipc_dict, overwrite=False)
+
+    def test_failed_tuning_leaves_existing_tables_intact(
+        self, entity, ipc_dict, pg_dsn, schemas
+    ):
+        """--pg-tune needs ALTER SYSTEM, which a table-owning role usually lacks.
+
+        It must fail before the drop, or --overwrite would leave empty tables.
+        """
+        import psycopg
+        from psycopg import sql
+
+        target, _, _ = schemas
+        role = f"loader_{uuid.uuid4().hex[:8]}"
+        parts = urlsplit(pg_dsn)
+        role_dsn = (
+            parts._replace(netloc=f"{role}:pw@{parts.hostname}:{parts.port}").geturl()
+            + f"?options=-csearch_path%3D{target}"
+        )
+        with psycopg.connect(pg_dsn, autocommit=True) as conn:
+            conn.execute(
+                sql.SQL("CREATE ROLE {} LOGIN PASSWORD 'pw'").format(
+                    sql.Identifier(role)
+                )
+            )
+            conn.execute(
+                sql.SQL("GRANT USAGE, CREATE ON SCHEMA {} TO {}").format(
+                    sql.Identifier(target), sql.Identifier(role)
+                )
+            )
+        try:
+            _load(role_dsn, entity, ipc_dict, overwrite=True)
+
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                _load(role_dsn, entity, ipc_dict, overwrite=True, tune=True)
+
+            with psycopg.connect(pg_dsn) as conn:
+                count = conn.execute(
+                    sql.SQL("SELECT COUNT(*) FROM {}").format(
+                        sql.Identifier(target, "artists")
+                    )
+                ).fetchone()
+            assert count == (2,)
+        finally:
+            with psycopg.connect(pg_dsn, autocommit=True) as conn:
+                conn.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
+                conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
 
 
 class TestSplitTableGroups:
