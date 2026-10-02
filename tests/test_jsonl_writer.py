@@ -116,12 +116,35 @@ class TestJSONLWriter:
         assert count == 0
         assert "artists" in timings
 
-    def test_close_without_finalize(self, tmp_path, entity, ipc_dict):
-        """close() without finalize() should not error."""
-        writer = JSONLWriter(str(tmp_path))
+    @pytest.mark.parametrize("compression", ["bzip2", "gzip", "none"])
+    def test_close_without_finalize_leaves_no_output(
+        self, tmp_path, entity, ipc_dict, compression
+    ):
+        """A run that fails before finalize() leaves no final-named or staged files."""
+        out = tmp_path / "out"
+        writer = JSONLWriter(str(out), compression=compression)
         writer.setup(entity)
         writer.write_chunk(ipc_dict, entity)
         writer.close()
+
+        assert list(out.iterdir()) == []
+
+    def test_failed_overwrite_keeps_previous_output(self, tmp_path, entity, ipc_dict):
+        """With overwrite=True, a run that fails before finalize() keeps the old files."""
+        out = tmp_path / "out"
+        writer = JSONLWriter(str(out))
+        writer.setup(entity)
+        writer.write_chunk(ipc_dict, entity)
+        writer.finalize(entity)
+        entity_dir = out / "artists"
+        before = {p.name: p.read_bytes() for p in entity_dir.iterdir()}
+
+        writer2 = JSONLWriter(str(out), overwrite=True)
+        writer2.setup(entity)
+        writer2.close()
+
+        assert {p.name: p.read_bytes() for p in entity_dir.iterdir()} == before
+        assert [p.name for p in out.iterdir()] == ["artists"]
 
     def test_overwrite_raises_when_output_exists(self, tmp_path, entity, ipc_dict):
         """setup() raises OutputExistsError when files exist and overwrite=False."""

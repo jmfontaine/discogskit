@@ -83,12 +83,49 @@ class TestParquetWriter:
         assert count == 0
         assert "artists" in timings
 
-    def test_close_without_finalize(self, tmp_path, entity, ipc_dict):
-        """close() without finalize() should not error."""
-        writer = ParquetWriter(str(tmp_path))
+    def test_close_without_finalize_leaves_no_output(self, tmp_path, entity, ipc_dict):
+        """A run that fails before finalize() leaves no final-named or staged files."""
+        out = tmp_path / "out"
+        writer = ParquetWriter(str(out))
         writer.setup(entity)
         writer.write_chunk(ipc_dict, entity)
         writer.close()
+
+        assert list(out.iterdir()) == []
+
+    def test_failed_run_does_not_disturb_concurrent_run(
+        self, tmp_path, entity, ipc_dict
+    ):
+        """Two runs stage into one output dir: one failing before finalize() keeps the other's files."""
+        out = tmp_path / "out"
+        failing = ParquetWriter(str(out))
+        succeeding = ParquetWriter(str(out))
+        failing.setup(entity)
+        succeeding.setup(entity)
+        succeeding.write_chunk(ipc_dict, entity)
+        failing.close()
+        succeeding.finalize(entity)
+        succeeding.close()
+
+        assert pq.read_table(str(out / "artists" / "artists.parquet")).num_rows == 2
+        assert [p.name for p in out.iterdir()] == ["artists"]
+
+    def test_failed_overwrite_keeps_previous_output(self, tmp_path, entity, ipc_dict):
+        """With overwrite=True, a run that fails before finalize() keeps the old files."""
+        out = tmp_path / "out"
+        writer = ParquetWriter(str(out))
+        writer.setup(entity)
+        writer.write_chunk(ipc_dict, entity)
+        writer.finalize(entity)
+        entity_dir = out / "artists"
+        before = {p.name: p.read_bytes() for p in entity_dir.iterdir()}
+
+        writer2 = ParquetWriter(str(out), overwrite=True)
+        writer2.setup(entity)
+        writer2.close()
+
+        assert {p.name: p.read_bytes() for p in entity_dir.iterdir()} == before
+        assert [p.name for p in out.iterdir()] == ["artists"]
 
     def test_overwrite_raises_when_output_exists(self, tmp_path, entity, ipc_dict):
         """setup() raises OutputExistsError when files exist and overwrite=False."""

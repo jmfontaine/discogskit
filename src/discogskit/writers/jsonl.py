@@ -2,6 +2,7 @@
 
 Arrow list columns become JSON arrays via ``to_pylist()``, so no manual
 conversion is needed. Optional gzip compression produces ``.jsonl.gz`` files.
+Files are staged and only moved to their final names by ``finalize()``.
 """
 
 from __future__ import annotations
@@ -10,11 +11,13 @@ import bz2
 import gzip
 import json
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
 from discogskit._console import status
 from discogskit.writers._ipc import deserialize_batches
+from discogskit.writers._staging import StagedFiles
 
 if TYPE_CHECKING:
     from discogskit.entities import EntityDef
@@ -33,6 +36,7 @@ class JSONLWriter:
         self._compression = compression
         self._overwrite = overwrite
         self._files: dict[str, IO] = {}
+        self._staged: StagedFiles | None = None
 
     def setup(self, entity: EntityDef) -> None:
         entity_dir = self._output_dir / entity.name
@@ -48,11 +52,15 @@ class JSONLWriter:
                     f"(e.g. {existing[0]}). Use --overwrite to replace them."
                 )
 
-        entity_dir.mkdir(parents=True, exist_ok=True)
+        self._staged = StagedFiles(
+            self._output_dir,
+            entity.name,
+            [f"{table_name}{ext}" for table_name in entity.table_order],
+        )
 
         t0 = time.perf_counter()
         for table_name in entity.table_order:
-            path = entity_dir / f"{table_name}{ext}"
+            path = self._staged.path(f"{table_name}{ext}")
             # File lifetime is managed by finalize()/close(), not a with-block.
             if self._compression == "gzip":
                 self._files[table_name] = gzip.open(path, "wt", encoding="utf-8")  # noqa: SIM115
@@ -99,18 +107,24 @@ class JSONLWriter:
         return count
 
     def finalize(self, entity: EntityDef) -> None:
-        entity_dir = self._output_dir / entity.name
-        ext = _COMPRESSED_EXT.get(self._compression, ".jsonl")
-        total_bytes = 0
-        for table_name, f in self._files.items():
-            f.flush()
-            f.close()
-            total_bytes += (entity_dir / f"{table_name}{ext}").stat().st_size
-        total_mb = total_bytes / (1024 * 1024)
-        status("Output", f"{len(self._files)} files, {total_mb:,.1f} MB total")
-        self._files.clear()
-
-    def close(self) -> None:
+        assert self._staged is not None, "finalize() called before setup()"
+        n_files = len(self._files)
         for f in self._files.values():
             f.close()
         self._files.clear()
+        total_bytes = self._staged.commit()
+        self._staged = None
+        total_mb = total_bytes / (1024 * 1024)
+        status("Output", f"{n_files} files, {total_mb:,.1f} MB total")
+
+    def close(self) -> None:
+        """Release file handles; output not committed by ``finalize()`` is deleted."""
+        for f in self._files.values():
+            # The file is discarded below, so a failing flush doesn't matter and
+            # must not replace the error that aborted the run.
+            with suppress(Exception):
+                f.close()
+        self._files.clear()
+        if self._staged is not None:
+            self._staged.discard()
+            self._staged = None

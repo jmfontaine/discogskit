@@ -56,6 +56,12 @@ uvx discogskit
 
 Convert Discogs XML dumps into flat files.
 
+Each entity gets its own directory, e.g. `<output>/artists/artists.parquet`. Files are written to a temporary
+directory and moved into place, one at a time, only after all of them are complete. If a run fails before that
+point, no files appear under their final names and any previous output stays unchanged, including with
+`--overwrite`. Don't run two conversions of the same entity into the same output directory at once: their files can
+end up mixed. A process killed mid-run can leave an `<entity>.partial-*` directory behind; it's safe to delete.
+
 | Option | Values |
 |-----------------|-------------------------------|
 | Output formats | `parquet`, `jsonl` |
