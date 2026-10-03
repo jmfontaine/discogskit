@@ -67,6 +67,7 @@ Before finishing a change, run `just format && just lint-fix && just type-check 
 
 ## Design principles
 
+- **Never assume anything about Discogs data; always confirm** — The dumps are inconsistent in many surprising ways. Don't rely on any property of their content or formatting (line breaks, indentation, nesting, comments/CDATA, encoding, which fields are present, value types, unique IDs) unless it's confirmed against real dumps, and even then handle the other cases or fail loudly. Mark an unconfirmed claim as an assumption; never base a design on one.
 - **Fail early, fail hard** — Discogs data can be inconsistent. Never silently ingest bad data. Validation errors surface at parse time. When in doubt, reject with a helpful error.
 - **Explicit over implicit** — No magic auto-discovery. Users specify exactly what to process.
 - **Profile before optimizing** — Don't optimize on speculation. Measure first.
