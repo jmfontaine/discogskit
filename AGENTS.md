@@ -34,7 +34,7 @@ The core is a multi-process pipeline in `src/discogskit/pipeline.py`:
 
 1. **Decompress** — `rapidgzip` parallel decompression of .xml.gz; a `filelock.ReadWriteLock` on `<name>.xml.lock` lets concurrent runs share the XML (write lock to decompress/delete, read lock to read)
 2. **Split** — Memory-mapped scanning for XML element boundaries, producing byte-range chunks (`entities/_split.py`)
-3. **Parse** — `multiprocessing.Pool` workers parse chunks with lxml, emit Arrow IPC buffers
+3. **Parse** — `multiprocessing.Pool` workers run the shared `entities/_worker.py` worker on each chunk with lxml and emit Arrow IPC buffers
 4. **Write** — Single writer thread (one-worker `ThreadPoolExecutor`) deserializes IPC and writes to target format; a bounded backlog of pending write futures gives backpressure and re-raises writer errors immediately
 5. **Index/Cleanup** — Parallel index creation for DB targets, optional XML cleanup
 
@@ -42,18 +42,18 @@ Multiprocessing is used because lxml is CPU-bound and holds the GIL. Arrow IPC i
 
 ### Key modules
 
-- **`entities/`** — One module per Discogs entity (artists, labels, masters, releases). Each defines table schemas, XML→Arrow parsing, and DDL for SQL targets. Releases is the most complex (12 normalized tables).
+- **`entities/`** — One module per Discogs entity (artists, labels, masters, releases) with its table schemas and record parser, plus the shared splitter (`_split.py`) and chunk worker (`_worker.py`). Writers generate SQL DDL from the schemas. Releases is the most complex (12 normalized tables).
 - **`writers/`** — Output format implementations (parquet, jsonl, sqlite, postgresql). Factory in `__init__.py` selects writer by format string.
 - **`cli.py`** — Typer CLI with `convert` and `load` commands.
 - **`decompress.py`** — Gzip decompression wrapper using rapidgzip; `ensure_xml` returns an `XmlLease` the pipeline holds while it reads the XML.
 
 ### Entity pattern
 
-Each entity module (e.g., `artists.py`) follows the same structure:
-- Dataclass with table schemas as `dict[str, pa.Schema]` for Arrow
-- `parse(chunk_bytes) -> list[pa.RecordBatch]` for XML parsing
-- `ddl_sqlite()` / `ddl_postgresql()` for SQL table/index creation
-- Registered in `entities/__init__.py`
+Each entity module (e.g., `artists.py`) defines this interface, plus any private helpers its parser needs (e.g. `_parse_refs`):
+- `SCHEMAS: dict[str, pa.Schema]` — one Arrow schema per table; the first table is the root table, and dict order is the table order
+- `TABLE_WEIGHTS` — relative flush cost per table, used to balance PostgreSQL write workers
+- `append_record(cols, elem, unknown)` — parses one record element into the column accumulators
+- A `register(EntityDef(...))` call. `name` is the XML container (`artists`), which the worker uses for the XML envelope; `root_tag` is the record element (`artist`), which the splitter uses for its patterns and the worker for the records it parses
 
 ## Testing
 

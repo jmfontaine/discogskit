@@ -1,15 +1,17 @@
-"""Tests for make_split_finder() — mmap-based XML splitting."""
+"""Tests for find_split_points() — mmap-based XML splitting."""
 
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
 
-from discogskit.entities._split import make_split_finder
+from discogskit.entities._split import find_split_points
 
 
 @pytest.fixture()
 def find_splits():
-    return make_split_finder(b"<item>", b"</item>\n")
+    return partial(find_split_points, tag="item")
 
 
 class TestSplitFinder:
@@ -28,6 +30,21 @@ class TestSplitFinder:
         chunk = content[start:end]
         assert b"<item>1</item>" in chunk
         assert b"<item>2</item>" in chunk
+
+    @pytest.mark.parametrize("first", [b'<item id="1">a</item>', b"<item>a</item>"])
+    def test_data_starts_at_first_record_not_container(
+        self, tmp_path, find_splits, first
+    ):
+        """The container <items> shares the "<item" prefix; the first record may have attributes."""
+        content = (
+            b"<?xml version='1.0'?>\n<items>\n" + first + b"\n<item>b</item>\n</items>"
+        )
+        f = tmp_path / "test.xml"
+        f.write_bytes(content)
+
+        [(start, end)] = find_splits(str(f), 1024 * 1024)
+
+        assert content[start:end] == first + b"\n<item>b</item>\n"
 
     def test_multiple_chunks(self, tmp_path, find_splits):
         """Many items with small target → multiple chunks."""

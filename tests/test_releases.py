@@ -5,14 +5,17 @@ from __future__ import annotations
 import os
 
 from discogskit.entities import ChunkArgs
-from discogskit.entities.releases import SCHEMAS, extract_chunk_to_ipc
+from discogskit.entities._worker import extract_chunk_to_ipc
+from discogskit.entities.releases import SCHEMAS
 from tests.conftest import ipc_to_tables
 
 
 class TestReleasesParsing:
     def _parse(self, releases_xml_file):
         size = os.path.getsize(releases_xml_file)
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(releases_xml_file), 0, size))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("releases", str(releases_xml_file), 0, size)
+        )
         return ipc_to_tables(ipc_dict, SCHEMAS)
 
     def test_releases_table(self, releases_xml_file):
@@ -128,7 +131,9 @@ class TestReleasesParsing:
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(f), 0, os.path.getsize(f)))
+            ipc_dict = extract_chunk_to_ipc(
+                ChunkArgs("releases", str(f), 0, os.path.getsize(f))
+            )
             tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         assert tables["releases"].num_rows == 0
@@ -151,7 +156,9 @@ class TestReleasesParsing:
         f = tmp_path / "missing_vs_empty.xml"
         f.write_text(xml)
 
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(f), 0, os.path.getsize(f)))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("releases", str(f), 0, os.path.getsize(f))
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         rel = tables["releases"].to_pylist()[0]
@@ -185,7 +192,9 @@ class TestReleasesParsing:
         f = tmp_path / "bad_dur.xml"
         f.write_text(xml)
 
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(f), 0, os.path.getsize(f)))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("releases", str(f), 0, os.path.getsize(f))
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         assert tables["release_videos"].column("duration").to_pylist() == [0]
@@ -224,7 +233,9 @@ class TestReleasesParsing:
         f = tmp_path / "bogus_tags.xml"
         f.write_text(xml)
 
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(f), 0, os.path.getsize(f)))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("releases", str(f), 0, os.path.getsize(f))
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         assert tables["release_artists"].num_rows == 1

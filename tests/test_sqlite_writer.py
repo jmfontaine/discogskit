@@ -9,13 +9,14 @@ import sqlite3
 import pytest
 
 from discogskit.entities import ChunkArgs, get
-from discogskit.entities.artists import extract_chunk_to_ipc as artists_extract
+from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers.sqlite import SQLiteWriter
 from tests.conftest import (
     ARTISTS_XML,
     LABELS_XML,
     MASTERS_XML,
     RELEASES_XML,
+    empty_ipc,
     ipc_to_tables,
 )
 
@@ -37,7 +38,9 @@ def test_every_entity_loads(tmp_path, entity_name, xml, fk):
     entity = get(entity_name)
     f = tmp_path / f"{entity_name}.xml"
     f.write_text(xml)
-    ipc_dict = entity.extract_chunk_to_ipc(ChunkArgs(str(f), 0, os.path.getsize(f)))
+    ipc_dict = extract_chunk_to_ipc(
+        ChunkArgs(entity_name, str(f), 0, os.path.getsize(f))
+    )
     expected = {
         name: table.num_rows
         for name, table in ipc_to_tables(ipc_dict, entity.schemas).items()
@@ -71,7 +74,9 @@ class TestSQLiteWriter:
     @pytest.fixture()
     def ipc_dict(self, artists_xml_file):
         size = os.path.getsize(artists_xml_file)
-        return artists_extract(ChunkArgs(str(artists_xml_file), 0, size))
+        return extract_chunk_to_ipc(
+            ChunkArgs("artists", str(artists_xml_file), 0, size)
+        )
 
     def test_full_lifecycle(self, tmp_path, entity, ipc_dict):
         db_path = str(tmp_path / "test.db")
@@ -137,10 +142,12 @@ class TestSQLiteWriter:
         f2 = tmp_path / "chunk2.xml"
         f2.write_text(xml2)
 
-        from discogskit.entities.artists import extract_chunk_to_ipc as artists_extract
-
-        ipc1 = artists_extract(ChunkArgs(str(f1), 0, os.path.getsize(f1)))
-        ipc2 = artists_extract(ChunkArgs(str(f2), 0, os.path.getsize(f2)))
+        ipc1 = extract_chunk_to_ipc(
+            ChunkArgs("artists", str(f1), 0, os.path.getsize(f1))
+        )
+        ipc2 = extract_chunk_to_ipc(
+            ChunkArgs("artists", str(f2), 0, os.path.getsize(f2))
+        )
 
         db_path = str(tmp_path / "test.db")
         writer = SQLiteWriter(db_path)
@@ -158,16 +165,11 @@ class TestSQLiteWriter:
 
     def test_empty_chunk_no_error(self, tmp_path, entity):
         """Writing a chunk with zero rows should not error."""
-        # Create IPC dict with empty batches
-        from discogskit.entities.artists import _cols_to_ipc, _new_cols
-
-        empty_ipc = _cols_to_ipc(_new_cols())
-
         db_path = str(tmp_path / "test.db")
         writer = SQLiteWriter(db_path)
         try:
             writer.setup(entity)
-            count = writer.write_chunk(empty_ipc, entity)
+            count = writer.write_chunk(empty_ipc("artists"), entity)
             writer.finalize(entity)
         finally:
             writer.close()
@@ -193,16 +195,14 @@ class TestSQLiteWriter:
 
     def test_empty_batch_with_table_timings(self, tmp_path, entity):
         """Empty batches are timed correctly when table_timings is passed."""
-        from discogskit.entities.artists import _cols_to_ipc, _new_cols
-
-        empty_ipc = _cols_to_ipc(_new_cols())
-
         db_path = str(tmp_path / "test.db")
         writer = SQLiteWriter(db_path)
         try:
             writer.setup(entity)
             timings: dict[str, float] = {}
-            count = writer.write_chunk(empty_ipc, entity, table_timings=timings)
+            count = writer.write_chunk(
+                empty_ipc("artists"), entity, table_timings=timings
+            )
             writer.finalize(entity)
         finally:
             writer.close()

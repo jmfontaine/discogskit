@@ -5,14 +5,17 @@ from __future__ import annotations
 import os
 
 from discogskit.entities import ChunkArgs
-from discogskit.entities.artists import SCHEMAS, extract_chunk_to_ipc
+from discogskit.entities._worker import extract_chunk_to_ipc
+from discogskit.entities.artists import SCHEMAS
 from tests.conftest import ipc_to_tables
 
 
 class TestArtistsParsing:
     def test_extract_chunk(self, artists_xml_file):
         size = os.path.getsize(artists_xml_file)
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(artists_xml_file), 0, size))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("artists", str(artists_xml_file), 0, size)
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         # 2 artists
@@ -28,7 +31,9 @@ class TestArtistsParsing:
 
     def test_aliases(self, artists_xml_file):
         size = os.path.getsize(artists_xml_file)
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(artists_xml_file), 0, size))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("artists", str(artists_xml_file), 0, size)
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         aliases = tables["artist_aliases"]
@@ -39,7 +44,9 @@ class TestArtistsParsing:
 
     def test_groups(self, artists_xml_file):
         size = os.path.getsize(artists_xml_file)
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(artists_xml_file), 0, size))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("artists", str(artists_xml_file), 0, size)
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         groups = tables["artist_groups"]
@@ -49,7 +56,9 @@ class TestArtistsParsing:
 
     def test_members(self, artists_xml_file):
         size = os.path.getsize(artists_xml_file)
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(artists_xml_file), 0, size))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("artists", str(artists_xml_file), 0, size)
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         members = tables["artist_members"]
@@ -59,7 +68,9 @@ class TestArtistsParsing:
 
     def test_schema_matches(self, artists_xml_file):
         size = os.path.getsize(artists_xml_file)
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(artists_xml_file), 0, size))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("artists", str(artists_xml_file), 0, size)
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         for name, table in tables.items():
@@ -77,7 +88,9 @@ class TestArtistsParsing:
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(f), 0, os.path.getsize(f)))
+            ipc_dict = extract_chunk_to_ipc(
+                ChunkArgs("artists", str(f), 0, os.path.getsize(f))
+            )
             tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         assert tables["artists"].num_rows == 0
@@ -91,7 +104,7 @@ class TestArtistsParsing:
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             ipc_dict = extract_chunk_to_ipc(
-                ChunkArgs(str(artists_xml_file), 0, size, strict=True)
+                ChunkArgs("artists", str(artists_xml_file), 0, size, strict=True)
             )
             tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -116,7 +129,9 @@ class TestArtistsParsing:
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            extract_chunk_to_ipc(ChunkArgs(str(f), 0, os.path.getsize(f), strict=True))
+            extract_chunk_to_ipc(
+                ChunkArgs("artists", str(f), 0, os.path.getsize(f), strict=True)
+            )
 
         unhandled = [x for x in w if "unhandled" in str(x.message)]
         assert len(unhandled) == 1
@@ -139,7 +154,7 @@ class TestArtistsParsing:
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            extract_chunk_to_ipc(ChunkArgs(str(f), 0, os.path.getsize(f)))
+            extract_chunk_to_ipc(ChunkArgs("artists", str(f), 0, os.path.getsize(f)))
 
         unhandled = [x for x in w if "unhandled" in str(x.message)]
         assert unhandled == []

@@ -1,48 +1,24 @@
-"""Releases entity definition: Arrow schemas, XML parsing, IPC worker.
+"""Releases entity definition: Arrow schemas and ``<release>`` record parsing.
 
 The XML has deeply nested structure (release → tracks → artists). Denormalizing into one flat table would create massive
 row duplication. 12 normalized tables with release_id foreign keys keep storage compact and enable efficient joins.
-The schema mirrors the XML structure.
+The schema mirrors the XML structure. The chunk worker that drives ``append_record`` is shared; see ``_worker.py``.
 """
 
 from __future__ import annotations
 
 import warnings
-from collections.abc import Callable
-from io import BytesIO
 
 import pyarrow as pa
 from lxml import etree
-from pyarrow import ipc
 
-from discogskit.entities import ChunkArgs, EntityDef, register
-from discogskit.entities._split import make_split_finder
+from discogskit.entities import Cols, EntityDef, register
 
-_Cols = dict[str, dict[str, list]]
 _ArtistRec = tuple[int | None, str, str | None, str | None]
 _ExtraArtistRec = tuple[int | None, str, str | None, str | None, str | None]
 
 # ------------------------------------------------------------------------------------------------------------------------
-# Constants
-# ------------------------------------------------------------------------------------------------------------------------
-
-TABLE_ORDER = [
-    "releases",
-    "release_artists",
-    "release_extraartists",
-    "release_labels",
-    "release_series",
-    "release_formats",
-    "release_identifiers",
-    "release_videos",
-    "release_companies",
-    "release_tracks",
-    "release_track_artists",
-    "release_track_extraartists",
-]
-
-# ------------------------------------------------------------------------------------------------------------------------
-# Arrow schemas (single source of truth for column definitions)
+# Arrow schemas (single source of truth for column definitions; the first table is the root table)
 #
 # These schemas serve two purposes:
 #   1. RecordBatch construction: pa.RecordBatch.from_pydict(cols, schema=...) enforces types and catches mismatches
@@ -193,62 +169,6 @@ TABLE_WEIGHTS = {
 }
 
 # ------------------------------------------------------------------------------------------------------------------------
-# XML constants
-# ------------------------------------------------------------------------------------------------------------------------
-
-_RELEASE_END = b"</release>\n"
-_XML_HEADER = b"<?xml version='1.0' encoding='UTF-8'?>\n<releases>\n"
-_XML_FOOTER = b"\n</releases>"
-
-# ------------------------------------------------------------------------------------------------------------------------
-# XML splitting
-# ------------------------------------------------------------------------------------------------------------------------
-
-find_split_points: Callable[[str, int], list[tuple[int, int]]] = make_split_finder(
-    b"<release ", _RELEASE_END
-)
-
-
-# ------------------------------------------------------------------------------------------------------------------------
-# IPC helpers
-# ------------------------------------------------------------------------------------------------------------------------
-
-
-def _serialize_batch(batch: pa.RecordBatch, schema: pa.Schema) -> bytes:
-    sink = pa.BufferOutputStream()
-    writer = ipc.new_stream(sink, schema)
-    writer.write_batch(batch)
-    writer.close()
-    return sink.getvalue().to_pybytes()
-
-
-# ------------------------------------------------------------------------------------------------------------------------
-# Column accumulators
-#
-# Workers build up columns as Python lists (one list per column per table), then convert to Arrow RecordBatches at the
-# end of each chunk. This is faster than appending to Arrow arrays incrementally because:
-#   - Python list.append is O(1) amortized
-#   - RecordBatch.from_pydict does a single bulk conversion
-#   - Avoids intermediate Arrow allocations per row
-# ------------------------------------------------------------------------------------------------------------------------
-
-
-def _new_cols() -> _Cols:
-    return {
-        name: {col_name: [] for col_name in schema.names}
-        for name, schema in SCHEMAS.items()
-    }
-
-
-def _cols_to_ipc(cols: _Cols) -> dict[str, bytes]:
-    result = {}
-    for name, schema in SCHEMAS.items():
-        batch = pa.RecordBatch.from_pydict(cols[name], schema=schema)
-        result[name] = _serialize_batch(batch, schema)
-    return result
-
-
-# ------------------------------------------------------------------------------------------------------------------------
 # XML parsing helpers
 #
 # Uses manual iteration over child elements (``for ch in elem``) rather than XPath/find() because it's faster for
@@ -351,8 +271,8 @@ def _parse_single_track(
     return position, title, duration, artists, extraartists, sub_tracks_elem
 
 
-def _append_release(
-    cols: _Cols, elem: etree._Element, unknown: set[str] | None = None
+def append_record(
+    cols: Cols, elem: etree._Element, unknown: set[str] | None = None
 ) -> None:
     """Parse a <release> element and append all data to column accumulators."""
     id_text = elem.get("id")
@@ -637,69 +557,13 @@ def _append_release(
             te["role"].append(role)
 
 
-# ------------------------------------------------------------------------------------------------------------------------
-# Chunk worker (module-level, picklable for multiprocessing)
-#
-# This function runs in a separate PROCESS (via multiprocessing.Pool). It must be a module-level function (not a
-# closure or method) so that pickle can serialize it for the worker process.
-# ------------------------------------------------------------------------------------------------------------------------
-
-
-def extract_chunk_to_ipc(args: ChunkArgs) -> dict[str, bytes]:
-    """Worker: parse XML chunk -> 12 normalized RecordBatches -> IPC bytes dict.
-
-    Reads a byte range from the decompressed XML, wraps it in a valid XML envelope, parses with lxml iterparse, and
-    returns serialized Arrow IPC.
-    """
-    with open(args.file_path, "rb") as f:
-        f.seek(args.start)
-        data = f.read(args.end - args.start)
-
-    xml_data = _XML_HEADER + data + _XML_FOOTER
-    cols = _new_cols()
-    unknown: set[str] | None = set() if args.strict else None
-
-    for _, elem in etree.iterparse(BytesIO(xml_data), events=("end",), tag="release"):
-        _append_release(cols, elem, unknown)
-        # Standard lxml memory optimization for iterparse: free each element after processing to prevent the entire
-        # tree from accumulating. Without this, a 256 MB chunk would build a multi-GB tree in memory.
-        elem.clear()
-        while elem.getprevious() is not None:
-            del elem.getparent()[0]
-
-    if unknown:
-        for tag in sorted(unknown):
-            warnings.warn(f"unhandled XML element <{tag}> in <release>", stacklevel=1)
-
-    return _cols_to_ipc(cols)
-
-
-# ------------------------------------------------------------------------------------------------------------------------
-# Import-time integrity assertion
-# ------------------------------------------------------------------------------------------------------------------------
-
-assert set(SCHEMAS) == set(TABLE_ORDER), (
-    f"Table key mismatch: schemas={set(SCHEMAS) - set(TABLE_ORDER)}, "
-    f"order={set(TABLE_ORDER) - set(SCHEMAS)}"
+register(
+    EntityDef(
+        append_record=append_record,
+        fk_column="release_id",
+        name="releases",
+        root_tag="release",
+        schemas=SCHEMAS,
+        table_weights=TABLE_WEIGHTS,
+    )
 )
-assert set(TABLE_WEIGHTS) == set(TABLE_ORDER), (
-    f"Table weight mismatch: weights={set(TABLE_WEIGHTS) - set(TABLE_ORDER)}, "
-    f"order={set(TABLE_ORDER) - set(TABLE_WEIGHTS)}"
-)
-
-# ------------------------------------------------------------------------------------------------------------------------
-# Register
-# ------------------------------------------------------------------------------------------------------------------------
-
-RELEASES_ENTITY = EntityDef(
-    extract_chunk_to_ipc=extract_chunk_to_ipc,
-    find_split_points=find_split_points,
-    fk_column="release_id",
-    name="releases",
-    root_tag="release",
-    schemas=SCHEMAS,
-    table_order=TABLE_ORDER,
-    table_weights=TABLE_WEIGHTS,
-)
-
-register(RELEASES_ENTITY)

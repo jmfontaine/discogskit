@@ -1,37 +1,19 @@
-"""Artists entity definition: Arrow schemas, XML parsing, IPC worker.
+"""Artists entity definition: Arrow schemas and ``<artist>`` record parsing.
 
-See ``releases.py`` for detailed comments on the shared patterns: column accumulators, iterparse memory optimization,
-and IPC serialization.
+The chunk worker that drives ``append_record`` is shared; see ``_worker.py``.
 """
 
 from __future__ import annotations
 
 import warnings
-from collections.abc import Callable
-from io import BytesIO
 
 import pyarrow as pa
 from lxml import etree
-from pyarrow import ipc
 
-from discogskit.entities import ChunkArgs, EntityDef, register
-from discogskit.entities._split import make_split_finder
-
-_Cols = dict[str, dict[str, list]]
+from discogskit.entities import Cols, EntityDef, register
 
 # ------------------------------------------------------------------------------------------------------------------------
-# Constants
-# ------------------------------------------------------------------------------------------------------------------------
-
-TABLE_ORDER = [
-    "artists",
-    "artist_aliases",
-    "artist_groups",
-    "artist_members",
-]
-
-# ------------------------------------------------------------------------------------------------------------------------
-# Arrow schemas
+# Arrow schemas (the first table is the root table)
 # ------------------------------------------------------------------------------------------------------------------------
 
 SCHEMAS = {
@@ -76,63 +58,8 @@ TABLE_WEIGHTS = {
     "artist_members": 0.15,
 }
 
-# ------------------------------------------------------------------------------------------------------------------------
-# XML constants
-# ------------------------------------------------------------------------------------------------------------------------
 
-_ARTIST_END = b"</artist>\n"
-_XML_HEADER = b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n"
-_XML_FOOTER = b"\n</artists>"
-
-# ------------------------------------------------------------------------------------------------------------------------
-# XML splitting
-# ------------------------------------------------------------------------------------------------------------------------
-
-find_split_points: Callable[[str, int], list[tuple[int, int]]] = make_split_finder(
-    b"<artist>", _ARTIST_END
-)
-
-# ------------------------------------------------------------------------------------------------------------------------
-# IPC helpers
-# ------------------------------------------------------------------------------------------------------------------------
-
-
-def _serialize_batch(batch: pa.RecordBatch, schema: pa.Schema) -> bytes:
-    sink = pa.BufferOutputStream()
-    writer = ipc.new_stream(sink, schema)
-    writer.write_batch(batch)
-    writer.close()
-    return sink.getvalue().to_pybytes()
-
-
-# ------------------------------------------------------------------------------------------------------------------------
-# Column accumulators
-# ------------------------------------------------------------------------------------------------------------------------
-
-
-def _new_cols() -> _Cols:
-    return {
-        name: {col_name: [] for col_name in schema.names}
-        for name, schema in SCHEMAS.items()
-    }
-
-
-def _cols_to_ipc(cols: _Cols) -> dict[str, bytes]:
-    result = {}
-    for name, schema in SCHEMAS.items():
-        batch = pa.RecordBatch.from_pydict(cols[name], schema=schema)
-        result[name] = _serialize_batch(batch, schema)
-    return result
-
-
-# ------------------------------------------------------------------------------------------------------------------------
-# XML parsing
-# ------------------------------------------------------------------------------------------------------------------------
-
-
-def _parse_refs(
-    cols: _Cols, table: str, artist_id: int, parent: etree._Element
-) -> None:
+def _parse_refs(cols: Cols, table: str, artist_id: int, parent: etree._Element) -> None:
     """Parse artist ref children (aliases, groups, members)."""
     for name_elem in parent.findall("name"):
         ref_id_str = name_elem.get("id")
@@ -149,8 +76,8 @@ def _parse_refs(
         row["name"].append(name)
 
 
-def _append_artist(
-    cols: _Cols, elem: etree._Element, unknown: set[str] | None = None
+def append_record(
+    cols: Cols, elem: etree._Element, unknown: set[str] | None = None
 ) -> None:
     """Parse an <artist> element and append all data to column accumulators."""
     id_text = elem.findtext("id")
@@ -201,61 +128,13 @@ def _append_artist(
     r["urls"].append(urls)
 
 
-# ------------------------------------------------------------------------------------------------------------------------
-# Chunk worker
-# ------------------------------------------------------------------------------------------------------------------------
-
-
-def extract_chunk_to_ipc(args: ChunkArgs) -> dict[str, bytes]:
-    """Worker: parse XML chunk -> 4 normalized RecordBatches -> IPC bytes dict."""
-
-    with open(args.file_path, "rb") as f:
-        f.seek(args.start)
-        data = f.read(args.end - args.start)
-
-    xml_data = _XML_HEADER + data + _XML_FOOTER
-    cols = _new_cols()
-    unknown: set[str] | None = set() if args.strict else None
-
-    for _, elem in etree.iterparse(BytesIO(xml_data), events=("end",), tag="artist"):
-        _append_artist(cols, elem, unknown)
-        elem.clear()
-        while elem.getprevious() is not None:
-            del elem.getparent()[0]
-
-    if unknown:
-        for tag in sorted(unknown):
-            warnings.warn(f"unhandled XML element <{tag}> in <artist>", stacklevel=1)
-
-    return _cols_to_ipc(cols)
-
-
-# ------------------------------------------------------------------------------------------------------------------------
-# Import-time integrity assertion
-# ------------------------------------------------------------------------------------------------------------------------
-
-assert set(SCHEMAS) == set(TABLE_ORDER), (
-    f"Table key mismatch: schemas={set(SCHEMAS) - set(TABLE_ORDER)}, "
-    f"order={set(TABLE_ORDER) - set(SCHEMAS)}"
+register(
+    EntityDef(
+        append_record=append_record,
+        fk_column="artist_id",
+        name="artists",
+        root_tag="artist",
+        schemas=SCHEMAS,
+        table_weights=TABLE_WEIGHTS,
+    )
 )
-assert set(TABLE_WEIGHTS) == set(TABLE_ORDER), (
-    f"Table weight mismatch: weights={set(TABLE_WEIGHTS) - set(TABLE_ORDER)}, "
-    f"order={set(TABLE_ORDER) - set(TABLE_WEIGHTS)}"
-)
-
-# ------------------------------------------------------------------------------------------------------------------------
-# Register
-# ------------------------------------------------------------------------------------------------------------------------
-
-ARTISTS_ENTITY = EntityDef(
-    extract_chunk_to_ipc=extract_chunk_to_ipc,
-    find_split_points=find_split_points,
-    fk_column="artist_id",
-    name="artists",
-    root_tag="artist",
-    schemas=SCHEMAS,
-    table_order=TABLE_ORDER,
-    table_weights=TABLE_WEIGHTS,
-)
-
-register(ARTISTS_ENTITY)
