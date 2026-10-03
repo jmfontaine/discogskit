@@ -433,6 +433,345 @@ class TestOverwriteSafety:
             _load(dsn, entity, ipc_dict, overwrite=False)
 
 
+@pytest.mark.integration
+class TestPgSchema:
+    """``--pg-schema``/``--pg-create-schema``: target a specific schema (#53)."""
+
+    @pytest.fixture()
+    def entity(self):
+        return get("artists")
+
+    @pytest.fixture()
+    def ipc_dict(self, artists_xml_file):
+        size = os.path.getsize(artists_xml_file)
+        return extract_chunk_to_ipc(
+            ChunkArgs("artists", str(artists_xml_file), 0, size)
+        )
+
+    def test_rejects_nonexistent_schema_without_create_flag(self, pg_dsn):
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        schema = f"missing_{uuid.uuid4().hex[:8]}"
+        with pytest.raises(ValueError, match=f"Schema '{schema}' does not exist"):
+            PostgreSQLWriter(pg_dsn, schema=schema)
+
+    def test_create_schema_creates_and_loads_into_it(self, pg_dsn, entity, ipc_dict):
+        """A schema that doesn't exist yet is created with --pg-create-schema."""
+        import psycopg
+        from psycopg import sql
+
+        schema = f"new_{uuid.uuid4().hex[:8]}"
+        try:
+            _load(pg_dsn, entity, ipc_dict, create_schema=True, schema=schema)
+
+            with psycopg.connect(pg_dsn) as conn:
+                exists = conn.execute(
+                    "SELECT 1 FROM pg_namespace WHERE nspname = %s", (schema,)
+                ).fetchone()
+                count = conn.execute(
+                    sql.SQL("SELECT COUNT(*) FROM {}").format(
+                        sql.Identifier(schema, "artists")
+                    )
+                ).fetchone()
+                # The PK index and every child table's FK index (built over the
+                # per-index connections, not self._conn) must land in the
+                # chosen schema, not just the PK alone.
+                indexes = conn.execute(
+                    "SELECT indexname FROM pg_indexes WHERE schemaname = %s",
+                    (schema,),
+                ).fetchall()
+            assert exists is not None
+            assert count == (2,)
+            assert len(indexes) == len(entity.table_order)
+        finally:
+            with psycopg.connect(pg_dsn, autocommit=True) as conn:
+                conn.execute(
+                    sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        sql.Identifier(schema)
+                    )
+                )
+
+    def test_loads_into_existing_schema_without_create_flag(
+        self, pg_dsn, entity, ipc_dict
+    ):
+        import psycopg
+        from psycopg import sql
+
+        schema = f"existing_{uuid.uuid4().hex[:8]}"
+        with psycopg.connect(pg_dsn, autocommit=True) as conn:
+            conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        try:
+            _load(pg_dsn, entity, ipc_dict, schema=schema)
+
+            with psycopg.connect(pg_dsn) as conn:
+                count = conn.execute(
+                    sql.SQL("SELECT COUNT(*) FROM {}").format(
+                        sql.Identifier(schema, "artists")
+                    )
+                ).fetchone()
+            assert count == (2,)
+        finally:
+            with psycopg.connect(pg_dsn, autocommit=True) as conn:
+                conn.execute(
+                    sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+                )
+
+    def test_mixed_case_schema_name(self, pg_dsn, entity, ipc_dict):
+        """A name outside [a-z_][a-z0-9_]* must resolve the same on every connection."""
+        import psycopg
+        from psycopg import sql
+
+        schema = f"MixedCase_{uuid.uuid4().hex[:8]}"
+        try:
+            _load(pg_dsn, entity, ipc_dict, create_schema=True, schema=schema)
+
+            with psycopg.connect(pg_dsn) as conn:
+                count = conn.execute(
+                    sql.SQL("SELECT COUNT(*) FROM {}").format(
+                        sql.Identifier(schema, "artists")
+                    )
+                ).fetchone()
+                # Nothing silently landed in the lowercase-folded twin.
+                lower_exists = conn.execute(
+                    "SELECT 1 FROM pg_namespace WHERE nspname = %s",
+                    (schema.lower(),),
+                ).fetchone()
+            assert count == (2,)
+            assert lower_exists is None
+        finally:
+            with psycopg.connect(pg_dsn, autocommit=True) as conn:
+                conn.execute(
+                    sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+                )
+
+    def test_schema_name_with_a_space(self, pg_dsn, entity, ipc_dict):
+        import psycopg
+        from psycopg import sql
+
+        schema = f"my schema {uuid.uuid4().hex[:8]}"
+        try:
+            _load(pg_dsn, entity, ipc_dict, create_schema=True, schema=schema)
+
+            with psycopg.connect(pg_dsn) as conn:
+                count = conn.execute(
+                    sql.SQL("SELECT COUNT(*) FROM {}").format(
+                        sql.Identifier(schema, "artists")
+                    )
+                ).fetchone()
+            assert count == (2,)
+        finally:
+            with psycopg.connect(pg_dsn, autocommit=True) as conn:
+                conn.execute(
+                    sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+                )
+
+    def test_preserves_existing_options_in_dsn(self, pg_dsn):
+        """--pg-schema must not discard other -c settings already in the DSN's options."""
+        import psycopg
+        from psycopg import sql
+
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        schema = f"opts_{uuid.uuid4().hex[:8]}"
+        dsn = f"{pg_dsn}?options=-c%20work_mem%3D7MB"
+        writer = PostgreSQLWriter(dsn, create_schema=True, schema=schema)
+        try:
+            with psycopg.connect(writer._dsn, autocommit=True) as conn:
+                work_mem = conn.execute("SHOW work_mem").fetchone()
+                current = conn.execute("SELECT current_schema()").fetchone()
+            assert work_mem == ("7MB",)
+            assert current == (schema,)
+        finally:
+            writer.close()
+            with psycopg.connect(pg_dsn, autocommit=True) as conn:
+                conn.execute(
+                    sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+                )
+
+    def test_authority_less_uri(self, pg_dsn, entity, ipc_dict):
+        """``postgresql:///db?host=...`` (no ``@host:port``) must still resolve the schema."""
+        import psycopg
+        from psycopg import sql
+
+        parts = urlsplit(pg_dsn)
+        dbname = parts.path.lstrip("/")
+        dsn = (
+            f"postgresql:///{dbname}?host={parts.hostname}&port={parts.port}"
+            f"&user={parts.username}&password={parts.password}"
+        )
+        schema = f"noauth_{uuid.uuid4().hex[:8]}"
+        try:
+            _load(dsn, entity, ipc_dict, create_schema=True, schema=schema)
+
+            with psycopg.connect(pg_dsn) as conn:
+                count = conn.execute(
+                    sql.SQL("SELECT COUNT(*) FROM {}").format(
+                        sql.Identifier(schema, "artists")
+                    )
+                ).fetchone()
+            assert count == (2,)
+        finally:
+            with psycopg.connect(pg_dsn, autocommit=True) as conn:
+                conn.execute(
+                    sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+                )
+
+    def test_overwrite_safety_inside_chosen_schema(self, pg_dsn, entity, ipc_dict):
+        """Same #52 safety (no CASCADE, all-or-nothing, blockers listed), scoped to --pg-schema."""
+        import psycopg
+        from psycopg import sql
+
+        from discogskit.writers import OutputExistsError
+
+        schema = f"safety_{uuid.uuid4().hex[:8]}"
+        try:
+            _load(
+                pg_dsn,
+                entity,
+                ipc_dict,
+                create_schema=True,
+                overwrite=True,
+                schema=schema,
+            )
+            with psycopg.connect(pg_dsn, autocommit=True) as conn:
+                conn.execute(
+                    sql.SQL("CREATE VIEW {} AS SELECT name FROM {}").format(
+                        sql.Identifier(schema, "artist_names"),
+                        sql.Identifier(schema, "artists"),
+                    )
+                )
+
+            with pytest.raises(OutputExistsError) as excinfo:
+                _load(pg_dsn, entity, ipc_dict, overwrite=True, schema=schema)
+            assert "artist_names" in str(excinfo.value)
+
+            # All or nothing: the table the view depends on was not dropped.
+            with psycopg.connect(pg_dsn) as conn:
+                count = conn.execute(
+                    sql.SQL("SELECT COUNT(*) FROM {}").format(
+                        sql.Identifier(schema, "artists")
+                    )
+                ).fetchone()
+            assert count == (2,)
+        finally:
+            with psycopg.connect(pg_dsn, autocommit=True) as conn:
+                conn.execute(
+                    sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+                )
+
+    def test_multi_writer_lands_in_chosen_schema(self, pg_dsn, entity, ipc_dict):
+        import psycopg
+        from psycopg import sql
+
+        schema = f"multi_{uuid.uuid4().hex[:8]}"
+        try:
+            _load(
+                pg_dsn,
+                entity,
+                ipc_dict,
+                create_schema=True,
+                overwrite=True,
+                schema=schema,
+                write_workers=2,
+            )
+            with psycopg.connect(pg_dsn) as conn:
+                count = conn.execute(
+                    sql.SQL("SELECT COUNT(*) FROM {}").format(
+                        sql.Identifier(schema, "artists")
+                    )
+                ).fetchone()
+            assert count == (2,)
+        finally:
+            with psycopg.connect(pg_dsn, autocommit=True) as conn:
+                conn.execute(
+                    sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+                )
+
+    def test_missing_create_privilege_is_a_clear_error(self, pg_dsn):
+        """--pg-create-schema needs CREATE on the database; a role without it fails clearly."""
+        import psycopg
+        from psycopg import sql
+
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        role = f"loader_{uuid.uuid4().hex[:8]}"
+        schema = f"needs_create_{uuid.uuid4().hex[:8]}"
+        parts = urlsplit(pg_dsn)
+        dbname = parts.path.lstrip("/")
+        role_dsn = parts._replace(
+            netloc=f"{role}:pw@{parts.hostname}:{parts.port}"
+        ).geturl()
+        with psycopg.connect(pg_dsn, autocommit=True) as conn:
+            conn.execute(
+                sql.SQL("CREATE ROLE {} LOGIN PASSWORD 'pw'").format(
+                    sql.Identifier(role)
+                )
+            )
+            conn.execute(
+                sql.SQL("REVOKE CREATE ON DATABASE {} FROM {}").format(
+                    sql.Identifier(dbname), sql.Identifier(role)
+                )
+            )
+        try:
+            with pytest.raises(ValueError, match="Can't create schema"):
+                PostgreSQLWriter(role_dsn, create_schema=True, schema=schema)
+        finally:
+            with psycopg.connect(pg_dsn, autocommit=True) as conn:
+                conn.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
+                conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
+
+    def test_create_schema_flag_works_without_database_create(
+        self, pg_dsn, entity, ipc_dict
+    ):
+        """A role with rights on an already-existing schema, but not database CREATE,
+        must still be able to load with --pg-create-schema (#53, finding on PR #74).
+        """
+        import psycopg
+        from psycopg import sql
+
+        role = f"loader_{uuid.uuid4().hex[:8]}"
+        schema = f"existing_create_{uuid.uuid4().hex[:8]}"
+        parts = urlsplit(pg_dsn)
+        dbname = parts.path.lstrip("/")
+        role_dsn = parts._replace(
+            netloc=f"{role}:pw@{parts.hostname}:{parts.port}"
+        ).geturl()
+        with psycopg.connect(pg_dsn, autocommit=True) as conn:
+            conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+            conn.execute(
+                sql.SQL("CREATE ROLE {} LOGIN PASSWORD 'pw'").format(
+                    sql.Identifier(role)
+                )
+            )
+            conn.execute(
+                sql.SQL("GRANT ALL ON SCHEMA {} TO {}").format(
+                    sql.Identifier(schema), sql.Identifier(role)
+                )
+            )
+            conn.execute(
+                sql.SQL("REVOKE CREATE ON DATABASE {} FROM {}").format(
+                    sql.Identifier(dbname), sql.Identifier(role)
+                )
+            )
+        try:
+            _load(role_dsn, entity, ipc_dict, create_schema=True, schema=schema)
+
+            with psycopg.connect(pg_dsn) as conn:
+                count = conn.execute(
+                    sql.SQL("SELECT COUNT(*) FROM {}").format(
+                        sql.Identifier(schema, "artists")
+                    )
+                ).fetchone()
+            assert count == (2,)
+        finally:
+            with psycopg.connect(pg_dsn, autocommit=True) as conn:
+                conn.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
+                conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
+                conn.execute(
+                    sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+                )
+
+
 class TestSplitTableGroups:
     def test_distributes_all_tables(self):
         from discogskit.entities import get

@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import pyarrow as pa
 from psycopg import sql
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from discogskit._console import status
 from discogskit.writers._ipc import deserialize_batches
@@ -152,6 +153,30 @@ def _flush_group(
 
 
 # ------------------------------------------------------------------------------------------------------------------------
+# Schema targeting
+#
+# Without --pg-schema, every statement is unqualified and lands wherever the DSN's search_path resolves it (unchanged
+# behavior). With --pg-schema, self._conn gets an explicit SET search_path so current_schema() and every unqualified
+# statement on it resolve to the chosen schema; self._dsn is rewritten with the equivalent libpq ``options`` so every
+# later connection (ADBC, including multi-writer, and the per-index connections finalize() opens) resolves the same
+# way, with no changes needed to the statements themselves. __init__ verifies a fresh ADBC connection agrees with
+# self._conn on current_schema() before any work starts: the schema name goes through a different parser (libpq's
+# ``options`` splitting) there than in self._conn's SET, so an unquoted or unescaped name could silently resolve
+# differently and land data in the wrong place.
+# ------------------------------------------------------------------------------------------------------------------------
+
+
+def _dsn_with_schema(dsn: str, schema: str) -> str:
+    """Append ``-csearch_path=<schema>`` to the DSN's libpq ``options``, keeping existing ones."""
+    ident = '"' + schema.replace('"', '""') + '"'
+    opt = "-csearch_path=" + "".join(
+        f"\\{ch}" if ch.isspace() or ch == "\\" else ch for ch in ident
+    )
+    existing = conninfo_to_dict(dsn).get("options")
+    return make_conninfo(dsn, options=f"{existing} {opt}" if existing else opt)
+
+
+# ------------------------------------------------------------------------------------------------------------------------
 # PostgreSQLWriter
 # ------------------------------------------------------------------------------------------------------------------------
 
@@ -176,13 +201,14 @@ class PostgreSQLWriter:
         self,
         dsn: str,
         *,
+        create_schema: bool = False,
         fk: bool = False,
         index_workers: int = 2,
         overwrite: bool = False,
+        schema: str | None = None,
         unlogged: bool = False,
         write_workers: int = 1,
     ) -> None:
-        self._dsn = dsn
         self._fk = fk
         self._index_workers = index_workers
         self._overwrite = overwrite
@@ -192,6 +218,72 @@ class PostgreSQLWriter:
         import psycopg
 
         self._conn = psycopg.connect(dsn, autocommit=True)
+
+        if schema is not None:
+            try:
+                exists = self._conn.execute(
+                    "SELECT 1 FROM pg_namespace WHERE nspname = %s", (schema,)
+                ).fetchone()
+                if exists is None:
+                    if not create_schema:
+                        raise ValueError(
+                            f"Schema {schema!r} does not exist. Create it first, "
+                            "or pass --pg-create-schema to create it."
+                        )
+                    try:
+                        self._conn.execute(
+                            sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema))
+                        )
+                    except psycopg.errors.InsufficientPrivilege as exc:
+                        raise ValueError(
+                            f"Can't create schema {schema!r}: {exc}. Grant CREATE "
+                            "on the database to this role, or create the schema "
+                            "yourself."
+                        ) from None
+
+                has_usage = self._conn.execute(
+                    "SELECT has_schema_privilege(current_user, %s, 'USAGE')",
+                    (schema,),
+                ).fetchone()
+                if not (has_usage and has_usage[0]):
+                    raise ValueError(
+                        f"Can't target schema {schema!r}: this role lacks USAGE "
+                        "on it. Grant USAGE (and CREATE, to create tables) on "
+                        "the schema to this role."
+                    )
+
+                self._conn.execute(
+                    sql.SQL("SET search_path TO {}").format(sql.Identifier(schema))
+                )
+                ddl_row = self._conn.execute("SELECT current_schema()").fetchone()
+                ddl_schema = ddl_row[0] if ddl_row else None
+                if ddl_schema != schema:
+                    raise ValueError(
+                        f"Can't target schema {schema!r}: current_schema() "
+                        f"resolved to {ddl_schema!r} instead."
+                    )
+
+                dsn = _dsn_with_schema(dsn, schema)
+                import adbc_driver_postgresql.dbapi as adbc_pg
+
+                check_conn = adbc_pg.connect(dsn)
+                try:
+                    with check_conn.cursor() as cur:
+                        cur.execute("SELECT current_schema()")
+                        adbc_row = cur.fetchone()
+                        adbc_schema = adbc_row[0] if adbc_row else None
+                finally:
+                    check_conn.close()
+                if adbc_schema != schema:
+                    raise ValueError(
+                        f"Can't target schema {schema!r}: PostgreSQL write "
+                        f"connections resolved {adbc_schema!r} instead."
+                    )
+            except Exception:
+                self._conn.close()
+                raise
+
+        self._dsn = dsn
 
         # ADBC connections + table groups + executor (set up lazily in setup())
         self._adbc_conn = None

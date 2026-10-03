@@ -402,16 +402,36 @@ def load(
             help="Add foreign key constraints after load", rich_help_panel="PostgreSQL"
         ),
     ] = False,
+    pg_create_schema: Annotated[
+        bool,
+        typer.Option(
+            help="Create --pg-schema if it doesn't exist",
+            rich_help_panel="PostgreSQL",
+        ),
+    ] = False,
+    pg_schema: Annotated[
+        str | None,
+        typer.Option(
+            help="Schema to create tables in (must exist unless --pg-create-schema)",
+            rich_help_panel="PostgreSQL",
+        ),
+    ] = None,
 ) -> None:
     """Load Discogs XML dumps into a database."""
     jobs = _resolve_jobs(paths)
 
+    if pg_create_schema and not pg_schema:
+        console.print("[red]Error:[/] --pg-create-schema requires --pg-schema.")
+        raise typer.Exit(1)
+
     try:
         writer = get_writer(
             dsn,
+            create_schema=pg_create_schema,
             fk=pg_fk,
             index_workers=index_workers,
             overwrite=overwrite,
+            schema=pg_schema,
             unlogged=pg_unlogged,
             write_workers=write_workers,
         )
