@@ -46,7 +46,7 @@ class EntityDef:
     """Definition for one Discogs entity type.
 
     ``name`` is also the XML container element (``<artists>``) and ``root_tag`` the record element (``<artist>``).
-    The first table in ``schemas`` is the root table.
+    The first table in ``schemas`` is the root table, and its primary key column is always ``id``.
     """
 
     name: str
@@ -54,7 +54,6 @@ class EntityDef:
     schemas: dict[str, pa.Schema]
     table_weights: dict[str, float]
     append_record: Callable[[Cols, etree._Element, set[str] | None], None]
-    pk_column: str = "id"
     fk_column: str | None = None
 
     @cached_property

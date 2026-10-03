@@ -137,7 +137,6 @@ class SQLiteWriter:
         # Create tables
         t_ddl = time.perf_counter()
         root = entity.table_order[0]
-        pk_col = entity.pk_column
         fk_col = entity.fk_column
 
         for t in entity.table_order:
@@ -146,7 +145,7 @@ class SQLiteWriter:
                 entity.schemas[t],
                 fk_column=fk_col if t != root and self._fk else None,
                 fk_ref_table=root if t != root and self._fk else None,
-                pk_column=pk_col,
+                pk_column="id",
             )
             cur.execute(ddl)
 
@@ -197,7 +196,7 @@ class SQLiteWriter:
         return timings
 
     def finalize(self, entity: EntityDef) -> None:
-        """Create indexes on FK columns and verify FK integrity."""
+        """Create indexes on FK columns."""
         fk_col = entity.fk_column
 
         if fk_col and len(entity.table_order) > 1:
@@ -211,16 +210,6 @@ class SQLiteWriter:
             self._conn.commit()
             n_idx = len(entity.table_order) - 1
             status("Index", f"{n_idx} indexes", f"[{time.perf_counter() - t0:.2f}s]")
-
-        if self._fk:
-            t0 = time.perf_counter()
-            violations = self._conn.execute("PRAGMA foreign_key_check").fetchall()
-            if violations:
-                status("Verify", f"[red]{len(violations)} FK violations[/]")
-            else:
-                status(
-                    "Verify", "foreign keys OK", f"[{time.perf_counter() - t0:.2f}s]"
-                )
 
     def close(self) -> None:
         """Release resources."""

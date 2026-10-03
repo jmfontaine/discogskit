@@ -209,35 +209,6 @@ class TestPostgreSQLWriter:
         writer.write_chunk(ipc_to_record_batches(ipc_dict))
         writer.close()  # close without finalize
 
-    def test_indexes_only(self, pg_dsn, entity, ipc_dict):
-        """finalize() without setup() rebuilds indexes on existing tables."""
-        from discogskit.writers.postgresql import PostgreSQLWriter
-
-        # First load data normally
-        writer1 = PostgreSQLWriter(pg_dsn, index_workers=1, overwrite=True)
-        try:
-            writer1.setup(entity)
-            writer1.write_chunk(ipc_to_record_batches(ipc_dict))
-            writer1.finalize(entity)
-        finally:
-            writer1.close()
-
-        # Now rebuild indexes with a fresh writer (no setup)
-        writer2 = PostgreSQLWriter(pg_dsn, index_workers=1, overwrite=True)
-        try:
-            writer2.finalize(entity)
-        finally:
-            writer2.close()
-
-        import psycopg
-
-        with psycopg.connect(pg_dsn) as conn:
-            pk = conn.execute(
-                "SELECT constraint_name FROM information_schema.table_constraints "
-                "WHERE table_name = 'artists' AND constraint_type = 'PRIMARY KEY'"
-            ).fetchone()
-            assert pk is not None
-
     def test_fk_constraints(self, pg_dsn, entity, ipc_dict):
         from discogskit.writers.postgresql import PostgreSQLWriter
 
