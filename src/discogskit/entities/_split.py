@@ -14,9 +14,11 @@ about formatting — indentation, line endings, a separator between records, or 
 value — depth is what defines a boundary, not surrounding bytes. Comments, CDATA sections, processing
 instructions and DOCTYPE declarations are matched and skipped whole, since they can contain tag-like text that
 isn't a real element. Anything that starts like one of those constructs but doesn't close — an unterminated
-comment, a malformed start tag, a stray or missing closing tag — is a hard error, as is anything after the last
-record other than whitespace, a comment, a processing instruction, and exactly one occurrence of the container's
-own closing tag: we fail loudly instead of guessing what unrecognized content means or silently dropping it.
+comment, a malformed start tag, a stray or missing closing tag — is a hard error, as is anything before the first
+record other than XML whitespace, an XML 1.0 UTF-8 declaration at byte 0 and the container's bare start tag, and
+anything after the last record other than whitespace, a comment, a processing instruction, and exactly one
+occurrence of the container's own closing tag: we fail loudly instead of guessing what unrecognized content means
+or silently dropping it.
 Each returned chunk ``[start, end)`` is guaranteed to contain only complete top-level elements, so workers can wrap
 the bytes in an XML envelope and parse with iterparse.
 """
@@ -158,11 +160,9 @@ _XML_DECL = (
 def _describe_leading(mm: mmap.mmap, pos: int, container: bytes) -> str:
     """Name the unsupported construct starting at ``pos`` for the error message."""
     head = mm[pos : pos + 64]
-    if (
-        head[:3] == b"\xef\xbb\xbf"
-        or head[:2] in (b"\xff\xfe", b"\xfe\xff")
-        or head[:4] == b"\x00\x00\xfe\xff"
-    ):
+    # Only a UTF-8 byte-order mark can get here: a UTF-16 or UTF-32 file has no ASCII ``<tag>`` for the record scan
+    # to find, so it already failed with "No <tag> elements found".
+    if head[:3] == b"\xef\xbb\xbf":
         return "a byte-order mark"
     if re.match(rb"<\?[xX][mM][lL](?:" + _XML_WS + rb"|\?>)", head):
         return "an XML declaration other than version 1.0 in UTF-8 at the start of the file"
@@ -172,9 +172,10 @@ def _describe_leading(mm: mmap.mmap, pos: int, container: bytes) -> str:
         return "a comment"
     if head.startswith(b"<?"):
         return "a processing instruction"
-    if head.startswith(b"<" + container) and head[
-        len(container) + 1 : len(container) + 2
-    ] not in (b">", b""):
+    # An attribute must be preceded by whitespace; ``<container/>`` or ``<containerx>`` aren't attribute lists.
+    if re.match(
+        rb"<" + re.escape(container) + _XML_WS + rb"+[^\x20\x09\x0d\x0a>]", head
+    ):
         return f"attributes on <{container.decode()}> (e.g. a namespace declaration)"
     return f"unexpected content {head[:40]!r}"
 
