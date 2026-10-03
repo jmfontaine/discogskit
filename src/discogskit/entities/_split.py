@@ -80,13 +80,14 @@ def _compile_pattern(tag: bytes) -> re.Pattern[bytes]:
     )
 
 
-def _scan_records(mm: mmap.mmap, tag: bytes) -> tuple[int, list[int]]:
+def _scan_records(mm: mmap.mmap, tag: bytes, container: bytes) -> tuple[int, list[int]]:
     """Scan the whole file for ``<tag>`` records, tracking nesting depth.
 
     Returns the byte offset of the first top-level record and the byte offset right after every complete one —
     a closing tag that brings the depth back to zero, or a self-closing tag found at depth zero. Raises
-    ``ValueError`` for a closing tag with no matching opener, an unclosed element at end of file, malformed or
-    unterminated markup, or no ``<tag>`` elements at all.
+    ``ValueError`` for unsupported content before the first record (checked as soon as the scan reaches it, see
+    ``_check_leading_content``), a closing tag with no matching opener, an unclosed element at end of file,
+    malformed or unterminated markup, or no ``<tag>`` elements at all.
     """
     pattern = _compile_pattern(tag)
     group_index = pattern.groupindex
@@ -100,9 +101,16 @@ def _scan_records(mm: mmap.mmap, tag: bytes) -> tuple[int, list[int]]:
     boundaries: list[int] = []
     for m in pattern.finditer(mm):
         g = m.lastindex
-        if g == open_group:
-            if depth == 0 and data_start < 0:
+        if data_start < 0:
+            # Validate what precedes the first record before reading further (issue #79): a releases file is
+            # tens of GB, and a record tag inside unsupported content (e.g. a container attribute value) must be
+            # reported as that content, not as whatever structural error it causes later.
+            if g == open_group or g == empty_group:
                 data_start = m.start()
+                _check_leading_content(mm, data_start, tag, container)
+            elif (g == close_group or g in bad_groups) and m.start() > 0:
+                _check_leading_content(mm, m.start(), tag, container)
+        if g == open_group:
             depth += 1
         elif g == close_group:
             depth -= 1
@@ -114,8 +122,6 @@ def _scan_records(mm: mmap.mmap, tag: bytes) -> tuple[int, list[int]]:
                 )
         elif g == empty_group:
             if depth == 0:
-                if data_start < 0:
-                    data_start = m.start()
                 boundaries.append(m.end())
         elif g in bad_groups:
             raise ValueError(
@@ -269,9 +275,8 @@ def find_split_points(
     with open(file_path, "rb") as f:
         mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
         try:
-            data_start, boundaries = _scan_records(mm, tag_bytes)
+            data_start, boundaries = _scan_records(mm, tag_bytes, container_bytes)
             data_end = boundaries[-1]
-            _check_leading_content(mm, data_start, tag_bytes, container_bytes)
             _check_trailing_content(mm, data_end, tag_bytes, container_bytes)
             splits = []
             pos = data_start
