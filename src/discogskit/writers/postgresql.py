@@ -6,8 +6,8 @@ Uses two PostgreSQL client libraries for different purposes:
   hood and accepts Arrow RecordBatches directly — the fastest path from Arrow to PostgreSQL, avoiding row-by-row
   serialization.
 
-- **psycopg**: DDL operations (CREATE TABLE, CREATE INDEX, ALTER SYSTEM) because ADBC's DBAPI layer doesn't support
-  arbitrary SQL well.
+- **psycopg**: DDL operations (CREATE TABLE, CREATE INDEX) because ADBC's DBAPI layer doesn't support arbitrary SQL
+  well.
 
 Tables are created bare (no PK, no FK, no indexes) and constraints are added AFTER bulk load. This is a standard
 PostgreSQL bulk-loading optimization: inserting into indexed tables triggers per-row index maintenance, which is far
@@ -179,7 +179,6 @@ class PostgreSQLWriter:
         fk: bool = False,
         index_workers: int = 2,
         overwrite: bool = False,
-        tune: bool = False,
         unlogged: bool = False,
         write_workers: int = 1,
     ) -> None:
@@ -187,14 +186,12 @@ class PostgreSQLWriter:
         self._fk = fk
         self._index_workers = index_workers
         self._overwrite = overwrite
-        self._tune = tune
         self._unlogged = unlogged
         self._write_workers = write_workers
 
         import psycopg
 
         self._conn = psycopg.connect(dsn, autocommit=True)
-        self._tuning_applied = False
 
         # ADBC connections + table groups + executor (set up lazily in setup())
         self._adbc_conn = None
@@ -205,7 +202,7 @@ class PostgreSQLWriter:
         self._setup_called = False
 
     def setup(self, entity: EntityDef) -> None:
-        """Apply tuning, drop/create tables in the current schema, set up ADBC."""
+        """Drop/create tables in the current schema, set up ADBC."""
         import adbc_driver_postgresql.dbapi as adbc_pg
         import psycopg
 
@@ -237,16 +234,6 @@ class PostgreSQLWriter:
                     f"Tables already exist in schema {schema} "
                     f"(e.g. {example}). Use --overwrite to replace them."
                 )
-
-        # Before the DDL: if tuning fails (ALTER SYSTEM needs superuser), the
-        # existing tables are still intact. A refused drop below still resets
-        # it, in close().
-        if self._tune:
-            status("Tune", "max_wal_size=16GB, checkpoint_completion_target=0.9")
-            self._conn.execute("ALTER SYSTEM SET max_wal_size = '16GB'")
-            self._conn.execute("ALTER SYSTEM SET checkpoint_completion_target = 0.9")
-            self._conn.execute("SELECT pg_reload_conf()")
-            self._tuning_applied = True
 
         # Drop and recreate tables in one transaction, so a refused drop leaves
         # every table as it was. One DROP for all tables: foreign keys between
@@ -468,15 +455,5 @@ class PostgreSQLWriter:
                 _close_with_timeout(closeable, timeout, log)
         self._adbc_conn = None
         self._adbc_conns = []
-
-        if self._tuning_applied:
-            status("Tune", "resetting to defaults")
-            try:
-                self._conn.execute("ALTER SYSTEM RESET max_wal_size")
-                self._conn.execute("ALTER SYSTEM RESET checkpoint_completion_target")
-                self._conn.execute("SELECT pg_reload_conf()")
-            except Exception:
-                log.debug("failed to reset tuning parameters", exc_info=True)
-            self._tuning_applied = False
 
         _close_with_timeout(self._conn, timeout, log)

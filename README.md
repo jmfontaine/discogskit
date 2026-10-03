@@ -229,8 +229,6 @@ still not rolled back.
 │ --pg-unlogged    --no-pg-unlogged      Skip WAL for faster writes (tables stay unlogged;     │
 │                                        data lost on crash)                                   │
 │                                        [default: no-pg-unlogged]                             │
-│ --pg-tune        --no-pg-tune          Temporarily apply settings optimized for bulk loading │
-│                                        [default: no-pg-tune]                                 │
 │ --pg-fk          --no-pg-fk            Add foreign key constraints after load                │
 │                                        [default: no-pg-fk]                                   │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -264,15 +262,32 @@ discogskit load --dsn discogs.db .
 # Use UNLOGGED tables for faster PostgreSQL writes (~2x speedup)
 discogskit load --pg-unlogged discogs_20260301_releases.xml.gz
 
-# Temporarily tune PostgreSQL for bulk loading
-discogskit load --pg-tune discogs_20260301_releases.xml.gz
-
 # Add foreign key constraints after load
 discogskit load --pg-fk discogs_20260301_releases.xml.gz
 
 # Use multiple write workers for parallel database inserts
 discogskit load --write-workers 4 discogs_20260301_releases.xml.gz
 ```
+
+#### PostgreSQL tuning
+
+`discogskit load` doesn't tune the server: `--pg-tune` used to run `ALTER SYSTEM SET max_wal_size = '16GB'` before
+the load and `ALTER SYSTEM RESET max_wal_size` on close, but `RESET` deletes the setting instead of restoring
+whatever value the user had before, it needed superuser, changed a server-wide setting from a data-loading tool,
+and a killed process (`SIGKILL`, OOM, or a timed out `close()`) left the tuned value on the server permanently
+([#26](https://github.com/jmfontaine/discogskit/issues/26)).
+
+To get the same effect, apply the setting yourself before a large load, either in `postgresql.conf` or with
+`ALTER SYSTEM` (requires superuser; reload or restart the server to apply):
+
+```sql
+ALTER SYSTEM SET max_wal_size = '16GB';
+SELECT pg_reload_conf();
+```
+
+Afterwards, restore whatever value you had before the load — `ALTER SYSTEM SET max_wal_size = '<previous value>';`
+— or, if you had never set it, remove the override with `ALTER SYSTEM RESET max_wal_size;`. Either way, follow it
+with `SELECT pg_reload_conf();`.
 
 ## Benchmarks
 
