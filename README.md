@@ -197,18 +197,15 @@ still not rolled back.
 │                                                          postgresql://localhost/discogskit]  │
 │ --parse-workers                      <int range> [x>=1]  Number of parallel parse workers    │
 │                                                          [default: 4]                        │
-│ --write-workers                      <int range> [x>=1]  Number of parallel database write   │
-│                                                          workers                             │
-│                                                          [default: 1]                        │
-│ --index-workers                      <int range> [x>=1]  Number of parallel index creation   │
-│                                                          workers                             │
-│                                                          [default: 2]                        │
 │ --chunk-mb                           <int range> [x>=1]  Split XML into chunks of roughly    │
 │                                                          this size (MB)                      │
 │                                                          [default: 256]                      │
 │ --write-queue                        <int range> [x>=1]  Max chunks buffered in memory       │
 │                                                          before writes must catch up         │
 │                                                          [default: 2]                        │
+│ --fk               --no-fk                               Enforce foreign key constraints     │
+│                                                          (SQLite and PostgreSQL)             │
+│                                                          [default: no-fk]                    │
 │ --keep-xml         --no-keep-xml                         Keep decompressed XML file after    │
 │                                                          loading                             │
 │                                                          [default: no-keep-xml]              │
@@ -227,15 +224,24 @@ still not rolled back.
 │ --help                                                   Show this message and exit.         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ PostgreSQL ─────────────────────────────────────────────────────────────────────────────────╮
-│ --pg-unlogged         --no-pg-unlogged                Skip WAL for faster writes (tables     │
-│                                                       stay unlogged; data lost on crash)     │
-│                                                       [default: no-pg-unlogged]              │
-│ --pg-fk               --no-pg-fk                      Add foreign key constraints after load │
-│                                                       [default: no-pg-fk]                    │
-│ --pg-create-schema    --no-pg-create-schema           Create --pg-schema if it doesn't exist │
-│                                                       [default: no-pg-create-schema]         │
-│ --pg-schema                                    <str>  Schema to create tables in (must exist │
-│                                                       unless --pg-create-schema)             │
+│ --pg-unlogged         --no-pg-unlogged                             Skip WAL for faster       │
+│                                                                    writes (tables stay       │
+│                                                                    unlogged; data lost on    │
+│                                                                    crash)                    │
+│                                                                    [default: no-pg-unlogged] │
+│ --pg-create-schema    --no-pg-create-schema                        Create --pg-schema if it  │
+│                                                                    doesn't exist             │
+│                                                                    [default:                 │
+│                                                                    no-pg-create-schema]      │
+│ --pg-schema                                    <str>               Schema to create tables   │
+│                                                                    in (must exist unless     │
+│                                                                    --pg-create-schema)       │
+│ --pg-write-workers                             <int range> [x>=1]  Number of parallel        │
+│                                                                    database write workers    │
+│                                                                    [default: 1]              │
+│ --pg-index-workers                             <int range> [x>=1]  Number of parallel index  │
+│                                                                    creation workers          │
+│                                                                    [default: 2]              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
 ```
@@ -267,11 +273,11 @@ discogskit load --dsn discogs.db .
 # Use UNLOGGED tables for faster PostgreSQL writes (~2x speedup)
 discogskit load --pg-unlogged discogs_20260301_releases.xml.gz
 
-# Add foreign key constraints after load
-discogskit load --pg-fk discogs_20260301_releases.xml.gz
+# Enforce foreign key constraints (SQLite and PostgreSQL)
+discogskit load --fk discogs_20260301_releases.xml.gz
 
-# Use multiple write workers for parallel database inserts
-discogskit load --write-workers 4 discogs_20260301_releases.xml.gz
+# Use multiple write workers for parallel PostgreSQL inserts
+discogskit load --pg-write-workers 4 discogs_20260301_releases.xml.gz
 
 # Load into a specific schema, creating it if it doesn't exist
 discogskit load --pg-schema discogs --pg-create-schema discogs_20260301_releases.xml.gz
@@ -358,7 +364,7 @@ python3 postgresql/psql.py < postgresql/sql/CreateIndexes.sql
 
 ```shell
 discogskit load --dsn postgresql://localhost:5432/discogskit --chunk-mb 256 \
-  --parse-workers 6 --write-workers 3 --index-workers 6 [path]
+  --parse-workers 6 --pg-write-workers 3 --pg-index-workers 6 [path]
 ```
 
 | Entity | Records | Parse + load | Indexes | Total |
@@ -373,7 +379,7 @@ discogskit load --dsn postgresql://localhost:5432/discogskit --chunk-mb 256 \
 
 ```shell
 discogskit load --dsn postgresql://localhost:5432/discogskit --chunk-mb 256 --pg-unlogged \
-  --parse-workers 6 --write-workers 3 --index-workers 6 [path]
+  --parse-workers 6 --pg-write-workers 3 --pg-index-workers 6 [path]
 ```
 
 | Entity | Records | Parse + load | Indexes | Total |
