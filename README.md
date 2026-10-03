@@ -61,8 +61,22 @@ through a `<name>.xml.lock` file, which stays next to the dump; delete it only w
 
 In every output format, a value missing from the XML is `NULL` (`null` in JSONL), while a text value that is present but
 empty is an empty string: `<country/>` gives `""`, no `<country>` element gives `NULL`. List columns follow the same
-rule: no `<genres>` element gives `NULL`, and an empty `<genre/>` stays in the list as `""`. Only IDs and the keys
-linking child tables to their parent are never `NULL`.
+rule: no `<genres>` element gives `NULL`, and an empty `<genre/>` stays in the list as `""`. Only each record's own
+`id` and the keys linking child tables to their parent (`release_id`, `track_idx`, ...) are never `NULL`; ids that
+reference other entities, such as `artist_id` or `label_id`, are `NULL` when the dump doesn't give one.
+
+discogskit stores values exactly as the dump has them, including values that look like placeholders rather than real
+data. Seen in the 2026-10-01 dump (other dumps may differ); the meanings are interpretations, not documented by
+Discogs:
+
+| Value | Where | Likely meaning |
+|---|---|---|
+| `0` | `releases.master_id` | the release has no master (no master has id 0) |
+| `0` | `masters.year` | the year is unknown |
+| `0` | some artist and company ids in link tables (e.g. `release_artists.artist_id`, `release_companies.company_id`) | no linked Discogs entity |
+| `65535` | `duration` in `master_videos` and `release_videos` | possibly a value capped at the 16-bit maximum upstream rather than a real duration |
+
+Filter them in your queries where they matter, e.g. `WHERE master_id <> 0`.
 
 ### discogskit convert
 
