@@ -497,3 +497,100 @@ class TestSplitFinderStrictValidation:
         splits = find_splits(str(f), 64)
 
         assert len(splits) > 1
+
+
+# Two records; a chunk ends at the last record's closing tag, so the trailing newline isn't part of it.
+_RECORDS = b"<item>1</item>\n<item>2</item>"
+
+
+class TestSplitFinderLeadingContent:
+    """Issue #79: workers parse each chunk inside their own ``<?xml version='1.0' encoding='UTF-8'?><container>``
+    envelope, so anything before the first record that the envelope doesn't reproduce must fail before parsing.
+
+    The inputs are synthetic XML variations; they say nothing about what real dumps contain.
+    """
+
+    @pytest.mark.parametrize(
+        "prolog",
+        [
+            b"<items>\n",
+            b"\n  <items >\n\t",
+            b"<?xml version='1.0'?>\n<items>\n",
+            b'<?xml version="1.0" encoding="UTF-8"?>\n<items>\n',
+            b"<?xml version='1.0' encoding='utf-8' standalone='yes'?><items>",
+        ],
+        ids=["bare", "whitespace", "decl-1.0", "decl-utf8", "decl-utf8-standalone"],
+    )
+    def test_supported_prolog_is_accepted(self, tmp_path, find_splits, prolog):
+        f = tmp_path / "test.xml"
+        f.write_bytes(prolog + _RECORDS + b"</items>\n")
+
+        [(start, end)] = find_splits(str(f), 1024 * 1024)
+
+        assert (start, end) == (len(prolog), len(prolog) + len(_RECORDS))
+
+    @pytest.mark.parametrize(
+        "prolog, offset, what",
+        [
+            (b"\xef\xbb\xbf<items>\n", 0, "a byte-order mark"),
+            (
+                b"<?xml version='1.0' encoding='ISO-8859-1'?>\n<items>\n",
+                0,
+                "an XML declaration other than",
+            ),
+            (b"<?xml version='1.1'?>\n<items>\n", 0, "an XML declaration other than"),
+            (
+                b"<?xml version='1.0'?>\n<?xml version='1.0'?>\n<items>\n",
+                22,
+                "an XML declaration other than",
+            ),
+            (b"<!DOCTYPE items [<!ENTITY e 'x'>]>\n<items>\n", 0, "a DOCTYPE"),
+            (b"<!-- generated -->\n<items>\n", 0, "a comment"),
+            (
+                b"<?xml-stylesheet href='a.xsl'?>\n<items>\n",
+                0,
+                "a processing instruction",
+            ),
+            (b"<items xmlns:x='urn:x'>\n", 0, "attributes on <items>"),
+            (b"<items version='2'>\n", 0, "attributes on <items>"),
+            (b"<items>\n<!-- note -->\n", 8, "a comment"),
+            (b"<items>\nstray text\n", 8, "unexpected content"),
+            (b"<items>\f\n", 7, "unexpected content"),
+            (b"", 0, "missing <items> start tag"),
+            (b"<?xml version='1.0'?>\n", 22, "missing <items> start tag"),
+            (b"<things>\n", 0, "unexpected content"),
+            (b"\n<?xml version='1.0'?>\n<items>\n", 1, "an XML declaration other than"),
+        ],
+        ids=[
+            "bom",
+            "decl-latin1",
+            "decl-1.1",
+            "second-decl",
+            "doctype",
+            "comment-before-container",
+            "pi",
+            "namespace-attr",
+            "plain-attr",
+            "comment-after-container",
+            "stray-text",
+            "form-feed",
+            "no-container",
+            "decl-only-no-container",
+            "wrong-container",
+            "whitespace-before-decl",
+        ],
+    )
+    def test_unsupported_prolog_is_rejected_with_offset(
+        self, tmp_path, find_splits, prolog, offset, what
+    ):
+        f = tmp_path / "test.xml"
+        f.write_bytes(prolog + _RECORDS + b"</items>\n")
+
+        with pytest.raises(ValueError) as info:
+            find_splits(str(f), 1024 * 1024)
+
+        message = str(info.value)
+        assert (
+            f"Unsupported content before the first <item> record at byte {offset}: {what}"
+            in message
+        )
