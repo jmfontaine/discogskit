@@ -229,8 +229,15 @@ the load stops and lists those objects instead of dropping them.
 # Load releases into PostgreSQL (default DSN: postgresql://localhost/discogskit)
 discogskit load discogs_20260301_releases.xml.gz
 
-# Load into a specific PostgreSQL database
-discogskit load --dsn "postgresql://user:pass@localhost/discogs" discogs_20260301_releases.xml.gz
+# Load into a specific PostgreSQL database. Keep the password off the command line
+# (it would show up in `ps` and shell history): put it in ~/.pgpass (or $PGPASSFILE)
+# for libpq to read, and use a passwordless DSN.
+discogskit load --dsn "postgresql://user@localhost/discogs" discogs_20260301_releases.xml.gz
+
+# Or set DATABASE_URL instead of --dsn, loaded from a secrets file rather than typed,
+# so the password never hits shell history either.
+export DATABASE_URL="$(cat ~/.discogskit-dsn)"
+discogskit load discogs_20260301_releases.xml.gz
 
 # Load into SQLite
 discogskit load --dsn discogs.db discogs_20260301_releases.xml.gz
