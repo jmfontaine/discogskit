@@ -22,12 +22,12 @@ class TestReleasesParsing:
         assert rel.column("id").to_pylist() == [1, 2]
         assert rel.column("title").to_pylist() == ["Test Release", "Minimal Release"]
         assert rel.column("status").to_pylist() == ["Accepted", "Accepted"]
-        assert rel.column("country").to_pylist() == ["US", ""]
-        assert rel.column("released").to_pylist() == ["2020-01-01", ""]
+        assert rel.column("country").to_pylist() == ["US", None]
+        assert rel.column("released").to_pylist() == ["2020-01-01", None]
         assert rel.column("master_id").to_pylist() == [100, None]
         assert rel.column("is_main_release").to_pylist() == [True, None]
-        assert rel.column("genres").to_pylist() == [["Electronic"], []]
-        assert rel.column("styles").to_pylist() == [["Techno"], []]
+        assert rel.column("genres").to_pylist() == [["Electronic"], None]
+        assert rel.column("styles").to_pylist() == [["Techno"], None]
 
     def test_artists(self, releases_xml_file):
         tables = self._parse(releases_xml_file)
@@ -133,6 +133,41 @@ class TestReleasesParsing:
 
         assert tables["releases"].num_rows == 0
         assert any("missing id" in str(warning.message) for warning in w)
+
+    def test_missing_is_null_and_empty_is_empty_string(self, tmp_path):
+        """Absent elements/attributes are NULL; present but empty ones are "" (#21)."""
+        xml = (
+            '<release id="1" status="">\n'
+            "  <title/>\n"
+            "  <genres><genre/><genre>Rock</genre></genres>\n"
+            "  <formats>\n"
+            '    <format name="Vinyl" qty="">'
+            "<descriptions><description/></descriptions></format>\n"
+            '    <format name="CD"/>\n'
+            "  </formats>\n"
+            '  <videos><video src="http://x"><title/></video></videos>\n'
+            "</release>\n"
+        )
+        f = tmp_path / "missing_vs_empty.xml"
+        f.write_text(xml)
+
+        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(f), 0, os.path.getsize(f)))
+        tables = ipc_to_tables(ipc_dict, SCHEMAS)
+
+        rel = tables["releases"].to_pylist()[0]
+        assert rel["status"] == ""
+        assert rel["title"] == ""
+        assert rel["genres"] == ["", "Rock"]
+        assert rel["country"] is None
+        assert rel["styles"] is None
+        formats = tables["release_formats"].to_pylist()
+        assert [(r["qty"], r["text"], r["descriptions"]) for r in formats] == [
+            ("", None, [""]),
+            (None, None, None),
+        ]
+        video = tables["release_videos"].to_pylist()[0]
+        assert (video["title"], video["description"]) == ("", None)
+        assert (video["duration"], video["embed"]) == (None, None)
 
     def test_invalid_video_duration_fallback(self, tmp_path):
         """Video with non-integer duration falls back to 0."""

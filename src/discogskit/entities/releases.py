@@ -19,8 +19,8 @@ from discogskit.entities import ChunkArgs, EntityDef, register
 from discogskit.entities._split import make_split_finder
 
 _Cols = dict[str, dict[str, list]]
-_ArtistRec = tuple[int | None, str, str, str]
-_ExtraArtistRec = tuple[int | None, str, str, str, str]
+_ArtistRec = tuple[int | None, str, str | None, str | None]
+_ExtraArtistRec = tuple[int | None, str, str | None, str | None, str | None]
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Constants
@@ -58,88 +58,88 @@ SCHEMAS = {
     "releases": pa.schema(
         [
             pa.field("id", pa.int32(), nullable=False),
-            pa.field("country", pa.utf8(), nullable=False),
-            pa.field("data_quality", pa.utf8(), nullable=False),
-            pa.field("genres", pa.list_(pa.utf8()), nullable=False),
+            pa.field("country", pa.utf8()),
+            pa.field("data_quality", pa.utf8()),
+            pa.field("genres", pa.list_(pa.utf8())),
             pa.field("is_main_release", pa.bool_()),
             pa.field("master_id", pa.int32()),
-            pa.field("notes", pa.utf8(), nullable=False),
-            pa.field("released", pa.utf8(), nullable=False),
-            pa.field("status", pa.utf8(), nullable=False),
-            pa.field("styles", pa.list_(pa.utf8()), nullable=False),
-            pa.field("title", pa.utf8(), nullable=False),
+            pa.field("notes", pa.utf8()),
+            pa.field("released", pa.utf8()),
+            pa.field("status", pa.utf8()),
+            pa.field("styles", pa.list_(pa.utf8())),
+            pa.field("title", pa.utf8()),
         ]
     ),
     "release_artists": pa.schema(
         [
             pa.field("release_id", pa.int32(), nullable=False),
             pa.field("artist_id", pa.int32()),
-            pa.field("anv", pa.utf8(), nullable=False),
-            pa.field("join", pa.utf8(), nullable=False),
-            pa.field("name", pa.utf8(), nullable=False),
+            pa.field("anv", pa.utf8()),
+            pa.field("join", pa.utf8()),
+            pa.field("name", pa.utf8()),
         ]
     ),
     "release_extraartists": pa.schema(
         [
             pa.field("release_id", pa.int32(), nullable=False),
             pa.field("artist_id", pa.int32()),
-            pa.field("anv", pa.utf8(), nullable=False),
-            pa.field("name", pa.utf8(), nullable=False),
-            pa.field("role", pa.utf8(), nullable=False),
-            pa.field("tracks", pa.utf8(), nullable=False),
+            pa.field("anv", pa.utf8()),
+            pa.field("name", pa.utf8()),
+            pa.field("role", pa.utf8()),
+            pa.field("tracks", pa.utf8()),
         ]
     ),
     "release_labels": pa.schema(
         [
             pa.field("release_id", pa.int32(), nullable=False),
             pa.field("label_id", pa.int32()),
-            pa.field("catno", pa.utf8(), nullable=False),
-            pa.field("name", pa.utf8(), nullable=False),
+            pa.field("catno", pa.utf8()),
+            pa.field("name", pa.utf8()),
         ]
     ),
     "release_series": pa.schema(
         [
             pa.field("release_id", pa.int32(), nullable=False),
             pa.field("series_id", pa.int32()),
-            pa.field("catno", pa.utf8(), nullable=False),
-            pa.field("name", pa.utf8(), nullable=False),
+            pa.field("catno", pa.utf8()),
+            pa.field("name", pa.utf8()),
         ]
     ),
     "release_formats": pa.schema(
         [
             pa.field("release_id", pa.int32(), nullable=False),
-            pa.field("descriptions", pa.list_(pa.utf8()), nullable=False),
-            pa.field("name", pa.utf8(), nullable=False),
-            pa.field("qty", pa.utf8(), nullable=False),
-            pa.field("text", pa.utf8(), nullable=False),
+            pa.field("descriptions", pa.list_(pa.utf8())),
+            pa.field("name", pa.utf8()),
+            pa.field("qty", pa.utf8()),
+            pa.field("text", pa.utf8()),
         ]
     ),
     "release_identifiers": pa.schema(
         [
             pa.field("release_id", pa.int32(), nullable=False),
-            pa.field("description", pa.utf8(), nullable=False),
-            pa.field("type", pa.utf8(), nullable=False),
-            pa.field("value", pa.utf8(), nullable=False),
+            pa.field("description", pa.utf8()),
+            pa.field("type", pa.utf8()),
+            pa.field("value", pa.utf8()),
         ]
     ),
     "release_videos": pa.schema(
         [
             pa.field("release_id", pa.int32(), nullable=False),
-            pa.field("description", pa.utf8(), nullable=False),
-            pa.field("duration", pa.int32(), nullable=False),
-            pa.field("embed", pa.bool_(), nullable=False),
-            pa.field("src", pa.utf8(), nullable=False),
-            pa.field("title", pa.utf8(), nullable=False),
+            pa.field("description", pa.utf8()),
+            pa.field("duration", pa.int32()),
+            pa.field("embed", pa.bool_()),
+            pa.field("src", pa.utf8()),
+            pa.field("title", pa.utf8()),
         ]
     ),
     "release_companies": pa.schema(
         [
             pa.field("release_id", pa.int32(), nullable=False),
             pa.field("company_id", pa.int32()),
-            pa.field("catno", pa.utf8(), nullable=False),
-            pa.field("entity_type_name", pa.utf8(), nullable=False),
-            pa.field("entity_type", pa.utf8(), nullable=False),
-            pa.field("name", pa.utf8(), nullable=False),
+            pa.field("catno", pa.utf8()),
+            pa.field("entity_type_name", pa.utf8()),
+            pa.field("entity_type", pa.utf8()),
+            pa.field("name", pa.utf8()),
         ]
     ),
     "release_tracks": pa.schema(
@@ -147,9 +147,9 @@ SCHEMAS = {
             pa.field("release_id", pa.int32(), nullable=False),
             pa.field("track_idx", pa.int32(), nullable=False),
             pa.field("parent_idx", pa.int32()),
-            pa.field("duration", pa.utf8(), nullable=False),
-            pa.field("position", pa.utf8(), nullable=False),
-            pa.field("title", pa.utf8(), nullable=False),
+            pa.field("duration", pa.utf8()),
+            pa.field("position", pa.utf8()),
+            pa.field("title", pa.utf8()),
         ]
     ),
     "release_track_artists": pa.schema(
@@ -157,9 +157,9 @@ SCHEMAS = {
             pa.field("release_id", pa.int32(), nullable=False),
             pa.field("track_idx", pa.int32(), nullable=False),
             pa.field("artist_id", pa.int32()),
-            pa.field("anv", pa.utf8(), nullable=False),
-            pa.field("join", pa.utf8(), nullable=False),
-            pa.field("name", pa.utf8(), nullable=False),
+            pa.field("anv", pa.utf8()),
+            pa.field("join", pa.utf8()),
+            pa.field("name", pa.utf8()),
         ]
     ),
     "release_track_extraartists": pa.schema(
@@ -167,9 +167,9 @@ SCHEMAS = {
             pa.field("release_id", pa.int32(), nullable=False),
             pa.field("track_idx", pa.int32(), nullable=False),
             pa.field("artist_id", pa.int32()),
-            pa.field("anv", pa.utf8(), nullable=False),
-            pa.field("name", pa.utf8(), nullable=False),
-            pa.field("role", pa.utf8(), nullable=False),
+            pa.field("anv", pa.utf8()),
+            pa.field("name", pa.utf8()),
+            pa.field("role", pa.utf8()),
         ]
     ),
 }
@@ -265,8 +265,8 @@ def _parse_artist_children(
             continue
         aid = None
         name = None
-        anv = ""
-        join_text = ""
+        anv = None
+        join_text = None
         for ch in a:
             t = ch.tag
             if t == "id":
@@ -293,9 +293,9 @@ def _parse_extraartist_children(
             continue
         aid = None
         name = None
-        anv = ""
-        role = ""
-        tracks_text = ""
+        anv = None
+        role = None
+        tracks_text = None
         for ch in a:
             t = ch.tag
             if t == "id":
@@ -319,11 +319,16 @@ def _parse_single_track(
     track_elem: etree._Element,
     unknown: set[str] | None = None,
 ) -> tuple[
-    str, str, str, list[_ArtistRec], list[_ExtraArtistRec], etree._Element | None
+    str | None,
+    str | None,
+    str | None,
+    list[_ArtistRec],
+    list[_ExtraArtistRec],
+    etree._Element | None,
 ]:
-    position = ""
-    title = ""
-    duration = ""
+    position = None
+    title = None
+    duration = None
     artists = []
     extraartists = []
     sub_tracks_elem = None
@@ -355,17 +360,17 @@ def _append_release(
         warnings.warn("skipping <release> with missing id", stacklevel=2)
         return
     rid = int(id_text)
-    status = elem.get("status") or ""
+    status = elem.get("status")
 
-    title = ""
-    country = ""
-    released = ""
-    notes = ""
-    data_quality = ""
+    title = None
+    country = None
+    released = None
+    notes = None
+    data_quality = None
     master_id = None
     is_main_release = None
-    genres = []
-    styles = []
+    genres = None
+    styles = None
 
     r_artists = []
     r_extraartists = []
@@ -395,9 +400,9 @@ def _append_release(
             if attr is not None:
                 is_main_release = attr == "true"
         elif tag == "genres":
-            genres = [g.text for g in child.findall("genre") if g.text]
+            genres = [g.text or "" for g in child.findall("genre")]
         elif tag == "styles":
-            styles = [s.text for s in child.findall("style") if s.text]
+            styles = [s.text or "" for s in child.findall("style")]
         elif tag == "artists":
             r_artists = _parse_artist_children(child, unknown)
         elif tag == "extraartists":
@@ -408,8 +413,8 @@ def _append_release(
                 r_labels.append(
                     (
                         int(la_id_str) if la_id_str else None,
-                        la.get("name") or "",
-                        la.get("catno") or "",
+                        la.get("name"),
+                        la.get("catno"),
                     )
                 )
         elif tag == "series":
@@ -418,20 +423,23 @@ def _append_release(
                 r_series.append(
                     (
                         int(sr_id_str) if sr_id_str else None,
-                        sr.get("name") or "",
-                        sr.get("catno") or "",
+                        sr.get("name"),
+                        sr.get("catno"),
                     )
                 )
         elif tag == "formats":
             for ff in child.findall("format"):
-                descs = [
-                    d.text for d in ff.findall("descriptions/description") if d.text
-                ]
+                descs_elem = ff.find("descriptions")
+                descs = (
+                    None
+                    if descs_elem is None
+                    else [d.text or "" for d in descs_elem.findall("description")]
+                )
                 r_formats.append(
                     (
-                        ff.get("name") or "",
-                        ff.get("qty") or "",
-                        ff.get("text") or "",
+                        ff.get("name"),
+                        ff.get("qty"),
+                        ff.get("text"),
                         descs,
                     )
                 )
@@ -439,20 +447,24 @@ def _append_release(
             for ident in child.findall("identifier"):
                 r_identifiers.append(
                     (
-                        ident.get("type") or "",
-                        ident.get("description") or "",
-                        ident.get("value") or "",
+                        ident.get("type"),
+                        ident.get("description"),
+                        ident.get("value"),
                     )
                 )
         elif tag == "videos":
             for vid in child.findall("video"):
-                dur_str = vid.get("duration") or "0"
-                try:
-                    vid_dur = int(dur_str)
-                except ValueError:
-                    vid_dur = 0
-                vid_title = ""
-                vid_desc = ""
+                dur_str = vid.get("duration")
+                vid_dur = None
+                if dur_str:
+                    try:
+                        vid_dur = int(dur_str)
+                    except ValueError:
+                        vid_dur = 0
+                embed_str = vid.get("embed")
+                vid_embed = embed_str == "true" if embed_str else None
+                vid_title = None
+                vid_desc = None
                 for vch in vid:
                     if vch.tag == "title":
                         vid_title = vch.text or ""
@@ -462,11 +474,11 @@ def _append_release(
                         unknown.add(f"videos/video/{vch.tag}")
                 r_videos.append(
                     (
-                        vid.get("src") or "",
+                        vid.get("src"),
                         vid_dur,
                         vid_title,
                         vid_desc,
-                        vid.get("embed") == "true",
+                        vid_embed,
                     )
                 )
         elif tag == "companies":
@@ -474,10 +486,10 @@ def _append_release(
                 if co.tag != "company":
                     continue
                 cid = None
-                cname = ""
-                ccatno = ""
-                cetype = ""
-                cetype_name = ""
+                cname = None
+                ccatno = None
+                cetype = None
+                cetype_name = None
                 for cch in co:
                     ct = cch.tag
                     if ct == "id":

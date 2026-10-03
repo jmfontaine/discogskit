@@ -20,11 +20,11 @@ class TestArtistsParsing:
         assert artists.num_rows == 2
         assert artists.column("id").to_pylist() == [1, 2]
         assert artists.column("name").to_pylist() == ["DJ Test", "Minimal Artist"]
-        assert artists.column("realname").to_pylist() == ["Test Person", ""]
-        assert artists.column("profile").to_pylist() == ["A test artist", ""]
+        assert artists.column("realname").to_pylist() == ["Test Person", None]
+        assert artists.column("profile").to_pylist() == ["A test artist", None]
         assert artists.column("data_quality").to_pylist() == ["Correct", "Needs Vote"]
-        assert artists.column("namevariations").to_pylist() == [["DJ T", "Test"], []]
-        assert artists.column("urls").to_pylist() == [["https://example.com"], []]
+        assert artists.column("namevariations").to_pylist() == [["DJ T", "Test"], None]
+        assert artists.column("urls").to_pylist() == [["https://example.com"], None]
 
     def test_aliases(self, artists_xml_file):
         size = os.path.getsize(artists_xml_file)

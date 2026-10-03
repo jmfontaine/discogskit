@@ -38,11 +38,6 @@ _ARROW_TO_SQLITE: dict[pa.DataType, str] = {
     pa.utf8(): "TEXT",
 }
 
-_SQLITE_DEFAULTS: dict[str, str] = {
-    "INTEGER": "0",
-    "TEXT": "''",
-}
-
 
 def _arrow_to_sqlite_type(arrow_type: pa.DataType) -> str:
     if isinstance(arrow_type, pa.ListType):
@@ -70,10 +65,6 @@ def generate_ddl(
             parts.append("PRIMARY KEY")
         elif not field.nullable:
             parts.append("NOT NULL")
-            if isinstance(field.type, pa.ListType):
-                parts.append("DEFAULT '[]'")
-            else:
-                parts.append(f"DEFAULT {_SQLITE_DEFAULTS[sql_type]}")
         if field.name == fk_column and fk_ref_table is not None:
             parts.append(f"REFERENCES {fk_ref_table}({pk_column})")
         lines.append(" ".join(parts))
@@ -203,7 +194,7 @@ class SQLiteWriter:
                 if list_cols:
                     for i in list_cols:
                         columns[i] = [
-                            json.dumps(v) if v is not None else "[]" for v in columns[i]
+                            json.dumps(v) if v is not None else None for v in columns[i]
                         ]
                 rows = list(zip(*columns))
                 cur.executemany(insert_sql, rows)

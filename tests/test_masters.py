@@ -21,7 +21,7 @@ class TestMastersParsing:
         assert masters.column("title").to_pylist() == ["Test Master", "Minimal Master"]
         assert masters.column("year").to_pylist() == [2020, None]
         assert masters.column("main_release").to_pylist() == [100, None]
-        assert masters.column("notes").to_pylist() == ["Some notes", ""]
+        assert masters.column("notes").to_pylist() == ["Some notes", None]
         assert masters.column("data_quality").to_pylist() == ["Correct", "Needs Vote"]
 
     def test_artists(self, masters_xml_file):
@@ -43,7 +43,7 @@ class TestMastersParsing:
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         masters = tables["masters"]
-        assert masters.column("genres").to_pylist() == [["Electronic", "Rock"], []]
+        assert masters.column("genres").to_pylist() == [["Electronic", "Rock"], None]
 
     def test_styles(self, masters_xml_file):
         size = os.path.getsize(masters_xml_file)
@@ -51,7 +51,7 @@ class TestMastersParsing:
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         masters = tables["masters"]
-        assert masters.column("styles").to_pylist() == [["Techno"], []]
+        assert masters.column("styles").to_pylist() == [["Techno"], None]
 
     def test_videos(self, masters_xml_file):
         size = os.path.getsize(masters_xml_file)

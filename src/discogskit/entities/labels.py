@@ -36,20 +36,20 @@ SCHEMAS = {
     "labels": pa.schema(
         [
             pa.field("id", pa.int32(), nullable=False),
-            pa.field("contactinfo", pa.utf8(), nullable=False),
-            pa.field("data_quality", pa.utf8(), nullable=False),
-            pa.field("name", pa.utf8(), nullable=False),
+            pa.field("contactinfo", pa.utf8()),
+            pa.field("data_quality", pa.utf8()),
+            pa.field("name", pa.utf8()),
             pa.field("parent_label_id", pa.int32()),
-            pa.field("parent_label_name", pa.utf8(), nullable=False),
-            pa.field("profile", pa.utf8(), nullable=False),
-            pa.field("urls", pa.list_(pa.utf8()), nullable=False),
+            pa.field("parent_label_name", pa.utf8()),
+            pa.field("profile", pa.utf8()),
+            pa.field("urls", pa.list_(pa.utf8())),
         ]
     ),
     "label_sublabels": pa.schema(
         [
             pa.field("label_id", pa.int32(), nullable=False),
             pa.field("sublabel_id", pa.int32()),
-            pa.field("name", pa.utf8(), nullable=False),
+            pa.field("name", pa.utf8()),
         ]
     ),
 }
@@ -123,13 +123,13 @@ def _append_label(
         return
     label_id = int(id_text)
 
-    contact_info = ""
-    data_quality = ""
-    name = ""
+    contact_info = None
+    data_quality = None
+    name = None
     parent_label_id = None
-    parent_label_name = ""
-    profile = ""
-    urls = []
+    parent_label_name = None
+    profile = None
+    urls = None
 
     for child in elem:
         tag = child.tag
@@ -157,7 +157,7 @@ def _append_label(
                 row["sublabel_id"].append(sub_id)
                 row["name"].append(sub_name)
         elif tag == "urls":
-            urls = [u.text for u in child.findall("url") if u.text]
+            urls = [u.text or "" for u in child.findall("url")]
         elif unknown is not None:
             unknown.add(tag)
 

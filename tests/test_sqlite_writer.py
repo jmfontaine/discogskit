@@ -59,6 +59,11 @@ class TestSQLiteWriter:
         ).fetchone()
         assert json.loads(row[0]) == ["DJ T", "Test"]
         assert json.loads(row[1]) == ["https://example.com"]
+        # An absent list is NULL, not "[]" (#21)
+        row = conn.execute(
+            "SELECT namevariations, urls FROM artists WHERE id = 2"
+        ).fetchone()
+        assert row == (None, None)
 
         # Verify FK indexes created
         indexes = {
