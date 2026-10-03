@@ -237,20 +237,6 @@ class TestPostgreSQLWriter:
         writer.write_chunk(ipc_dict, entity)
         writer.close()  # close without finalize
 
-    def test_tuning(self, pg_dsn, entity, ipc_dict):
-        """tune=True applies and resets PostgreSQL tuning parameters."""
-        from discogskit.writers.postgresql import PostgreSQLWriter
-
-        writer = PostgreSQLWriter(pg_dsn, overwrite=True, tune=True)
-        try:
-            writer.setup(entity)
-            count = writer.write_chunk(ipc_dict, entity)
-            writer.finalize(entity)
-        finally:
-            writer.close()
-
-        assert count == 2
-
     def test_indexes_only(self, pg_dsn, entity, ipc_dict):
         """finalize() without setup() rebuilds indexes on existing tables."""
         from discogskit.writers.postgresql import PostgreSQLWriter
@@ -299,6 +285,47 @@ class TestPostgreSQLWriter:
                 "WHERE constraint_type = 'FOREIGN KEY' AND table_schema = 'public'"
             ).fetchall()
             assert len(fks) == len(entity.table_order) - 1
+
+    def test_load_does_not_need_superuser(self, pg_dsn, entity, ipc_dict):
+        """A role with USAGE/CREATE on its schema, but not superuser, can load (#26)."""
+        import psycopg
+        from psycopg import sql
+
+        role = f"loader_{uuid.uuid4().hex[:8]}"
+        parts = urlsplit(pg_dsn)
+        role_dsn = parts._replace(
+            netloc=f"{role}:pw@{parts.hostname}:{parts.port}"
+        ).geturl()
+        with psycopg.connect(pg_dsn, autocommit=True) as conn:
+            conn.execute(
+                sql.SQL("CREATE ROLE {} LOGIN PASSWORD 'pw'").format(
+                    sql.Identifier(role)
+                )
+            )
+            conn.execute(
+                sql.SQL("GRANT USAGE, CREATE ON SCHEMA public TO {}").format(
+                    sql.Identifier(role)
+                )
+            )
+            # Tables may already exist, owned by whatever role an earlier test used;
+            # dropping them here lets the new role create (and own) them fresh.
+            tables = sql.SQL(", ").join(sql.Identifier(t) for t in entity.table_order)
+            conn.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(tables))
+            is_superuser = conn.execute(
+                "SELECT rolsuper FROM pg_roles WHERE rolname = %s", (role,)
+            ).fetchone()
+        assert is_superuser == (False,)
+
+        try:
+            _load(role_dsn, entity, ipc_dict, overwrite=True)
+
+            with psycopg.connect(pg_dsn) as conn:
+                count = conn.execute("SELECT COUNT(*) FROM artists").fetchone()
+            assert count == (2,)
+        finally:
+            with psycopg.connect(pg_dsn, autocommit=True) as conn:
+                conn.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
+                conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
 
 
 @pytest.mark.integration
@@ -404,52 +431,6 @@ class TestOverwriteSafety:
 
         with pytest.raises(OutputExistsError, match="--overwrite"):
             _load(dsn, entity, ipc_dict, overwrite=False)
-
-    def test_failed_tuning_leaves_existing_tables_intact(
-        self, entity, ipc_dict, pg_dsn, schemas
-    ):
-        """--pg-tune needs ALTER SYSTEM, which a table-owning role usually lacks.
-
-        It must fail before the drop, or --overwrite would leave empty tables.
-        """
-        import psycopg
-        from psycopg import sql
-
-        target, _, _ = schemas
-        role = f"loader_{uuid.uuid4().hex[:8]}"
-        parts = urlsplit(pg_dsn)
-        role_dsn = (
-            parts._replace(netloc=f"{role}:pw@{parts.hostname}:{parts.port}").geturl()
-            + f"?options=-csearch_path%3D{target}"
-        )
-        with psycopg.connect(pg_dsn, autocommit=True) as conn:
-            conn.execute(
-                sql.SQL("CREATE ROLE {} LOGIN PASSWORD 'pw'").format(
-                    sql.Identifier(role)
-                )
-            )
-            conn.execute(
-                sql.SQL("GRANT USAGE, CREATE ON SCHEMA {} TO {}").format(
-                    sql.Identifier(target), sql.Identifier(role)
-                )
-            )
-        try:
-            _load(role_dsn, entity, ipc_dict, overwrite=True)
-
-            with pytest.raises(psycopg.errors.InsufficientPrivilege):
-                _load(role_dsn, entity, ipc_dict, overwrite=True, tune=True)
-
-            with psycopg.connect(pg_dsn) as conn:
-                count = conn.execute(
-                    sql.SQL("SELECT COUNT(*) FROM {}").format(
-                        sql.Identifier(target, "artists")
-                    )
-                ).fetchone()
-            assert count == (2,)
-        finally:
-            with psycopg.connect(pg_dsn, autocommit=True) as conn:
-                conn.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
-                conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
 
 
 class TestSplitTableGroups:

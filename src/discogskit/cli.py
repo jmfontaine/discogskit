@@ -396,13 +396,6 @@ def load(
             rich_help_panel="PostgreSQL",
         ),
     ] = False,
-    pg_tune: Annotated[
-        bool,
-        typer.Option(
-            help="Temporarily apply settings optimized for bulk loading",
-            rich_help_panel="PostgreSQL",
-        ),
-    ] = False,
     pg_fk: Annotated[
         bool,
         typer.Option(
@@ -419,7 +412,6 @@ def load(
             fk=pg_fk,
             index_workers=index_workers,
             overwrite=overwrite,
-            tune=pg_tune,
             unlogged=pg_unlogged,
             write_workers=write_workers,
         )
