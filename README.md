@@ -442,6 +442,28 @@ discogskit load --dsn postgresql://localhost:5432/discogskit --chunk-mb 256 --pg
 
 </details>
 
+### On GitHub Actions
+
+The [Benchmark workflow](.github/workflows/benchmark.yml) runs discogskit on a standard `ubuntu-24.04` runner (4 vCPU,
+16 GB RAM), which anyone can reproduce. Start it from the Actions tab, or with `gh workflow run benchmark.yml`. It
+benchmarks the first million releases of the latest dump by default, into JSONL, Parquet, SQLite and PostgreSQL 18,
+3 times each. Inputs select the dump date, entities, record count, targets and repeats.
+
+The full dump doesn't fit on the runner's disk, so `benchmarks/subset.py` streams the start of each dump and stops
+after N records, so only that part is downloaded. It closes the root element after the last record so the subset
+is a valid dump. The workflow caches the subset by dump date and record count, and records its SHA-256: Discogs'
+checksum covers the whole `.gz`, so it can't verify a partial download.
+
+`benchmarks/ci.py` times each run and reads its peak memory from a dedicated cgroup's `memory.peak`, which covers
+every process discogskit starts, plus the page cache they fill; the PostgreSQL server runs in its own container
+and isn't included. Every run starts with the page cache dropped, so repeats are equally cold. Downloading, cutting
+and resetting the target stay outside the timed sections. The run page shows the medians with the fastest and slowest
+runs, and the `benchmark-results` artifact holds every run's numbers and logs, with the runner image, CPU model, dump
+date, subset SHA-256, commit and tool versions.
+
+Compare numbers only within one run: shared runners vary from run to run, and so can their CPU model. A subset is the
+start of the dump, not a random sample, so its throughput may not match the full dump's.
+
 
 ## License
 
