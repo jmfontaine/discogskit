@@ -426,13 +426,18 @@ class TestPipelineRun:
             finally:
                 writer.close()
 
-        # The reported chunk and line point at the malformed record in the XML.
+        # The reported chunk and line point at the malformed record in the XML. The file's own prolog
+        # ("<?xml ...?>\n<artists>\n") spans multiple lines, so lxml's line number is offset from the chunk's own
+        # line numbering by that many lines; the message says exactly how much to subtract.
         message = str(info.value)
         span = re.search(r"bytes (\d+)-(\d+)", message)
         position = re.search(r", line (\d+), column", message)
-        assert span is not None and position is not None, message
+        subtract = re.search(r"subtract (\d+)", message)
+        assert span is not None and position is not None and subtract is not None, (
+            message
+        )
         start, end = int(span.group(1)), int(span.group(2))
-        line = int(position.group(1))
+        line = int(position.group(1)) - int(subtract.group(1))
         chunk = gz_path.with_suffix("").read_bytes()[start:end]
         assert chunk.split(b"\n")[line - 1] == b"  <name>Artist %d</nam>" % bad
 

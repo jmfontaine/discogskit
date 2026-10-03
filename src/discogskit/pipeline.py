@@ -77,6 +77,7 @@ from discogskit import decompress
 from discogskit._console import console, status
 from discogskit.entities import ChunkArgs, EntityDef
 from discogskit.entities import get as get_entity
+from discogskit.entities._split import envelope_offsets
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers import Writer
 
@@ -251,8 +252,19 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
         t_split_start = time.perf_counter()
         splits = entity.find_split_points(str(xml_path), chunk_bytes)
         t_split = time.perf_counter() - t_split_start
+        # Every chunk needs the same two file-level boundaries to rebuild the dump's own XML envelope (prolog and
+        # container closing tag) instead of a synthesized one; see envelope_offsets' docstring.
+        prolog_end, footer_start = envelope_offsets(splits)
         worker_args = [
-            ChunkArgs(entity.name, str(xml_path), s, e, config.strict)
+            ChunkArgs(
+                entity.name,
+                str(xml_path),
+                s,
+                e,
+                prolog_end=prolog_end,
+                footer_start=footer_start,
+                strict=config.strict,
+            )
             for s, e in splits
         ]
         n_chunks = len(splits)

@@ -164,6 +164,33 @@ def _check_trailing_content(
         )
 
 
+# BOMs for encodings whose bytes aren't ASCII-compatible: scanning searches for literal single-byte ASCII tag
+# bytes ("<", ">", "/", etc.), which can't locate anything correctly if, say, "<" is encoded as two or four bytes
+# with embedded NULs. Longer (4-byte) marks are listed first since the UTF-32LE BOM starts with the UTF-16LE one.
+_INCOMPATIBLE_BOMS = (
+    (b"\xff\xfe\x00\x00", "UTF-32LE"),
+    (b"\x00\x00\xfe\xff", "UTF-32BE"),
+    (b"\xff\xfe", "UTF-16LE"),
+    (b"\xfe\xff", "UTF-16BE"),
+)
+
+
+def _reject_incompatible_encoding(mm: mmap.mmap) -> None:
+    """Raise if the file starts with a byte order mark for an encoding this module can't scan.
+
+    Only ASCII-compatible encodings work here — UTF-8, the ISO-8859-* and Windows-125* families, and similar —
+    since every pattern above is literal ASCII bytes. A declared encoding doesn't help: the declaration itself is
+    unreadable as ASCII in UTF-16/32, so a BOM is the one thing we can check before scanning anything else.
+    """
+    head = bytes(mm[:4])
+    for bom, name in _INCOMPATIBLE_BOMS:
+        if head.startswith(bom):
+            raise ValueError(
+                f"{name} byte order mark detected; only ASCII-compatible encodings (UTF-8, ISO-8859-*, "
+                f"Windows-125*, and similar) are supported, since splitting scans for literal ASCII tag bytes"
+            )
+
+
 def find_split_points(
     file_path: str, target_chunk_bytes: int, tag: str, container: str
 ) -> list[tuple[int, int]]:
@@ -182,6 +209,7 @@ def find_split_points(
     with open(file_path, "rb") as f:
         mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
         try:
+            _reject_incompatible_encoding(mm)
             data_start, boundaries = _scan_records(mm, tag_bytes)
             data_end = boundaries[-1]
             _check_trailing_content(mm, data_end, tag_bytes, container_bytes)
@@ -196,3 +224,16 @@ def find_split_points(
             return splits
         finally:
             mm.close()
+
+
+def envelope_offsets(splits: list[tuple[int, int]]) -> tuple[int, int]:
+    """Return ``(prolog_end, footer_start)`` from a ``find_split_points`` result.
+
+    Every chunk needs the same two file-level boundaries to build a standalone XML envelope from the dump's own
+    bytes: everything before ``prolog_end`` is the real prolog (XML declaration, DOCTYPE, comments, the container
+    start tag with its attributes), and everything from ``footer_start`` onward is the real footer (the
+    container's closing tag, already validated by ``find_split_points`` to be the only thing — besides
+    whitespace — following the last record). The first split always starts at the first record and the last one
+    always ends at the last record, so both are already in ``splits``; this just names them.
+    """
+    return splits[0][0], splits[-1][1]
