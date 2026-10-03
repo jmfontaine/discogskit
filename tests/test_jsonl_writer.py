@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import bz2
+import gzip
 import json
 import os
 
@@ -83,6 +85,38 @@ class TestJSONLWriter:
             path = entity_dir / f"{table_name}.jsonl.bz2"
             assert path.exists()
             assert path.stat().st_size > 0
+
+    @pytest.mark.parametrize("compression", ["gzip", "bzip2"])
+    def test_multi_chunk_compressed_round_trip(
+        self, tmp_path, entity, ipc_dict, compression
+    ):
+        """Two non-empty chunks across the write_chunk() boundary must decompress to valid JSONL.
+
+        Catches a dropped or misplaced newline at the chunk boundary, which `.strip()`-based
+        assertions on a single chunk's output cannot.
+        """
+        writer = JSONLWriter(str(tmp_path), compression=compression)
+        tables = ipc_to_record_batches(ipc_dict)
+        expected_rows = {name: batch.to_pylist() for name, batch in tables.items()}
+        try:
+            writer.setup(entity)
+            writer.write_chunk(ipc_to_record_batches(ipc_dict))
+            writer.write_chunk(ipc_to_record_batches(ipc_dict))
+            writer.finalize(entity)
+        finally:
+            writer.close()
+
+        ext = ".jsonl.gz" if compression == "gzip" else ".jsonl.bz2"
+        opener = gzip.open if compression == "gzip" else bz2.open
+        entity_dir = tmp_path / "artists"
+        for table_name, rows in expected_rows.items():
+            path = entity_dir / f"{table_name}{ext}"
+            with opener(path, "rt", encoding="utf-8") as f:
+                text = f.read()
+            assert text.endswith("\n")
+            lines = text[:-1].split("\n")
+            assert len(lines) == len(rows) * 2
+            assert [json.loads(line) for line in lines] == rows + rows
 
     def test_write_chunk_records_table_timings(self, tmp_path, entity, ipc_dict):
         """write_chunk returns per-table flush timing."""

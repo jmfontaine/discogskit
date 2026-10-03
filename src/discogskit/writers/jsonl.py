@@ -1,8 +1,16 @@
 """JSONL writer: Arrow RecordBatches serialized as one JSON object per line.
 
 Arrow list columns become JSON arrays via ``to_pylist()``, so no manual
-conversion is needed. Optional gzip compression produces ``.jsonl.gz`` files.
-Files are staged and only moved to their final names by ``finalize()``.
+conversion is needed. Gzip compression uses level 6 rather than the
+library's level-9 default: output a few percent larger for much less
+compression CPU (measured in #32). bz2 stays at its own default — its
+``compresslevel`` only changes the BWT block size, not compression
+speed, and level 6 produced no measured speedup and slightly larger
+output. Batching rows into fewer, larger write() calls was tried and
+measured: the speedup didn't reproduce beyond noise, since json.dumps()
+dominates, so write_chunk() still makes two write() calls per row (the
+JSON text, then the newline). Files are staged and only moved to their
+final names by ``finalize()``.
 """
 
 from __future__ import annotations
@@ -64,7 +72,9 @@ class JSONLWriter:
             path = self._staged.path(f"{table_name}{ext}")
             # File lifetime is managed by finalize()/close(), not a with-block.
             if self._compression == "gzip":
-                self._files[table_name] = gzip.open(path, "wt", encoding="utf-8")  # noqa: SIM115
+                self._files[table_name] = gzip.open(  # noqa: SIM115
+                    path, "wt", compresslevel=6, encoding="utf-8"
+                )
             elif self._compression == "bzip2":
                 self._files[table_name] = bz2.open(path, "wt", encoding="utf-8")  # noqa: SIM115
             else:
