@@ -1,0 +1,122 @@
+name: Benchmark
+
+# Manual only, to spare Discogs' bandwidth. Numbers are only comparable within one run: shared runners vary from run
+# to run, and so can their CPU model.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dump-date:
+        default: latest
+        description: Dump date (YYYYMMDD), or latest
+        type: string
+      entities:
+        default: releases
+        description: Comma-separated entities among artists, labels, masters, releases
+        type: string
+      records:
+        default: 1000000
+        description: Records per entity, from the start of each dump
+        type: number
+      repeats:
+        default: 3
+        description: Runs per entity and target
+        type: number
+      targets:
+        default: jsonl,parquet,postgresql,sqlite
+        description: Comma-separated targets among jsonl, parquet, postgresql, sqlite
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: Benchmark
+    # Pinned: ubuntu-latest will move to a newer image and silently change the baseline.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      CGROUP: /sys/fs/cgroup/discogskit-bench
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: discogskit
+          POSTGRES_HOST_AUTH_METHOD: trust
+        # Docker's default 64 MB /dev/shm is too small for PostgreSQL's parallel index builds.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-retries 20
+          --health-timeout 5s
+          --shm-size 1g
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+
+      - name: Resolve the dump date
+        id: dump
+        env:
+          DUMP_DATE: ${{ inputs.dump-date }}
+          ENTITIES: ${{ inputs.entities }}
+        run: |
+          date=$(uv run --no-sync python benchmarks/subset.py resolve --date "$DUMP_DATE" --entities "$ENTITIES")
+          echo "date=$date" >> "$GITHUB_OUTPUT"
+
+      # Caches are immutable: hashing subset.py into the key rebuilds the subset whenever the code cutting it changes.
+      - name: Restore the subset
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: >-
+            discogs-subset-${{ steps.dump.outputs.date }}-${{ inputs.entities }}-${{ inputs.records }}-${{
+            hashFiles('benchmarks/subset.py') }}
+          path: ${{ runner.temp }}/subset
+
+      - name: Download the subset
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          DUMP_DATE: ${{ steps.dump.outputs.date }}
+          ENTITIES: ${{ inputs.entities }}
+          RECORDS: ${{ inputs.records }}
+        run: >-
+          uv run --no-sync python benchmarks/subset.py fetch --date "$DUMP_DATE" --entities "$ENTITIES"
+          --output "$RUNNER_TEMP/subset" --records "$RECORDS"
+
+      - name: Show the subset
+        run: cat "$RUNNER_TEMP/subset/subset.json"
+
+      # Each run gets its own cgroup, so its memory.peak covers the whole process tree. Moving a process between
+      # cgroups takes write access to their closest common ancestor, so the harness runs in harness/ under a cgroup
+      # the runner user owns, and puts each run in a sibling of harness/.
+      - name: Delegate a cgroup to the benchmark
+        run: |
+          sudo mkdir -p "$CGROUP/harness"
+          sudo chown -R "$(id -u):$(id -g)" "$CGROUP"
+          echo +memory > "$CGROUP/cgroup.subtree_control"
+
+      - name: Run the benchmarks
+        env:
+          REPEATS: ${{ inputs.repeats }}
+          TARGETS: ${{ inputs.targets }}
+        run: |
+          echo $$ | sudo tee "$CGROUP/harness/cgroup.procs" > /dev/null
+          uv run --no-sync python benchmarks/ci.py --cgroup "$CGROUP" \
+            --dsn postgresql://postgres@localhost:5432/discogskit --output "$RUNNER_TEMP/results" \
+            --repeats "$REPEATS" --subset "$RUNNER_TEMP/subset" --summary "$GITHUB_STEP_SUMMARY" \
+            --targets "$TARGETS" --work "$RUNNER_TEMP/work"
+
+      - name: Upload the results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmark-results
+          path: ${{ runner.temp }}/results
