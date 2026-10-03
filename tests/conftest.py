@@ -7,10 +7,10 @@ import pytest
 
 from discogskit.entities import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
-from discogskit.writers._ipc import deserialize_batches
+from discogskit.writers._ipc import deserialize_batch
 
 # ------------------------------------------------------------------------------------------------------------------------
-# Helper: IPC dict → dict[str, pa.Table]
+# Helper: IPC dict → dict[str, pa.Table] / dict[str, pa.RecordBatch]
 # ------------------------------------------------------------------------------------------------------------------------
 
 
@@ -18,14 +18,17 @@ def ipc_to_tables(
     ipc_dict: dict[str, bytes], schemas: dict[str, pa.Schema]
 ) -> dict[str, pa.Table]:
     """Deserialize an IPC dict into Arrow Tables keyed by table name."""
-    result = {}
-    for name, ipc_bytes in ipc_dict.items():
-        batches = deserialize_batches(ipc_bytes)
-        if batches:
-            result[name] = pa.Table.from_batches(batches, schema=schemas[name])
-        else:
-            result[name] = pa.table({}, schema=schemas[name])
-    return result
+    return {
+        name: pa.Table.from_batches(
+            [deserialize_batch(ipc_bytes)], schema=schemas[name]
+        )
+        for name, ipc_bytes in ipc_dict.items()
+    }
+
+
+def ipc_to_record_batches(ipc_dict: dict[str, bytes]) -> dict[str, pa.RecordBatch]:
+    """Deserialize an IPC dict into the ``dict[str, pa.RecordBatch]`` ``Writer.write_chunk`` expects."""
+    return {name: deserialize_batch(ipc_bytes) for name, ipc_bytes in ipc_dict.items()}
 
 
 def empty_ipc(entity: str) -> dict[str, bytes]:

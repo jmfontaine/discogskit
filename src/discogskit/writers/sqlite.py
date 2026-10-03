@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 
 from discogskit._console import status
-from discogskit.writers._ipc import deserialize_batches
 
 if TYPE_CHECKING:
     from discogskit.entities import EntityDef
@@ -170,33 +169,17 @@ class SQLiteWriter:
             if list_cols:
                 self._list_columns[t] = list_cols
 
-    def write_chunk(
-        self,
-        ipc_dict: dict[str, bytes],
-        entity: EntityDef,
-        table_timings: dict[str, float] | None = None,
-    ) -> int:
-        """Write one chunk. Returns root table row count."""
-        count = 0
-        root_table = entity.table_order[0]
+    def write_chunk(self, tables: dict[str, pa.RecordBatch]) -> dict[str, float]:
+        """Write one chunk; returns per-table flush time in seconds."""
+        timings: dict[str, float] = {}
         cur = self._conn.cursor()
 
-        for tname in entity.table_order:
-            t0 = time.perf_counter() if table_timings is not None else 0
-            batches = deserialize_batches(ipc_dict[tname])
-            if not batches or batches[0].num_rows == 0:
-                if table_timings is not None:
-                    table_timings[tname] = table_timings.get(tname, 0.0) + (
-                        time.perf_counter() - t0
-                    )
-                continue
-            if tname == root_table:
-                count = sum(b.num_rows for b in batches)
+        for table_name, batch in tables.items():
+            t0 = time.perf_counter()
+            if batch.num_rows:
+                insert_sql = self._insert_sql[table_name]
+                list_cols = self._list_columns.get(table_name)
 
-            insert_sql = self._insert_sql[tname]
-            list_cols = self._list_columns.get(tname)
-
-            for batch in batches:
                 columns = [
                     batch.column(i).to_pylist() for i in range(batch.num_columns)
                 ]
@@ -205,22 +188,13 @@ class SQLiteWriter:
                         columns[i] = [
                             json.dumps(v) if v is not None else None for v in columns[i]
                         ]
-                rows = list(zip(*columns))
-                cur.executemany(insert_sql, rows)
+                cur.executemany(insert_sql, zip(*columns))
+            timings[table_name] = time.perf_counter() - t0
 
-            if table_timings is not None:
-                table_timings[tname] = table_timings.get(tname, 0.0) + (
-                    time.perf_counter() - t0
-                )
-
-        if table_timings is not None:
-            t_commit = time.perf_counter()
+        t_commit = time.perf_counter()
         self._conn.commit()
-        if table_timings is not None:
-            table_timings["_commit"] = table_timings.get("_commit", 0.0) + (
-                time.perf_counter() - t_commit
-            )
-        return count
+        timings["_commit"] = time.perf_counter() - t_commit
+        return timings
 
     def finalize(self, entity: EntityDef) -> None:
         """Create indexes on FK columns and verify FK integrity."""

@@ -17,6 +17,7 @@ from tests.conftest import (
     MASTERS_XML,
     RELEASES_XML,
     empty_ipc,
+    ipc_to_record_batches,
     ipc_to_tables,
 )
 
@@ -50,7 +51,7 @@ def test_every_entity_loads(tmp_path, entity_name, xml, fk):
     writer = SQLiteWriter(db_path, fk=fk)
     try:
         writer.setup(entity)
-        writer.write_chunk(ipc_dict, entity)
+        writer.write_chunk(ipc_to_record_batches(ipc_dict))
         writer.finalize(entity)
     finally:
         writer.close()
@@ -83,12 +84,10 @@ class TestSQLiteWriter:
         writer = SQLiteWriter(db_path)
         try:
             writer.setup(entity)
-            count = writer.write_chunk(ipc_dict, entity)
+            writer.write_chunk(ipc_to_record_batches(ipc_dict))
             writer.finalize(entity)
         finally:
             writer.close()
-
-        assert count == 2
 
         conn = sqlite3.connect(db_path)
         # Verify tables exist
@@ -153,8 +152,8 @@ class TestSQLiteWriter:
         writer = SQLiteWriter(db_path)
         try:
             writer.setup(entity)
-            writer.write_chunk(ipc1, entity)
-            writer.write_chunk(ipc2, entity)
+            writer.write_chunk(ipc_to_record_batches(ipc1))
+            writer.write_chunk(ipc_to_record_batches(ipc2))
             writer.finalize(entity)
         finally:
             writer.close()
@@ -169,46 +168,41 @@ class TestSQLiteWriter:
         writer = SQLiteWriter(db_path)
         try:
             writer.setup(entity)
-            count = writer.write_chunk(empty_ipc("artists"), entity)
+            writer.write_chunk(ipc_to_record_batches(empty_ipc("artists")))
             writer.finalize(entity)
         finally:
             writer.close()
 
-        assert count == 0
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("SELECT COUNT(*) FROM artists").fetchone()[0] == 0
+        conn.close()
 
-    def test_write_chunk_with_table_timings(self, tmp_path, entity, ipc_dict):
-        """write_chunk records per-table timing when table_timings is passed."""
+    def test_write_chunk_records_table_timings(self, tmp_path, entity, ipc_dict):
+        """write_chunk returns per-table flush timing, plus ``_commit``."""
         db_path = str(tmp_path / "test.db")
         writer = SQLiteWriter(db_path)
         try:
             writer.setup(entity)
-            timings: dict[str, float] = {}
-            count = writer.write_chunk(ipc_dict, entity, table_timings=timings)
+            timings = writer.write_chunk(ipc_to_record_batches(ipc_dict))
             writer.finalize(entity)
         finally:
             writer.close()
 
-        assert count == 2
         assert "artists" in timings
         assert "_commit" in timings
         assert all(v >= 0 for v in timings.values())
 
-    def test_empty_batch_with_table_timings(self, tmp_path, entity):
-        """Empty batches are timed correctly when table_timings is passed."""
+    def test_empty_batch_records_table_timings(self, tmp_path, entity):
+        """Empty batches still get a timing entry."""
         db_path = str(tmp_path / "test.db")
         writer = SQLiteWriter(db_path)
         try:
             writer.setup(entity)
-            timings: dict[str, float] = {}
-            count = writer.write_chunk(
-                empty_ipc("artists"), entity, table_timings=timings
-            )
+            timings = writer.write_chunk(ipc_to_record_batches(empty_ipc("artists")))
             writer.finalize(entity)
         finally:
             writer.close()
 
-        assert count == 0
-        # Empty tables still get timing entries
         assert "artists" in timings
 
     def test_fk_mode(self, tmp_path, entity, ipc_dict):
@@ -216,7 +210,7 @@ class TestSQLiteWriter:
         writer = SQLiteWriter(db_path, fk=True)
         try:
             writer.setup(entity)
-            writer.write_chunk(ipc_dict, entity)
+            writer.write_chunk(ipc_to_record_batches(ipc_dict))
             writer.finalize(entity)
         finally:
             writer.close()
@@ -235,7 +229,7 @@ class TestSQLiteWriter:
         writer = SQLiteWriter(db_path, fk=True)
         try:
             writer.setup(entity)
-            writer.write_chunk(ipc_dict, entity)
+            writer.write_chunk(ipc_to_record_batches(ipc_dict))
 
             # Insert a child row referencing a non-existent parent
             conn = sqlite3.connect(db_path)
@@ -258,7 +252,7 @@ class TestSQLiteWriter:
         writer = SQLiteWriter(db_path, overwrite=True)
         try:
             writer.setup(entity)
-            writer.write_chunk(ipc_dict, entity)
+            writer.write_chunk(ipc_to_record_batches(ipc_dict))
             writer.finalize(entity)
         finally:
             writer.close()
@@ -274,7 +268,7 @@ class TestSQLiteWriter:
         writer = SQLiteWriter(db_path, overwrite=True)
         try:
             writer.setup(entity)
-            writer.write_chunk(ipc_dict, entity)
+            writer.write_chunk(ipc_to_record_batches(ipc_dict))
             writer.finalize(entity)
         finally:
             writer.close()
@@ -282,7 +276,7 @@ class TestSQLiteWriter:
         writer2 = SQLiteWriter(db_path, overwrite=True)
         try:
             writer2.setup(entity)
-            writer2.write_chunk(ipc_dict, entity)
+            writer2.write_chunk(ipc_to_record_batches(ipc_dict))
             writer2.finalize(entity)
         finally:
             writer2.close()

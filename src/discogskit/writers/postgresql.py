@@ -32,7 +32,6 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from discogskit._console import status
-from discogskit.writers._ipc import deserialize_batches
 
 if TYPE_CHECKING:
     from discogskit.entities import EntityDef
@@ -116,40 +115,22 @@ def _split_table_groups(n: int, entity: EntityDef) -> list[list[str]]:
 
 def _flush_group(
     adbc_conn,
-    ipc_dict: dict,
-    tables: list[str],
-    schemas: dict,
-    root_table: str,
-    table_timings: dict[str, float] | None = None,
-) -> int:
-    """Flush a subset of tables. Returns root table count (if present)."""
-    count = 0
+    tables: dict[str, pa.RecordBatch],
+    schemas: dict[str, pa.Schema],
+) -> dict[str, float]:
+    """Flush a subset of tables. Returns per-table flush time plus ``"_commit"``."""
+    timings: dict[str, float] = {}
     with adbc_conn.cursor() as cur:
-        for tname in tables:
-            t0 = time.perf_counter() if table_timings is not None else 0
-            batches = deserialize_batches(ipc_dict[tname])
-            if not batches or batches[0].num_rows == 0:
-                if table_timings is not None:
-                    table_timings[tname] = table_timings.get(tname, 0.0) + (
-                        time.perf_counter() - t0
-                    )
-                continue
-            if tname == root_table:
-                count = sum(b.num_rows for b in batches)
-            reader = pa.RecordBatchReader.from_batches(schemas[tname], iter(batches))
-            cur.adbc_ingest(tname, reader, mode="append")
-            if table_timings is not None:
-                table_timings[tname] = table_timings.get(tname, 0.0) + (
-                    time.perf_counter() - t0
-                )
-    if table_timings is not None:
-        t_commit = time.perf_counter()
+        for table_name, batch in tables.items():
+            t0 = time.perf_counter()
+            if batch.num_rows:
+                reader = pa.RecordBatchReader.from_batches(schemas[table_name], [batch])
+                cur.adbc_ingest(table_name, reader, mode="append")
+            timings[table_name] = time.perf_counter() - t0
+    t_commit = time.perf_counter()
     adbc_conn.commit()
-    if table_timings is not None:
-        table_timings["_commit"] = table_timings.get("_commit", 0.0) + (
-            time.perf_counter() - t_commit
-        )
-    return count
+    timings["_commit"] = time.perf_counter() - t_commit
+    return timings
 
 
 # ------------------------------------------------------------------------------------------------------------------------
@@ -289,8 +270,8 @@ class PostgreSQLWriter:
         self._adbc_conn = None
         self._adbc_conns: list = []
         self._executor: ThreadPoolExecutor | None = None
-        self._group_timings: list[dict] | None = None
         self._groups: list[list[str]] = []
+        self._schemas: dict[str, pa.Schema] = {}
         self._setup_called = False
 
     def setup(self, entity: EntityDef) -> None:
@@ -359,6 +340,7 @@ class PostgreSQLWriter:
         )
 
         # Set up ADBC connections
+        self._schemas = entity.schemas
         if self._write_workers <= 1:
             self._adbc_conn = adbc_pg.connect(self._dsn)
         else:
@@ -369,49 +351,24 @@ class PostgreSQLWriter:
             self._executor = ThreadPoolExecutor(max_workers=self._write_workers)
         self._setup_called = True
 
-    def write_chunk(
-        self,
-        ipc_dict: dict[str, bytes],
-        entity: EntityDef,
-        table_timings: dict[str, float] | None = None,
-    ) -> int:
-        root_table = entity.table_order[0]
-
+    def write_chunk(self, tables: dict[str, pa.RecordBatch]) -> dict[str, float]:
         if self._write_workers <= 1:
-            return _flush_group(
-                self._adbc_conn,
-                ipc_dict,
-                entity.table_order,
-                entity.schemas,
-                root_table,
-                table_timings,
-            )
+            return _flush_group(self._adbc_conn, tables, self._schemas)
 
-        # Multi-writer path: dispatch to thread pool
-        if table_timings is not None and self._group_timings is None:
-            self._group_timings = [{} for _ in range(self._write_workers)]
+        # Multi-writer path: dispatch each group's tables to its own connection.
         assert self._executor is not None
         futures = [
             self._executor.submit(
                 _flush_group,
                 conn,
-                ipc_dict,
-                tables,
-                entity.schemas,
-                root_table,
-                self._group_timings[i] if self._group_timings is not None else None,
+                {t: tables[t] for t in group},
+                self._schemas,
             )
-            for i, (conn, tables) in enumerate(zip(self._adbc_conns, self._groups))
+            for conn, group in zip(self._adbc_conns, self._groups)
         ]
-        return sum(f.result() for f in futures)
-
-    def get_table_timings(self) -> dict[str, float]:
-        """Merge per-group timings into a single dict. Call after all chunks."""
-        if self._group_timings is None:
-            return {}
-        merged = {}
-        for gt in self._group_timings:
-            for k, v in gt.items():
+        merged: dict[str, float] = {}
+        for f in futures:
+            for k, v in f.result().items():
                 merged[k] = merged.get(k, 0.0) + v
         return merged
 

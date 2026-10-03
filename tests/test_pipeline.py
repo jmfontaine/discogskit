@@ -247,7 +247,7 @@ class TestPipelineRunXmlCleanup:
             def setup(self, entity):
                 pass
 
-            def write_chunk(self, ipc_dict, entity, table_timings=None):
+            def write_chunk(self, tables):
                 raise error
 
         config = dataclasses.replace(_single_chunk_config(artists_gz), keep_xml=False)
@@ -331,40 +331,67 @@ class TestPipelineRun:
 
         assert result.total_records == 2
 
-    def test_end_to_end_with_profile(self, tmp_path, artists_gz):
-        """Full pipeline with profile=True collects timing data."""
+    def test_end_to_end_with_profile(self, tmp_path):
+        """Full pipeline with profile=True collects timing data, accumulated across chunks."""
         from discogskit import pipeline
+        from discogskit.entities import get as get_entity
         from discogskit.writers.jsonl import JSONLWriter
 
+        gz_path = _many_artists_gz(tmp_path / "artists.xml.gz")
         out_dir = tmp_path / "out"
         writer = JSONLWriter(str(out_dir))
 
-        config = pipeline.PipelineConfig(
-            chunk_mb=1,
-            entity="artists",
-            gz_path=artists_gz,
-            keep_xml=True,
-            parse_workers=1,
-            profile=True,
-            progress=False,
-            strict=False,
-            write_queue=2,
-        )
+        config = dataclasses.replace(_multi_chunk_config(gz_path), profile=True)
 
         try:
             result = pipeline.run(config, writer)
         finally:
             writer.close()
 
-        assert result.total_records == 2
+        assert result.total_records == _MANY_ARTISTS
         assert result.profile_data is not None
         assert "put_blocked" in result.profile_data
         assert "get_wait" in result.profile_data
-        assert "table_timings" in result.profile_data
+        table_timings = result.profile_data["table_timings"]
+        assert isinstance(table_timings, dict)
+        assert set(table_timings) == set(get_entity("artists").table_order)
+        assert all(v >= 0 for v in table_timings.values())
 
         # keep_xml=True should preserve the XML
-        xml_path = artists_gz.with_suffix("")
+        xml_path = gz_path.with_suffix("")
         assert xml_path.exists()
+
+    def test_profile_table_timings_accumulate_not_overwrite(self, tmp_path):
+        """#35 regression: a chunk's timing must be summed into table_timings, not overwrite the running total."""
+
+        class CountingWriter:
+            def __init__(self):
+                self.calls = 0
+
+            def close(self):
+                pass
+
+            def finalize(self, entity):
+                pass
+
+            def setup(self, entity):
+                pass
+
+            def write_chunk(self, tables):
+                self.calls += 1
+                return {"artists": 1.0}
+
+        gz_path = _many_artists_gz(tmp_path / "artists.xml.gz")
+        writer = CountingWriter()
+        config = dataclasses.replace(_multi_chunk_config(gz_path), profile=True)
+
+        result = _run_and_close(config, writer)
+
+        assert writer.calls > 1
+        assert result.profile_data is not None
+        table_timings = result.profile_data["table_timings"]
+        assert isinstance(table_timings, dict)
+        assert table_timings == {"artists": float(writer.calls)}
 
     def test_parse_error_stops_writer_before_close(self, tmp_path):
         """A worker parse error surfaces as-is and leaves the writer idle for close()."""
@@ -388,13 +415,13 @@ class TestPipelineRun:
             def setup(self, entity):
                 pass
 
-            def write_chunk(self, ipc_dict, entity, table_timings=None):
+            def write_chunk(self, tables):
                 if self.closed:
                     self.writes_after_close += 1
                 self.active_writes += 1
                 time.sleep(0.2)
                 self.active_writes -= 1
-                return 0
+                return {}
 
         gz_path = _many_artists_gz(tmp_path / "artists.xml.gz", bad_id_at=_MANY_ARTISTS)
         writer = SlowTrackingWriter()
@@ -451,6 +478,44 @@ class TestPipelineRun:
             rows = conn.execute("SELECT id, name FROM artists ORDER BY id").fetchall()
         assert rows == [(1, "Test"), (2, "Other")]
 
+    def test_postgresql_writer_no_timing_carry_over_between_entities(
+        self, tmp_path, artists_gz, pg_dsn
+    ):
+        """#35 regression: a second entity's --profile must not include the first entity's tables."""
+        from discogskit import pipeline
+        from discogskit.entities import get as get_entity
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        labels_xml = (
+            b"<?xml version='1.0' encoding='UTF-8'?>\n"
+            b"<labels>\n"
+            b"<label>\n  <id>100</id>\n  <name>Test Label</name>\n"
+            b"  <data_quality>Correct</data_quality>\n</label>\n"
+            b"</labels>"
+        )
+        labels_gz = tmp_path / "labels.xml.gz"
+        with gzip.open(labels_gz, "wb") as f:
+            f.write(labels_xml)
+
+        writer = PostgreSQLWriter(pg_dsn, overwrite=True, write_workers=2)
+        try:
+            artists_config = dataclasses.replace(
+                _single_chunk_config(artists_gz), profile=True
+            )
+            pipeline.run(artists_config, writer)
+
+            labels_config = dataclasses.replace(
+                _single_chunk_config(labels_gz), entity="labels", profile=True
+            )
+            result = pipeline.run(labels_config, writer)
+        finally:
+            writer.close()
+
+        assert result.profile_data is not None
+        table_timings = result.profile_data["table_timings"]
+        assert isinstance(table_timings, dict)
+        assert set(table_timings) == set(get_entity("labels").table_order) | {"_commit"}
+
     def test_writer_error_does_not_hang(self, tmp_path):
         """A writer failing on chunk 1 of more chunks than the backlog holds re-raises."""
 
@@ -467,7 +532,7 @@ class TestPipelineRun:
             def setup(self, entity):
                 pass
 
-            def write_chunk(self, ipc_dict, entity, table_timings=None):
+            def write_chunk(self, tables):
                 self.calls += 1
                 time.sleep(0.3)  # let later chunks queue behind this write
                 raise RuntimeError("disk full")

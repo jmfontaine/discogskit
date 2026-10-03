@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING
 import pyarrow.parquet as pq
 
 from discogskit._console import status
-from discogskit.writers._ipc import deserialize_batches
 from discogskit.writers._staging import StagedFiles
 
 if TYPE_CHECKING:
@@ -67,34 +66,14 @@ class ParquetWriter:
             f"[{time.perf_counter() - t0:.2f}s]",
         )
 
-    def write_chunk(
-        self,
-        ipc_dict: dict[str, bytes],
-        entity: EntityDef,
-        table_timings: dict[str, float] | None = None,
-    ) -> int:
-        count = 0
-        root_table = entity.table_order[0]
-
-        for table_name in entity.table_order:
-            t0 = time.perf_counter() if table_timings is not None else 0
-            batches = deserialize_batches(ipc_dict[table_name])
-            if not batches or batches[0].num_rows == 0:
-                if table_timings is not None:
-                    table_timings[table_name] = table_timings.get(table_name, 0.0) + (
-                        time.perf_counter() - t0
-                    )
-                continue
-            if table_name == root_table:
-                count = sum(b.num_rows for b in batches)
-            writer = self._writers[table_name]
-            for batch in batches:
-                writer.write_batch(batch)
-            if table_timings is not None:
-                table_timings[table_name] = table_timings.get(table_name, 0.0) + (
-                    time.perf_counter() - t0
-                )
-        return count
+    def write_chunk(self, tables: dict[str, pa.RecordBatch]) -> dict[str, float]:
+        timings: dict[str, float] = {}
+        for table_name, batch in tables.items():
+            t0 = time.perf_counter()
+            if batch.num_rows:
+                self._writers[table_name].write_batch(batch)
+            timings[table_name] = time.perf_counter() - t0
+        return timings
 
     def finalize(self, entity: EntityDef) -> None:
         assert self._staged is not None, "finalize() called before setup()"

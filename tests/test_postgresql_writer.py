@@ -10,7 +10,7 @@ import pytest
 
 from discogskit.entities import ChunkArgs, get
 from discogskit.entities._worker import extract_chunk_to_ipc
-from tests.conftest import empty_ipc
+from tests.conftest import empty_ipc, ipc_to_record_batches
 
 
 def _load(dsn, entity, ipc_dict, **options):
@@ -19,7 +19,7 @@ def _load(dsn, entity, ipc_dict, **options):
     writer = PostgreSQLWriter(dsn, **options)
     try:
         writer.setup(entity)
-        writer.write_chunk(ipc_dict, entity)
+        writer.write_chunk(ipc_to_record_batches(ipc_dict))
         writer.finalize(entity)
     finally:
         writer.close()
@@ -44,12 +44,10 @@ class TestPostgreSQLWriter:
         writer = PostgreSQLWriter(pg_dsn, overwrite=True)
         try:
             writer.setup(entity)
-            count = writer.write_chunk(ipc_dict, entity)
+            writer.write_chunk(ipc_to_record_batches(ipc_dict))
             writer.finalize(entity)
         finally:
             writer.close()
-
-        assert count == 2
 
         import psycopg
 
@@ -93,7 +91,7 @@ class TestPostgreSQLWriter:
         writer = PostgreSQLWriter(pg_dsn, overwrite=True, unlogged=True)
         try:
             writer.setup(entity)
-            writer.write_chunk(ipc_dict, entity)
+            writer.write_chunk(ipc_to_record_batches(ipc_dict))
             writer.finalize(entity)
         finally:
             writer.close()
@@ -107,40 +105,34 @@ class TestPostgreSQLWriter:
             ).fetchone()
             assert row is not None and row[0] == "u"
 
-    def test_write_chunk_with_table_timings(self, pg_dsn, entity, ipc_dict):
-        """write_chunk records per-table timing when table_timings is passed."""
+    def test_write_chunk_records_table_timings(self, pg_dsn, entity, ipc_dict):
+        """write_chunk returns per-table flush timing, plus ``_commit``."""
         from discogskit.writers.postgresql import PostgreSQLWriter
 
         writer = PostgreSQLWriter(pg_dsn, overwrite=True)
         try:
             writer.setup(entity)
-            timings: dict[str, float] = {}
-            count = writer.write_chunk(ipc_dict, entity, table_timings=timings)
+            timings = writer.write_chunk(ipc_to_record_batches(ipc_dict))
             writer.finalize(entity)
         finally:
             writer.close()
 
-        assert count == 2
         assert "artists" in timings
         assert "_commit" in timings
         assert all(v >= 0 for v in timings.values())
 
-    def test_empty_batch_with_table_timings(self, pg_dsn, entity):
-        """Empty batches are timed correctly when table_timings is passed."""
+    def test_empty_batch_records_table_timings(self, pg_dsn, entity):
+        """Empty batches still get a timing entry."""
         from discogskit.writers.postgresql import PostgreSQLWriter
 
         writer = PostgreSQLWriter(pg_dsn, overwrite=True)
         try:
             writer.setup(entity)
-            timings: dict[str, float] = {}
-            count = writer.write_chunk(
-                empty_ipc("artists"), entity, table_timings=timings
-            )
+            timings = writer.write_chunk(ipc_to_record_batches(empty_ipc("artists")))
             writer.finalize(entity)
         finally:
             writer.close()
 
-        assert count == 0
         assert "artists" in timings
 
     def test_single_index_worker(self, pg_dsn, entity, ipc_dict):
@@ -150,7 +142,7 @@ class TestPostgreSQLWriter:
         writer = PostgreSQLWriter(pg_dsn, index_workers=1, overwrite=True)
         try:
             writer.setup(entity)
-            writer.write_chunk(ipc_dict, entity)
+            writer.write_chunk(ipc_to_record_batches(ipc_dict))
             writer.finalize(entity)
         finally:
             writer.close()
@@ -172,7 +164,7 @@ class TestPostgreSQLWriter:
 
         writer = PostgreSQLWriter(pg_dsn, overwrite=True)
         writer.setup(entity)
-        writer.write_chunk(ipc_dict, entity)
+        writer.write_chunk(ipc_to_record_batches(ipc_dict))
         writer.close()
 
     def test_multi_writer(self, pg_dsn, entity, ipc_dict):
@@ -182,12 +174,10 @@ class TestPostgreSQLWriter:
         writer = PostgreSQLWriter(pg_dsn, overwrite=True, write_workers=2)
         try:
             writer.setup(entity)
-            count = writer.write_chunk(ipc_dict, entity)
+            writer.write_chunk(ipc_to_record_batches(ipc_dict))
             writer.finalize(entity)
         finally:
             writer.close()
-
-        assert count == 2
 
         import psycopg
 
@@ -195,38 +185,20 @@ class TestPostgreSQLWriter:
             row = conn.execute("SELECT COUNT(*) FROM artists").fetchone()
             assert row is not None and row[0] == 2
 
-    def test_multi_writer_with_timings(self, pg_dsn, entity, ipc_dict):
-        """Multi-writer mode with table_timings records per-group timings."""
+    def test_multi_writer_records_group_timings(self, pg_dsn, entity, ipc_dict):
+        """Multi-writer mode merges per-group timings into one dict."""
         from discogskit.writers.postgresql import PostgreSQLWriter
 
         writer = PostgreSQLWriter(pg_dsn, overwrite=True, write_workers=2)
         try:
             writer.setup(entity)
-            timings: dict[str, float] = {}
-            count = writer.write_chunk(ipc_dict, entity, table_timings=timings)
-            # get_table_timings merges per-group timings
-            merged = writer.get_table_timings()
+            timings = writer.write_chunk(ipc_to_record_batches(ipc_dict))
             writer.finalize(entity)
         finally:
             writer.close()
 
-        assert count == 2
-        assert len(merged) > 0
-
-    def test_get_table_timings_without_profile(self, pg_dsn, entity, ipc_dict):
-        """get_table_timings returns empty dict when no timings were requested."""
-        from discogskit.writers.postgresql import PostgreSQLWriter
-
-        writer = PostgreSQLWriter(pg_dsn, overwrite=True, write_workers=2)
-        try:
-            writer.setup(entity)
-            writer.write_chunk(ipc_dict, entity)  # no table_timings
-            merged = writer.get_table_timings()
-            writer.finalize(entity)
-        finally:
-            writer.close()
-
-        assert merged == {}
+        assert set(timings) == set(entity.table_order) | {"_commit"}
+        assert all(v >= 0 for v in timings.values())
 
     def test_multi_writer_close_without_finalize(self, pg_dsn, entity, ipc_dict):
         """Multi-writer close() without finalize() cleans up executor and connections."""
@@ -234,7 +206,7 @@ class TestPostgreSQLWriter:
 
         writer = PostgreSQLWriter(pg_dsn, overwrite=True, write_workers=2)
         writer.setup(entity)
-        writer.write_chunk(ipc_dict, entity)
+        writer.write_chunk(ipc_to_record_batches(ipc_dict))
         writer.close()  # close without finalize
 
     def test_indexes_only(self, pg_dsn, entity, ipc_dict):
@@ -245,7 +217,7 @@ class TestPostgreSQLWriter:
         writer1 = PostgreSQLWriter(pg_dsn, index_workers=1, overwrite=True)
         try:
             writer1.setup(entity)
-            writer1.write_chunk(ipc_dict, entity)
+            writer1.write_chunk(ipc_to_record_batches(ipc_dict))
             writer1.finalize(entity)
         finally:
             writer1.close()
@@ -272,7 +244,7 @@ class TestPostgreSQLWriter:
         writer = PostgreSQLWriter(pg_dsn, fk=True, overwrite=True)
         try:
             writer.setup(entity)
-            writer.write_chunk(ipc_dict, entity)
+            writer.write_chunk(ipc_to_record_batches(ipc_dict))
             writer.finalize(entity)
         finally:
             writer.close()

@@ -16,10 +16,11 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
 from discogskit._console import status
-from discogskit.writers._ipc import deserialize_batches
 from discogskit.writers._staging import StagedFiles
 
 if TYPE_CHECKING:
+    import pyarrow as pa
+
     from discogskit.entities import EntityDef
 
 
@@ -75,36 +76,17 @@ class JSONLWriter:
             f"[{time.perf_counter() - t0:.2f}s]",
         )
 
-    def write_chunk(
-        self,
-        ipc_dict: dict[str, bytes],
-        entity: EntityDef,
-        table_timings: dict[str, float] | None = None,
-    ) -> int:
-        count = 0
-        root_table = entity.table_order[0]
-
-        for table_name in entity.table_order:
-            t0 = time.perf_counter() if table_timings is not None else 0
-            batches = deserialize_batches(ipc_dict[table_name])
-            if not batches or batches[0].num_rows == 0:
-                if table_timings is not None:
-                    table_timings[table_name] = table_timings.get(table_name, 0.0) + (
-                        time.perf_counter() - t0
-                    )
-                continue
-            if table_name == root_table:
-                count = sum(b.num_rows for b in batches)
-            f = self._files[table_name]
-            for batch in batches:
+    def write_chunk(self, tables: dict[str, pa.RecordBatch]) -> dict[str, float]:
+        timings: dict[str, float] = {}
+        for table_name, batch in tables.items():
+            t0 = time.perf_counter()
+            if batch.num_rows:
+                f = self._files[table_name]
                 for row in batch.to_pylist():
                     f.write(json.dumps(row, ensure_ascii=False))
                     f.write("\n")
-            if table_timings is not None:
-                table_timings[table_name] = table_timings.get(table_name, 0.0) + (
-                    time.perf_counter() - t0
-                )
-        return count
+            timings[table_name] = time.perf_counter() - t0
+        return timings
 
     def finalize(self, entity: EntityDef) -> None:
         assert self._staged is not None, "finalize() called before setup()"

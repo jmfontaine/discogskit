@@ -79,6 +79,7 @@ from discogskit.entities import ChunkArgs, EntityDef
 from discogskit.entities import get as get_entity
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers import Writer
+from discogskit.writers._ipc import deserialize_batch
 
 
 class _ElapsedEstTotalColumn(ProgressColumn):
@@ -197,12 +198,15 @@ class _ChunkWriter:
         t_chunk = time.perf_counter()
         self.get_wait += t_chunk - self._t_idle
         try:
-            chunk_count = self.writer.write_chunk(
-                ipc_dict, self.entity, self.table_timings
-            )
+            tables = {name: deserialize_batch(data) for name, data in ipc_dict.items()}
+            chunk_count = tables[self.entity.table_order[0]].num_rows
+            timings = self.writer.write_chunk(tables)
         except BaseException:
             self._failed = True
             raise
+        if self.table_timings is not None:
+            for k, v in timings.items():
+                self.table_timings[k] = self.table_timings.get(k, 0.0) + v
         self._t_idle = time.perf_counter()
         chunk_elapsed = self._t_idle - t_chunk
         elapsed = self._t_idle - self._t_start
@@ -382,12 +386,6 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
     if config.profile:
         table_timings = chunk_writer.table_timings
         assert table_timings is not None
-        # For multi-writer, timings accumulate inside the writer;
-        # merge them into table_timings so both paths produce the same output.
-        get_timings = getattr(writer, "get_table_timings", None)
-        if get_timings is not None:  # pragma: no cover
-            for k, v in get_timings().items():
-                table_timings[k] = table_timings.get(k, 0.0) + v
         profile_data = {
             "put_blocked": put_blocked,
             "get_wait": chunk_writer.get_wait,
