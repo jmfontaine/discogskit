@@ -314,17 +314,30 @@ whatever value the user had before, it needed superuser, changed a server-wide s
 and a killed process (`SIGKILL`, OOM, or a timed out `close()`) left the tuned value on the server permanently
 ([#26](https://github.com/jmfontaine/discogskit/issues/26)).
 
-To get the same effect, apply the setting yourself before a large load, either in `postgresql.conf` or with
-`ALTER SYSTEM` (requires superuser; reload or restart the server to apply):
+Raising `max_wal_size` is optional and can reduce checkpoint I/O on the server during a load; it did **not** make the
+load faster in our measurement. Loading the 2026-10-01 dump (all four entities) into a local PostgreSQL 18 on a 24 GB
+Apple Silicon Mac, one run per setting (1GB first), fresh database each time:
+
+| `max_wal_size` | load time | checkpoints requested / timed / completed | buffers written by checkpoints |
+|---|---:|---:|---:|
+| 1GB | 43.9 min | 182 / 0 / 181 | 423,976 |
+| 16GB | 53.0 min | 7 / 6 / 13 | 3,518 |
+
+Both runs wrote about 117 GB of WAL. With a single run each, in a fixed order, neither difference is proven to be
+caused by the setting; the time difference may be run-to-run variation, and the drop in checkpoints is consistent
+with the larger WAL limit. So consider it if checkpoint I/O matters on your server (e.g. other workloads share it),
+not as a speed-up. Apply it yourself before the load, either in `postgresql.conf` or with `ALTER SYSTEM`
+(requires superuser; reload the server to apply):
 
 ```sql
 ALTER SYSTEM SET max_wal_size = '16GB';
 SELECT pg_reload_conf();
 ```
 
-Afterwards, restore whatever value you had before the load — `ALTER SYSTEM SET max_wal_size = '<previous value>';`
-— or, if you had never set it, remove the override with `ALTER SYSTEM RESET max_wal_size;`. Either way, follow it
-with `SELECT pg_reload_conf();`.
+Afterwards, undo exactly what you changed. If you had already set `max_wal_size` with `ALTER SYSTEM` before (check
+`postgresql.auto.conf`), set it back to that value: `ALTER SYSTEM SET max_wal_size = '<previous value>';`.
+Otherwise remove the override with `ALTER SYSTEM RESET max_wal_size;`; the value from `postgresql.conf` (or the
+built-in default) applies again. Either way, follow it with `SELECT pg_reload_conf();`, then check `SHOW max_wal_size;`.
 
 ## Benchmarks
 
