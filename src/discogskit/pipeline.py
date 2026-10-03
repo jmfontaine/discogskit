@@ -88,9 +88,7 @@ class _ElapsedEstTotalColumn(ProgressColumn):
     def render(self, task: Task) -> Text:
         elapsed = task.elapsed or 0.0
         elapsed_str = _fmt_time(elapsed)
-        if (
-            task.total and task.completed and task.completed < task.total
-        ):  # pragma: no cover
+        if task.total and task.completed and task.completed < task.total:
             est_total = elapsed * task.total / task.completed
             return Text(f"{elapsed_str}/~{_fmt_time(est_total)}", style="cyan")
         return Text(elapsed_str, style="cyan")

@@ -63,6 +63,7 @@ class TestGenerateDDL:
         conn.execute(generate_ddl("group", schema, pk_column="id"))
         conn.execute("INSERT INTO \"group\" VALUES (1, ',', NULL)")
         assert conn.execute('SELECT "join" FROM "group"').fetchone() == (",",)
+        conn.close()
 
     def test_nullable_no_default(self):
         schema = pa.schema(

@@ -88,6 +88,30 @@ class TestPartialFile:
         assert not xml_path.exists()
         assert not (tmp_path / "test.xml.partial").exists()
 
+    def test_keyboard_interrupt_removes_partial_and_reraises(
+        self, monkeypatch, tmp_path
+    ):
+        """Ctrl+C during decompression leaves no incomplete .partial file."""
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        partial_path = tmp_path / "test.xml.partial"
+
+        class InterruptingReader(io.BytesIO):
+            def read(self, size=-1):
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(
+            decompress.rapidgzip,
+            "open",
+            lambda path, parallelization: InterruptingReader(_XML),
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        assert not xml_path.exists()
+        assert not partial_path.exists()
+
     def test_rename_failure_removes_partial_and_keeps_error(
         self, monkeypatch, tmp_path
     ):

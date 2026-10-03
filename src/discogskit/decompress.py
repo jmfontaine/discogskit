@@ -153,7 +153,7 @@ def _decompress(
             # Without this, a power loss can persist the rename below before
             # the data, leaving a complete-looking but corrupt .xml.
             os.fsync(fout.fileno())
-    except KeyboardInterrupt:  # pragma: no cover
+    except KeyboardInterrupt:
         partial_path.unlink(missing_ok=True)
         raise
     except (OSError, ValueError):
