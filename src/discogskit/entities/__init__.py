@@ -64,7 +64,9 @@ class EntityDef:
     def find_split_points(
         self, file_path: str, target_chunk_bytes: int
     ) -> list[tuple[int, int]]:
-        return find_split_points(file_path, target_chunk_bytes, self.root_tag)
+        return find_split_points(
+            file_path, target_chunk_bytes, self.root_tag, self.name
+        )
 
 
 ENTITIES: dict[str, EntityDef] = {}
