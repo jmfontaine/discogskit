@@ -157,8 +157,9 @@ discogskit convert --format parquet --keep-xml discogs_20260301_releases.xml.gz
 
 Load Discogs XML dumps into a database.
 
-In PostgreSQL, tables are created in the current schema, the first existing schema on `search_path` (usually
-`public`). Without `--overwrite`, the load stops if any of its tables already exist there. With `--overwrite`, the
+In PostgreSQL, tables are created in the current schema — the first existing schema on `search_path` (usually
+`public`), or the schema given with `--pg-schema` (which must already exist, unless `--pg-create-schema` is also
+passed). Without `--overwrite`, the load stops if any of its tables already exist there. With `--overwrite`, the
 existing tables are dropped and recreated, all in one transaction; if your own views or foreign keys depend on them,
 the load stops and lists those objects instead of dropping them.
 
@@ -226,11 +227,15 @@ still not rolled back.
 │ --help                                                   Show this message and exit.         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ PostgreSQL ─────────────────────────────────────────────────────────────────────────────────╮
-│ --pg-unlogged    --no-pg-unlogged      Skip WAL for faster writes (tables stay unlogged;     │
-│                                        data lost on crash)                                   │
-│                                        [default: no-pg-unlogged]                             │
-│ --pg-fk          --no-pg-fk            Add foreign key constraints after load                │
-│                                        [default: no-pg-fk]                                   │
+│ --pg-unlogged         --no-pg-unlogged                Skip WAL for faster writes (tables     │
+│                                                       stay unlogged; data lost on crash)     │
+│                                                       [default: no-pg-unlogged]              │
+│ --pg-fk               --no-pg-fk                      Add foreign key constraints after load │
+│                                                       [default: no-pg-fk]                    │
+│ --pg-create-schema    --no-pg-create-schema           Create --pg-schema if it doesn't exist │
+│                                                       [default: no-pg-create-schema]         │
+│ --pg-schema                                    <str>  Schema to create tables in (must exist │
+│                                                       unless --pg-create-schema)             │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
 ```
@@ -267,6 +272,9 @@ discogskit load --pg-fk discogs_20260301_releases.xml.gz
 
 # Use multiple write workers for parallel database inserts
 discogskit load --write-workers 4 discogs_20260301_releases.xml.gz
+
+# Load into a specific schema, creating it if it doesn't exist
+discogskit load --pg-schema discogs --pg-create-schema discogs_20260301_releases.xml.gz
 ```
 
 #### PostgreSQL tuning
