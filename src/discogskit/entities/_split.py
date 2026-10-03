@@ -129,6 +129,92 @@ def _scan_records(mm: mmap.mmap, tag: bytes) -> tuple[int, list[int]]:
     return data_start, boundaries
 
 
+# What the worker's injected envelope reproduces exactly before the first record (issue #79): XML whitespace, at most
+# an XML declaration for version 1.0 in UTF-8 (the one the envelope itself injects), and the container's start tag
+# without attributes. Anything else (a byte-order mark, comments, processing instructions, a DOCTYPE, attributes on
+# the container) would be dropped or reinterpreted by the envelope, so it's rejected rather than silently lost.
+_EQ = _XML_WS + rb"*=" + _XML_WS + rb"*"
+_XML_DECL = (
+    rb"<\?xml"
+    + _XML_WS
+    + rb"+version"
+    + _EQ
+    + rb"(?:'1\.0'|\"1\.0\")"
+    + rb"(?:"
+    + _XML_WS
+    + rb"+encoding"
+    + _EQ
+    + rb"(?:'(?i:utf-8)'|\"(?i:utf-8)\"))?"
+    + rb"(?:"
+    + _XML_WS
+    + rb"+standalone"
+    + _EQ
+    + rb"(?:'(?:yes|no)'|\"(?:yes|no)\"))?"
+    + _XML_WS
+    + rb"*\?>"
+)
+
+
+def _describe_leading(mm: mmap.mmap, pos: int, container: bytes) -> str:
+    """Name the unsupported construct starting at ``pos`` for the error message."""
+    head = mm[pos : pos + 64]
+    if (
+        head[:3] == b"\xef\xbb\xbf"
+        or head[:2] in (b"\xff\xfe", b"\xfe\xff")
+        or head[:4] == b"\x00\x00\xfe\xff"
+    ):
+        return "a byte-order mark"
+    if re.match(rb"<\?[xX][mM][lL](?:" + _XML_WS + rb"|\?>)", head):
+        return "an XML declaration other than version 1.0 in UTF-8 at the start of the file"
+    if head.startswith(b"<!DOCTYPE"):
+        return "a DOCTYPE"
+    if head.startswith(b"<!--"):
+        return "a comment"
+    if head.startswith(b"<?"):
+        return "a processing instruction"
+    if head.startswith(b"<" + container) and head[
+        len(container) + 1 : len(container) + 2
+    ] not in (b">", b""):
+        return f"attributes on <{container.decode()}> (e.g. a namespace declaration)"
+    return f"unexpected content {head[:40]!r}"
+
+
+def _check_leading_content(
+    mm: mmap.mmap, data_start: int, tag: bytes, container: bytes
+) -> None:
+    """Raise unless everything before the first record is something the worker's injected envelope reproduces.
+
+    Workers parse each chunk inside their own ``<?xml version='1.0' encoding='UTF-8'?><container>`` envelope, so a
+    different encoding, a DOCTYPE, or attributes on the container (namespace declarations included) would be
+    misread or silently dropped. Fail before any parsing instead, naming what was found.
+    """
+    parts = (
+        # XML only allows the declaration at byte 0, so whitespace may follow it but not precede it.
+        re.compile(rb"(?:" + _XML_DECL + rb")?" + _XML_WS + rb"*"),
+        re.compile(rb"<" + re.escape(container) + _XML_WS + rb"*>"),
+        re.compile(_XML_WS + rb"*"),
+    )
+    # Every part must match, in order, and together cover exactly [0, data_start). Checking only the final position
+    # would accept a missing container tag when the first record starts at byte 0.
+    pos = 0
+    complete = True
+    for part in parts:
+        match = part.match(mm, pos, data_start)
+        if match is None:
+            complete = False
+            break
+        pos = match.end()
+    if not complete or pos != data_start:
+        what = (
+            f"missing <{container.decode()}> start tag before the first record"
+            if pos == data_start
+            else _describe_leading(mm, pos, container)
+        )
+        raise ValueError(
+            f"Unsupported content before the first <{tag.decode()}> record at byte {pos}: {what}"
+        )
+
+
 def _trailing_content_pattern(container: bytes) -> re.Pattern[bytes]:
     """Compile a pattern for exactly what may follow the last record: the container's own closing tag — not any
     tag, not duplicated, not missing — preceded and followed by whatever markup is actually valid there.
@@ -184,6 +270,7 @@ def find_split_points(
         try:
             data_start, boundaries = _scan_records(mm, tag_bytes)
             data_end = boundaries[-1]
+            _check_leading_content(mm, data_start, tag_bytes, container_bytes)
             _check_trailing_content(mm, data_end, tag_bytes, container_bytes)
             splits = []
             pos = data_start
