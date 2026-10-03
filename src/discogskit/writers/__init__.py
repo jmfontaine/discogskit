@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
+    import pyarrow as pa
+
     from discogskit.entities import EntityDef
+
+# Table name -> seconds spent flushing it. "_commit" holds any shared commit cost.
+TableTimings = dict[str, float]
 
 
 class OutputExistsError(Exception):
@@ -17,13 +22,15 @@ class Writer(Protocol):
         """Prepare destination (create tables / create output dir)."""
         ...
 
-    def write_chunk(
-        self,
-        ipc_dict: dict[str, bytes],
-        entity: EntityDef,
-        table_timings: dict[str, float] | None = None,
-    ) -> int:
-        """Write one chunk of IPC data. Returns root entity row count."""
+    def write_chunk(self, tables: dict[str, pa.RecordBatch]) -> TableTimings:
+        """Write one already-deserialized chunk, one RecordBatch per table.
+
+        ``tables`` iterates in ``entity.table_order`` (root table first); writers that enforce foreign keys
+        while loading (e.g. SQLite with ``fk=True``) depend on the parent table being written before its
+        child tables.
+
+        Returns per-table flush time in seconds for ``--profile``.
+        """
         ...
 
     def finalize(self, entity: EntityDef) -> None:
