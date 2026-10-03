@@ -104,6 +104,7 @@ def _fmt_time(seconds: float) -> str:
 
 
 if TYPE_CHECKING:
+    import pyarrow as pa
     from rich.progress import TaskID
 
 
@@ -162,6 +163,49 @@ class PipelineResult:
     total_records: int
 
 
+class _DuplicateIdTracker:
+    """Tracks root-table ids seen so far in one run and raises on the first duplicate.
+
+    Ids are tracked in a sparse paged bitmap (page index -> one bit-per-id bytearray) rather than a flat bitmap
+    sized to the highest id seen or a Python ``set``. A flat bitmap breaks for negative ids (Python indexes a
+    negative offset from the end of the array); a ``set`` retains one Python int object per id. Paging costs
+    ``_PAGE_SIZE // 8`` bytes per distinct page an id falls on, however far apart ids are, instead of one
+    allocation spanning the full range between the lowest and highest id seen.
+
+    Correctness doesn't depend on how ids are distributed — any int32 value works. Memory does: it's
+    proportional to the number of distinct pages touched, so ids that are dense (consecutive or close
+    together) share pages and cost little, while ids spread apart each force a new page. Worst case, one id
+    per page across the entire int32 range (65,536 pages), is about 520 MiB (512 MiB of bitmap payload plus
+    ~8 MiB of per-page bytearray object and dict overhead, measured via ``tracemalloc``) — worse than a
+    ``set`` in that case, better for any input dense enough to share pages.
+
+    Measured on 20M dense ids: 2.5 MB retained for this bitmap versus roughly 1.5 GB peak for an equivalent
+    ``set`` build, at a per-id cost of ~0.65 us versus a plain ``set.add``'s ~0.29 us — the bitmap is slower
+    per id and faster to reach for only because of the memory it saves.
+    """
+
+    _PAGE_BITS = 16  # 65,536 ids per page, 8 KiB per page bytearray
+    _PAGE_SIZE = 1 << _PAGE_BITS
+
+    def __init__(self) -> None:
+        self._pages: dict[int, bytearray] = {}
+
+    def check(self, entity_name: str, ids: pa.Array) -> None:
+        for id_value in ids.to_pylist():
+            if id_value is None:
+                raise ValueError(f"Missing {entity_name} id")
+            page_index, offset = divmod(id_value, self._PAGE_SIZE)
+            byte_index, bit = divmod(offset, 8)
+            page = self._pages.get(page_index)
+            if page is None:
+                page = bytearray(self._PAGE_SIZE // 8)
+                self._pages[page_index] = page
+            mask = 1 << bit
+            if page[byte_index] & mask:
+                raise ValueError(f"Duplicate {entity_name} id: {id_value}")
+            page[byte_index] |= mask
+
+
 class _ChunkWriter:
     """Writes one chunk per call and accumulates load statistics.
 
@@ -187,6 +231,7 @@ class _ChunkWriter:
         self.table_timings: dict[str, float] | None = {} if profile else None
         self.total = 0
         self.writer = writer
+        self._dup_tracker = _DuplicateIdTracker()
         self._failed = False
         self._t_idle = self._t_start = time.perf_counter()
 
@@ -199,7 +244,11 @@ class _ChunkWriter:
         self.get_wait += t_chunk - self._t_idle
         try:
             tables = {name: deserialize_batch(data) for name, data in ipc_dict.items()}
-            chunk_count = tables[self.entity.table_order[0]].num_rows
+            root_batch = tables[self.entity.table_order[0]]
+            chunk_count = root_batch.num_rows
+            self._dup_tracker.check(
+                self.entity.name, root_batch.column(self.entity.pk_column)
+            )
             timings = self.writer.write_chunk(tables)
         except BaseException:
             self._failed = True

@@ -8,9 +8,10 @@ import json
 import threading
 import time
 
+import pyarrow as pa
 import pytest
 
-from discogskit.pipeline import _fmt_time
+from discogskit.pipeline import _DuplicateIdTracker, _fmt_time
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Helpers
@@ -39,6 +40,24 @@ def artists_gz(tmp_path):
     gz_path = tmp_path / "artists.xml.gz"
     with gzip.open(gz_path, "wb") as f:
         f.write(_ARTISTS_GZ_XML)
+    return gz_path
+
+
+@pytest.fixture()
+def duplicate_artists_gz(tmp_path):
+    """Two <artist> elements with the same id, in the same chunk."""
+    xml = (
+        b"<?xml version='1.0' encoding='UTF-8'?>\n"
+        b"<artists>\n"
+        b"<artist>\n  <id>1</id>\n  <name>Test</name>\n"
+        b"  <data_quality>Correct</data_quality>\n</artist>\n"
+        b"<artist>\n  <id>1</id>\n  <name>Duplicate</name>\n"
+        b"  <data_quality>Correct</data_quality>\n</artist>\n"
+        b"</artists>"
+    )
+    gz_path = tmp_path / "artists.xml.gz"
+    with gzip.open(gz_path, "wb") as f:
+        f.write(xml)
     return gz_path
 
 
@@ -204,6 +223,95 @@ class TestPipelineRunWriters:
         with sqlite3.connect(db_path) as conn:
             rows = conn.execute("SELECT id, name FROM artists ORDER BY id").fetchall()
         assert rows == [(1, "Test"), (2, "Other")]
+
+
+class TestDuplicateIdTracker:
+    """#25: duplicate detection must be correct for every int32 value, not just small positive ones."""
+
+    _INT32_MAX = 2_147_483_647
+    _INT32_MIN = -2_147_483_648
+
+    @staticmethod
+    def _ids(values):
+        return pa.array(values, type=pa.int32())
+
+    def test_distinct_ids_do_not_raise(self):
+        tracker = _DuplicateIdTracker()
+        tracker.check("artists", self._ids([1, 2, 3]))
+
+    @pytest.mark.parametrize(
+        "value",
+        [0, -5, _INT32_MAX, _INT32_MIN],
+        ids=["zero", "negative", "int32-max", "int32-min"],
+    )
+    def test_duplicate_raises(self, value):
+        tracker = _DuplicateIdTracker()
+        tracker.check("artists", self._ids([value]))
+        with pytest.raises(ValueError, match=f"Duplicate artists id: {value}"):
+            tracker.check("artists", self._ids([value]))
+
+    def test_far_apart_ids_do_not_collide(self):
+        """Ids far enough apart to land on different pages must not be mistaken for duplicates."""
+        tracker = _DuplicateIdTracker()
+        far_apart = [1, 2_000_000_000, -2_000_000_000, self._INT32_MAX, self._INT32_MIN]
+        tracker.check("artists", self._ids(far_apart))
+
+        for value in far_apart:
+            with pytest.raises(ValueError, match=f"Duplicate artists id: {value}"):
+                tracker.check("artists", self._ids([value]))
+
+    def test_missing_id_raises(self):
+        tracker = _DuplicateIdTracker()
+        with pytest.raises(ValueError, match="Missing artists id"):
+            tracker.check("artists", self._ids([None]))
+
+
+class TestPipelineRunDuplicateIds:
+    """#25: a duplicated root id must fail during the load, for every writer."""
+
+    def test_jsonl(self, tmp_path, duplicate_artists_gz):
+        from discogskit.writers.jsonl import JSONLWriter
+
+        with pytest.raises(ValueError, match="Duplicate artists id: 1"):
+            _run_and_close(
+                _single_chunk_config(duplicate_artists_gz),
+                JSONLWriter(str(tmp_path / "out")),
+            )
+
+    def test_parquet(self, tmp_path, duplicate_artists_gz):
+        from discogskit.writers.parquet import ParquetWriter
+
+        with pytest.raises(ValueError, match="Duplicate artists id: 1"):
+            _run_and_close(
+                _single_chunk_config(duplicate_artists_gz),
+                ParquetWriter(str(tmp_path / "out")),
+            )
+
+    def test_sqlite(self, tmp_path, duplicate_artists_gz):
+        from discogskit.writers.sqlite import SQLiteWriter
+
+        db_path = tmp_path / "out.db"
+        with pytest.raises(ValueError, match="Duplicate artists id: 1"):
+            _run_and_close(
+                _single_chunk_config(duplicate_artists_gz), SQLiteWriter(str(db_path))
+            )
+
+    def test_duplicate_across_chunks(self, tmp_path):
+        """A duplicate id in a later chunk is still caught, not just within one chunk."""
+        from discogskit.writers.sqlite import SQLiteWriter
+
+        gz_path = _many_artists_gz(tmp_path / "artists.xml.gz")
+        # Rewrite one far-later id to collide with the very first one.
+        xml = gzip.decompress(gz_path.read_bytes())
+        xml = xml.replace(f"<id>{_MANY_ARTISTS}</id>".encode(), b"<id>1</id>", 1)
+        with gzip.open(gz_path, "wb", compresslevel=1) as f:
+            f.write(xml)
+
+        db_path = tmp_path / "out.db"
+        with pytest.raises(ValueError, match="Duplicate artists id: 1"):
+            _run_or_fail_on_hang(
+                _multi_chunk_config(gz_path), SQLiteWriter(str(db_path))
+            )
 
 
 class TestPipelineRunInputValidation:
@@ -515,6 +623,16 @@ class TestPipelineRun:
         table_timings = result.profile_data["table_timings"]
         assert isinstance(table_timings, dict)
         assert set(table_timings) == set(get_entity("labels").table_order) | {"_commit"}
+
+    def test_postgresql_writer_duplicate_id(self, duplicate_artists_gz, pg_dsn):
+        """#25: PostgreSQL catches a duplicate root id during the load, not just at finalize()."""
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        with pytest.raises(ValueError, match="Duplicate artists id: 1"):
+            _run_and_close(
+                _single_chunk_config(duplicate_artists_gz),
+                PostgreSQLWriter(pg_dsn, overwrite=True),
+            )
 
     def test_writer_error_does_not_hang(self, tmp_path):
         """A writer failing on chunk 1 of more chunks than the backlog holds re-raises."""
