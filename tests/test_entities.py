@@ -48,10 +48,7 @@ class TestRegistration:
     def test_entity_has_required_fields(self, name):
         entity = get(name)
         assert len(entity.table_order) > 0
-        assert set(entity.schemas.keys()) == set(entity.table_order)
         assert set(entity.table_weights.keys()) == set(entity.table_order)
-        assert callable(entity.extract_chunk_to_ipc)
-        assert callable(entity.find_split_points)
         assert entity.pk_column == "id"
 
     @pytest.mark.parametrize(

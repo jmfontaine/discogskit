@@ -8,8 +8,9 @@ import pyarrow.parquet as pq
 import pytest
 
 from discogskit.entities import ChunkArgs, get
-from discogskit.entities.artists import extract_chunk_to_ipc as artists_extract
+from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers.parquet import ParquetWriter
+from tests.conftest import empty_ipc
 
 
 @pytest.mark.integration
@@ -21,7 +22,9 @@ class TestParquetWriter:
     @pytest.fixture()
     def ipc_dict(self, artists_xml_file):
         size = os.path.getsize(artists_xml_file)
-        return artists_extract(ChunkArgs(str(artists_xml_file), 0, size))
+        return extract_chunk_to_ipc(
+            ChunkArgs("artists", str(artists_xml_file), 0, size)
+        )
 
     def test_full_lifecycle(self, tmp_path, entity, ipc_dict):
         writer = ParquetWriter(str(tmp_path))
@@ -67,15 +70,13 @@ class TestParquetWriter:
 
     def test_empty_batch_with_table_timings(self, tmp_path, entity):
         """Empty batches are timed correctly when table_timings is passed."""
-        from discogskit.entities.artists import _cols_to_ipc, _new_cols
-
-        empty_ipc = _cols_to_ipc(_new_cols())
-
         writer = ParquetWriter(str(tmp_path))
         try:
             writer.setup(entity)
             timings: dict[str, float] = {}
-            count = writer.write_chunk(empty_ipc, entity, table_timings=timings)
+            count = writer.write_chunk(
+                empty_ipc("artists"), entity, table_timings=timings
+            )
             writer.finalize(entity)
         finally:
             writer.close()

@@ -1,36 +1,19 @@
-"""Masters entity definition: Arrow schemas, XML parsing, IPC worker.
+"""Masters entity definition: Arrow schemas and ``<master>`` record parsing.
 
-See ``releases.py`` for detailed comments on the shared patterns: column accumulators, iterparse memory optimization,
-and IPC serialization.
+The chunk worker that drives ``append_record`` is shared; see ``_worker.py``.
 """
 
 from __future__ import annotations
 
 import warnings
-from collections.abc import Callable
-from io import BytesIO
 
 import pyarrow as pa
 from lxml import etree
-from pyarrow import ipc
 
-from discogskit.entities import ChunkArgs, EntityDef, register
-from discogskit.entities._split import make_split_finder
-
-_Cols = dict[str, dict[str, list]]
+from discogskit.entities import Cols, EntityDef, register
 
 # ------------------------------------------------------------------------------------------------------------------------
-# Constants
-# ------------------------------------------------------------------------------------------------------------------------
-
-TABLE_ORDER = [
-    "masters",
-    "master_artists",
-    "master_videos",
-]
-
-# ------------------------------------------------------------------------------------------------------------------------
-# Arrow schemas
+# Arrow schemas (the first table is the root table)
 # ------------------------------------------------------------------------------------------------------------------------
 
 SCHEMAS = {
@@ -73,62 +56,9 @@ TABLE_WEIGHTS = {
     "master_videos": 0.20,
 }
 
-# ------------------------------------------------------------------------------------------------------------------------
-# XML constants
-# ------------------------------------------------------------------------------------------------------------------------
 
-_MASTER_END = b"</master>\n"
-_XML_HEADER = b"<?xml version='1.0' encoding='UTF-8'?>\n<masters>\n"
-_XML_FOOTER = b"\n</masters>"
-
-# ------------------------------------------------------------------------------------------------------------------------
-# XML splitting
-# ------------------------------------------------------------------------------------------------------------------------
-
-find_split_points: Callable[[str, int], list[tuple[int, int]]] = make_split_finder(
-    b"<master ", _MASTER_END
-)
-
-# ------------------------------------------------------------------------------------------------------------------------
-# IPC helpers
-# ------------------------------------------------------------------------------------------------------------------------
-
-
-def _serialize_batch(batch: pa.RecordBatch, schema: pa.Schema) -> bytes:
-    sink = pa.BufferOutputStream()
-    writer = ipc.new_stream(sink, schema)
-    writer.write_batch(batch)
-    writer.close()
-    return sink.getvalue().to_pybytes()
-
-
-# ------------------------------------------------------------------------------------------------------------------------
-# Column accumulators
-# ------------------------------------------------------------------------------------------------------------------------
-
-
-def _new_cols() -> _Cols:
-    return {
-        name: {col_name: [] for col_name in schema.names}
-        for name, schema in SCHEMAS.items()
-    }
-
-
-def _cols_to_ipc(cols: _Cols) -> dict[str, bytes]:
-    result = {}
-    for name, schema in SCHEMAS.items():
-        batch = pa.RecordBatch.from_pydict(cols[name], schema=schema)
-        result[name] = _serialize_batch(batch, schema)
-    return result
-
-
-# ------------------------------------------------------------------------------------------------------------------------
-# XML parsing
-# ------------------------------------------------------------------------------------------------------------------------
-
-
-def _append_master(
-    cols: _Cols, elem: etree._Element, unknown: set[str] | None = None
+def append_record(
+    cols: Cols, elem: etree._Element, unknown: set[str] | None = None
 ) -> None:
     """Parse a <master> element and append all data to column accumulators."""
     id_text = elem.get("id")
@@ -228,60 +158,13 @@ def _append_master(
     r["styles"].append(styles)
 
 
-# ------------------------------------------------------------------------------------------------------------------------
-# Chunk worker
-# ------------------------------------------------------------------------------------------------------------------------
-
-
-def extract_chunk_to_ipc(args: ChunkArgs) -> dict[str, bytes]:
-    """Worker: parse XML chunk -> 3 RecordBatches -> IPC bytes dict."""
-    with open(args.file_path, "rb") as f:
-        f.seek(args.start)
-        data = f.read(args.end - args.start)
-
-    xml_data = _XML_HEADER + data + _XML_FOOTER
-    cols = _new_cols()
-    unknown: set[str] | None = set() if args.strict else None
-
-    for _, elem in etree.iterparse(BytesIO(xml_data), events=("end",), tag="master"):
-        _append_master(cols, elem, unknown)
-        elem.clear()
-        while elem.getprevious() is not None:
-            del elem.getparent()[0]
-
-    if unknown:
-        for tag in sorted(unknown):
-            warnings.warn(f"unhandled XML element <{tag}> in <master>", stacklevel=1)
-
-    return _cols_to_ipc(cols)
-
-
-# ------------------------------------------------------------------------------------------------------------------------
-# Import-time integrity assertion
-# ------------------------------------------------------------------------------------------------------------------------
-
-assert set(SCHEMAS) == set(TABLE_ORDER), (
-    f"Table key mismatch: schemas={set(SCHEMAS) - set(TABLE_ORDER)}, "
-    f"order={set(TABLE_ORDER) - set(SCHEMAS)}"
+register(
+    EntityDef(
+        append_record=append_record,
+        fk_column="master_id",
+        name="masters",
+        root_tag="master",
+        schemas=SCHEMAS,
+        table_weights=TABLE_WEIGHTS,
+    )
 )
-assert set(TABLE_WEIGHTS) == set(TABLE_ORDER), (
-    f"Table weight mismatch: weights={set(TABLE_WEIGHTS) - set(TABLE_ORDER)}, "
-    f"order={set(TABLE_ORDER) - set(TABLE_WEIGHTS)}"
-)
-
-# ------------------------------------------------------------------------------------------------------------------------
-# Register
-# ------------------------------------------------------------------------------------------------------------------------
-
-MASTERS_ENTITY = EntityDef(
-    extract_chunk_to_ipc=extract_chunk_to_ipc,
-    find_split_points=find_split_points,
-    fk_column="master_id",
-    name="masters",
-    root_tag="master",
-    schemas=SCHEMAS,
-    table_order=TABLE_ORDER,
-    table_weights=TABLE_WEIGHTS,
-)
-
-register(MASTERS_ENTITY)

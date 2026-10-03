@@ -5,14 +5,17 @@ from __future__ import annotations
 import os
 
 from discogskit.entities import ChunkArgs
-from discogskit.entities.labels import SCHEMAS, extract_chunk_to_ipc
+from discogskit.entities._worker import extract_chunk_to_ipc
+from discogskit.entities.labels import SCHEMAS
 from tests.conftest import ipc_to_tables
 
 
 class TestLabelsParsing:
     def test_extract_chunk(self, labels_xml_file):
         size = os.path.getsize(labels_xml_file)
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(labels_xml_file), 0, size))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("labels", str(labels_xml_file), 0, size)
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         labels = tables["labels"]
@@ -30,7 +33,9 @@ class TestLabelsParsing:
 
     def test_sublabels(self, labels_xml_file):
         size = os.path.getsize(labels_xml_file)
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(labels_xml_file), 0, size))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("labels", str(labels_xml_file), 0, size)
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         subs = tables["label_sublabels"]
@@ -41,7 +46,9 @@ class TestLabelsParsing:
 
     def test_schema_matches(self, labels_xml_file):
         size = os.path.getsize(labels_xml_file)
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(labels_xml_file), 0, size))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("labels", str(labels_xml_file), 0, size)
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         for name, table in tables.items():
@@ -57,7 +64,9 @@ class TestLabelsParsing:
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(f), 0, os.path.getsize(f)))
+            ipc_dict = extract_chunk_to_ipc(
+                ChunkArgs("labels", str(f), 0, os.path.getsize(f))
+            )
             tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         assert tables["labels"].num_rows == 0

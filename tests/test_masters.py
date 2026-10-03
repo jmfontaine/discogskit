@@ -5,14 +5,17 @@ from __future__ import annotations
 import os
 
 from discogskit.entities import ChunkArgs
-from discogskit.entities.masters import SCHEMAS, extract_chunk_to_ipc
+from discogskit.entities._worker import extract_chunk_to_ipc
+from discogskit.entities.masters import SCHEMAS
 from tests.conftest import ipc_to_tables
 
 
 class TestMastersParsing:
     def test_extract_chunk(self, masters_xml_file):
         size = os.path.getsize(masters_xml_file)
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(masters_xml_file), 0, size))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("masters", str(masters_xml_file), 0, size)
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         masters = tables["masters"]
@@ -26,7 +29,9 @@ class TestMastersParsing:
 
     def test_artists(self, masters_xml_file):
         size = os.path.getsize(masters_xml_file)
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(masters_xml_file), 0, size))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("masters", str(masters_xml_file), 0, size)
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         artists = tables["master_artists"]
@@ -39,7 +44,9 @@ class TestMastersParsing:
 
     def test_genres(self, masters_xml_file):
         size = os.path.getsize(masters_xml_file)
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(masters_xml_file), 0, size))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("masters", str(masters_xml_file), 0, size)
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         masters = tables["masters"]
@@ -47,7 +54,9 @@ class TestMastersParsing:
 
     def test_styles(self, masters_xml_file):
         size = os.path.getsize(masters_xml_file)
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(masters_xml_file), 0, size))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("masters", str(masters_xml_file), 0, size)
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         masters = tables["masters"]
@@ -55,7 +64,9 @@ class TestMastersParsing:
 
     def test_videos(self, masters_xml_file):
         size = os.path.getsize(masters_xml_file)
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(masters_xml_file), 0, size))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("masters", str(masters_xml_file), 0, size)
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         videos = tables["master_videos"]
@@ -68,7 +79,9 @@ class TestMastersParsing:
 
     def test_schema_matches(self, masters_xml_file):
         size = os.path.getsize(masters_xml_file)
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(masters_xml_file), 0, size))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("masters", str(masters_xml_file), 0, size)
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         for name, table in tables.items():
@@ -84,7 +97,9 @@ class TestMastersParsing:
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(f), 0, os.path.getsize(f)))
+            ipc_dict = extract_chunk_to_ipc(
+                ChunkArgs("masters", str(f), 0, os.path.getsize(f))
+            )
             tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         assert tables["masters"].num_rows == 0
@@ -111,7 +126,9 @@ class TestMastersParsing:
         f = tmp_path / "bogus_tags.xml"
         f.write_text(xml)
 
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs(str(f), 0, os.path.getsize(f)))
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("masters", str(f), 0, os.path.getsize(f))
+        )
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         assert tables["master_artists"].num_rows == 1

@@ -5,6 +5,8 @@ from __future__ import annotations
 import pyarrow as pa
 import pytest
 
+from discogskit.entities import ChunkArgs
+from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers._ipc import deserialize_batches
 
 # ------------------------------------------------------------------------------------------------------------------------
@@ -24,6 +26,11 @@ def ipc_to_tables(
         else:
             result[name] = pa.table({}, schema=schemas[name])
     return result
+
+
+def empty_ipc(entity: str) -> dict[str, bytes]:
+    """IPC dict for a chunk with no records, from an empty byte range of any file."""
+    return extract_chunk_to_ipc(ChunkArgs(entity, __file__, 0, 0))
 
 
 # ------------------------------------------------------------------------------------------------------------------------

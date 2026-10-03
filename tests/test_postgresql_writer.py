@@ -9,7 +9,8 @@ from urllib.parse import urlsplit
 import pytest
 
 from discogskit.entities import ChunkArgs, get
-from discogskit.entities.artists import extract_chunk_to_ipc as artists_extract
+from discogskit.entities._worker import extract_chunk_to_ipc
+from tests.conftest import empty_ipc
 
 
 def _load(dsn, entity, ipc_dict, **options):
@@ -33,7 +34,9 @@ class TestPostgreSQLWriter:
     @pytest.fixture()
     def ipc_dict(self, artists_xml_file):
         size = os.path.getsize(artists_xml_file)
-        return artists_extract(ChunkArgs(str(artists_xml_file), 0, size))
+        return extract_chunk_to_ipc(
+            ChunkArgs("artists", str(artists_xml_file), 0, size)
+        )
 
     def test_full_lifecycle(self, pg_dsn, entity, ipc_dict):
         from discogskit.writers.postgresql import PostgreSQLWriter
@@ -124,16 +127,15 @@ class TestPostgreSQLWriter:
 
     def test_empty_batch_with_table_timings(self, pg_dsn, entity):
         """Empty batches are timed correctly when table_timings is passed."""
-        from discogskit.entities.artists import _cols_to_ipc, _new_cols
         from discogskit.writers.postgresql import PostgreSQLWriter
-
-        empty_ipc = _cols_to_ipc(_new_cols())
 
         writer = PostgreSQLWriter(pg_dsn, overwrite=True)
         try:
             writer.setup(entity)
             timings: dict[str, float] = {}
-            count = writer.write_chunk(empty_ipc, entity, table_timings=timings)
+            count = writer.write_chunk(
+                empty_ipc("artists"), entity, table_timings=timings
+            )
             writer.finalize(entity)
         finally:
             writer.close()
@@ -310,7 +312,9 @@ class TestOverwriteSafety:
     @pytest.fixture()
     def ipc_dict(self, artists_xml_file):
         size = os.path.getsize(artists_xml_file)
-        return artists_extract(ChunkArgs(str(artists_xml_file), 0, size))
+        return extract_chunk_to_ipc(
+            ChunkArgs("artists", str(artists_xml_file), 0, size)
+        )
 
     @pytest.fixture()
     def schemas(self, pg_dsn):

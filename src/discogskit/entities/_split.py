@@ -12,47 +12,55 @@ and parse with iterparse.
 from __future__ import annotations
 
 import mmap
-from collections.abc import Callable
+
+# Bytes that can follow "<tag" in a record's opening tag.
+_TAG_NAME_END = frozenset(b"> \t\r\n/")
 
 
-def make_split_finder(
-    start_pattern: bytes, end_tag: bytes
-) -> Callable[[str, int], list[tuple[int, int]]]:
-    """Return a find_split_points function for the given element tags."""
+def _find_data_region(mm: mmap.mmap, tag: bytes, end_tag: bytes) -> tuple[int, int]:
+    # The bare "<tag" prefix also matches the container element ("<artist" in "<artists>"), so skip matches that
+    # continue the tag name. Searching for "<tag>" and "<tag " separately would scan the whole file for whichever
+    # form the dump never uses.
+    prefix = b"<" + tag
+    after = len(prefix)
+    start = mm.find(prefix)
+    while start != -1 and (
+        start + after >= len(mm) or mm[start + after] not in _TAG_NAME_END
+    ):
+        start = mm.find(prefix, start + 1)
+    if start == -1:
+        raise ValueError(f"No <{tag.decode()}> elements found")
+    end = mm.rfind(end_tag)
+    if end == -1:
+        raise ValueError(f"No {end_tag!r} boundary found")
+    return start, end + len(end_tag)
 
-    def _find_data_region(mm: mmap.mmap) -> tuple[int, int]:
-        start = mm.find(start_pattern)
-        if start == -1:
-            raise ValueError(f"No {start_pattern!r} elements found")
-        end = mm.rfind(end_tag)
-        if end == -1:
-            raise ValueError(f"No {end_tag!r} boundary found")
-        return start, end + len(end_tag)
 
-    def find_split_points(
-        file_path: str, target_chunk_bytes: int
-    ) -> list[tuple[int, int]]:
-        # A negative size makes the search below step backwards forever.
-        if target_chunk_bytes <= 0:
-            raise ValueError(
-                f"target_chunk_bytes must be positive, got {target_chunk_bytes}"
-            )
-        with open(file_path, "rb") as f:
-            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-            try:
-                data_start, data_end = _find_data_region(mm)
-                splits = []
-                pos = data_start
-                while pos < data_end:
-                    boundary = mm.find(end_tag, pos + target_chunk_bytes)
-                    if boundary == -1 or boundary >= data_end:
-                        splits.append((pos, data_end))
-                        break
-                    boundary += len(end_tag)
-                    splits.append((pos, boundary))
-                    pos = boundary
-                return splits
-            finally:
-                mm.close()
-
-    return find_split_points
+def find_split_points(
+    file_path: str, target_chunk_bytes: int, tag: str
+) -> list[tuple[int, int]]:
+    """Split the ``<tag>`` records in ``file_path`` into byte ranges of about ``target_chunk_bytes``."""
+    # A negative size makes the search below step backwards forever.
+    if target_chunk_bytes <= 0:
+        raise ValueError(
+            f"target_chunk_bytes must be positive, got {target_chunk_bytes}"
+        )
+    tag_bytes = tag.encode()
+    end_tag = b"</" + tag_bytes + b">\n"
+    with open(file_path, "rb") as f:
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        try:
+            data_start, data_end = _find_data_region(mm, tag_bytes, end_tag)
+            splits = []
+            pos = data_start
+            while pos < data_end:
+                boundary = mm.find(end_tag, pos + target_chunk_bytes)
+                if boundary == -1 or boundary >= data_end:
+                    splits.append((pos, data_end))
+                    break
+                boundary += len(end_tag)
+                splits.append((pos, boundary))
+                pos = boundary
+            return splits
+        finally:
+            mm.close()

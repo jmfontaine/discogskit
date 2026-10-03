@@ -1,24 +1,40 @@
 """Entity registry for Discogs dump entity types.
 
-Each entity module (artists, labels, masters, and releases) defines its own
-Arrow schemas, XML parsing logic, and worker function, then calls
-``register()`` at import time.  The bottom of this file imports all entity
-modules to trigger registration — adding a new entity only requires
-creating the module and adding an import here.
+Each entity module (artists, labels, masters, and releases) defines its Arrow
+schemas, table weights and an ``append_record`` parser, then calls
+``register()`` at import time.  Splitting and the chunk worker are shared
+(``_split.py`` and ``_worker.py``) and driven by ``EntityDef``.  The bottom of
+this file imports all entity modules to trigger registration — adding a new
+entity only requires creating the module and adding an import here.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import cached_property
+from typing import TYPE_CHECKING
 
 import pyarrow as pa
+
+from discogskit.entities._split import find_split_points
+
+if TYPE_CHECKING:
+    from lxml import etree
+
+# Column accumulators: table name -> column name -> values, one list per column.
+Cols = dict[str, dict[str, list]]
 
 
 @dataclass
 class ChunkArgs:
-    """Arguments passed to each parse worker for one XML chunk."""
+    """Arguments passed to each parse worker for one XML chunk.
 
+    Carries the entity name rather than the ``EntityDef`` so it stays cheap to pickle; the worker looks the entity up
+    in the registry.
+    """
+
+    entity: str
     file_path: str
     start: int
     end: int
@@ -27,17 +43,28 @@ class ChunkArgs:
 
 @dataclass
 class EntityDef:
-    """Definition for one Discogs entity type."""
+    """Definition for one Discogs entity type.
+
+    ``name`` is also the XML container element (``<artists>``) and ``root_tag`` the record element (``<artist>``).
+    The first table in ``schemas`` is the root table.
+    """
 
     name: str
     root_tag: str
-    table_order: list[str]
     schemas: dict[str, pa.Schema]
     table_weights: dict[str, float]
-    extract_chunk_to_ipc: Callable
-    find_split_points: Callable
+    append_record: Callable[[Cols, etree._Element, set[str] | None], None]
     pk_column: str = "id"
     fk_column: str | None = None
+
+    @cached_property
+    def table_order(self) -> list[str]:
+        return list(self.schemas)
+
+    def find_split_points(
+        self, file_path: str, target_chunk_bytes: int
+    ) -> list[tuple[int, int]]:
+        return find_split_points(file_path, target_chunk_bytes, self.root_tag)
 
 
 ENTITIES: dict[str, EntityDef] = {}

@@ -77,6 +77,7 @@ from discogskit import decompress
 from discogskit._console import console, status
 from discogskit.entities import ChunkArgs, EntityDef
 from discogskit.entities import get as get_entity
+from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers import Writer
 
 
@@ -248,9 +249,12 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
         # Stage 2: Split. Runs before writer.setup() so an input without records
         # fails before --overwrite drops the existing output.
         t_split_start = time.perf_counter()
-        splits = entity.find_split_points(xml_path, chunk_bytes)
+        splits = entity.find_split_points(str(xml_path), chunk_bytes)
         t_split = time.perf_counter() - t_split_start
-        worker_args = [ChunkArgs(str(xml_path), s, e, config.strict) for s, e in splits]
+        worker_args = [
+            ChunkArgs(entity.name, str(xml_path), s, e, config.strict)
+            for s, e in splits
+        ]
         n_chunks = len(splits)
         if not use_progress:
             status("Chunks", f"{n_chunks} chunks, {parse_workers} workers")
@@ -316,9 +320,7 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
             initializer=signal.signal,
         )
         try:
-            for ipc_dict in pool.imap_unordered(
-                entity.extract_chunk_to_ipc, worker_args
-            ):
+            for ipc_dict in pool.imap_unordered(extract_chunk_to_ipc, worker_args):
                 pending.append(write_executor.submit(chunk_writer.write, ipc_dict))
                 # Writes finish in order; reap finished ones so errors surface early.
                 while pending and pending[0].done():

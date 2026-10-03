@@ -76,5 +76,4 @@ ignore_names = [
   "load",              # Typer app.command()
   "render",            # Rich ProgressColumn override
   "return_value",      # mock attribute setup
-  "root_tag",          # dataclass field used at runtime
 ]

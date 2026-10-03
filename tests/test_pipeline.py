@@ -216,7 +216,7 @@ class TestPipelineRunInputValidation:
         with gzip.open(empty_gz, "wb") as f:
             f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n</artists>")
 
-        with pytest.raises(ValueError, match="No b'<artist>' elements found"):
+        with pytest.raises(ValueError, match="No <artist> elements found"):
             _run_and_close(
                 _single_chunk_config(empty_gz),
                 SQLiteWriter(str(db_path), overwrite=True),
