@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import pyarrow as pa
 import pytest
 
@@ -17,7 +19,7 @@ class TestGenerateDDL:
             ]
         )
         ddl = generate_ddl("test_table", schema)
-        assert "CREATE TABLE test_table" in ddl
+        assert 'CREATE TABLE "test_table"' in ddl
         assert "name" in ddl
         assert "TEXT" in ddl
         assert "INTEGER" in ddl
@@ -46,7 +48,21 @@ class TestGenerateDDL:
             fk_ref_table="parents",
             pk_column="id",
         )
-        assert "REFERENCES parents(id)" in ddl
+        assert 'REFERENCES "parents"("id")' in ddl
+
+    def test_keyword_names_are_valid_sql(self):
+        """Names that are SQL keywords, like the `join` column, still execute (#56)."""
+        schema = pa.schema(
+            [
+                pa.field("id", pa.int32(), nullable=False),
+                pa.field("join", pa.utf8()),
+                pa.field("order", pa.list_(pa.utf8())),
+            ]
+        )
+        conn = sqlite3.connect(":memory:")
+        conn.execute(generate_ddl("group", schema, pk_column="id"))
+        conn.execute("INSERT INTO \"group\" VALUES (1, ',', NULL)")
+        assert conn.execute('SELECT "join" FROM "group"').fetchone() == (",",)
 
     def test_nullable_no_default(self):
         schema = pa.schema(

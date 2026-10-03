@@ -11,6 +11,55 @@ import pytest
 from discogskit.entities import ChunkArgs, get
 from discogskit.entities.artists import extract_chunk_to_ipc as artists_extract
 from discogskit.writers.sqlite import SQLiteWriter
+from tests.conftest import (
+    ARTISTS_XML,
+    LABELS_XML,
+    MASTERS_XML,
+    RELEASES_XML,
+    ipc_to_tables,
+)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("fk", [False, True], ids=["no-fk", "fk"])
+@pytest.mark.parametrize(
+    "entity_name, xml",
+    [
+        ("artists", ARTISTS_XML),
+        ("labels", LABELS_XML),
+        ("masters", MASTERS_XML),
+        ("releases", RELEASES_XML),
+    ],
+    ids=["artists", "labels", "masters", "releases"],
+)
+def test_every_entity_loads(tmp_path, entity_name, xml, fk):
+    """Every table round-trips, including columns named after SQL keywords like `join` (#56)."""
+    entity = get(entity_name)
+    f = tmp_path / f"{entity_name}.xml"
+    f.write_text(xml)
+    ipc_dict = entity.extract_chunk_to_ipc(ChunkArgs(str(f), 0, os.path.getsize(f)))
+    expected = {
+        name: table.num_rows
+        for name, table in ipc_to_tables(ipc_dict, entity.schemas).items()
+    }
+
+    db_path = str(tmp_path / "test.db")
+    writer = SQLiteWriter(db_path, fk=fk)
+    try:
+        writer.setup(entity)
+        writer.write_chunk(ipc_dict, entity)
+        writer.finalize(entity)
+    finally:
+        writer.close()
+
+    conn = sqlite3.connect(db_path)
+    actual = {
+        name: conn.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
+        for name in entity.table_order
+    }
+    conn.close()
+    assert actual == expected
+    assert any(expected[name] for name in entity.table_order[1:])
 
 
 @pytest.mark.integration

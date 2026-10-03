@@ -48,6 +48,11 @@ def _arrow_to_sqlite_type(arrow_type: pa.DataType) -> str:
     return sql
 
 
+def _quote(name: str) -> str:
+    """Quote an SQL identifier, so names like ``join`` aren't parsed as keywords."""
+    return '"' + name.replace('"', '""') + '"'
+
+
 def generate_ddl(
     table_name: str,
     schema: pa.Schema,
@@ -60,16 +65,20 @@ def generate_ddl(
     lines = []
     for field in schema:
         sql_type = _arrow_to_sqlite_type(field.type)
-        parts = [f"    {field.name:<20s} {sql_type}"]
+        parts = [f"    {_quote(field.name):<22s} {sql_type}"]
         if field.name == pk_column:
             parts.append("PRIMARY KEY")
         elif not field.nullable:
             parts.append("NOT NULL")
-        if field.name == fk_column and fk_ref_table is not None:
-            parts.append(f"REFERENCES {fk_ref_table}({pk_column})")
+        if (
+            field.name == fk_column
+            and fk_ref_table is not None
+            and pk_column is not None
+        ):
+            parts.append(f"REFERENCES {_quote(fk_ref_table)}({_quote(pk_column)})")
         lines.append(" ".join(parts))
     cols = ",\n".join(lines)
-    return f"CREATE TABLE {table_name} (\n{cols}\n)"
+    return f"CREATE TABLE {_quote(table_name)} (\n{cols}\n)"
 
 
 # ------------------------------------------------------------------------------------------------------------------------
@@ -124,7 +133,7 @@ class SQLiteWriter:
 
         # Drop tables in reverse order
         for t in reversed(entity.table_order):
-            cur.execute(f"DROP TABLE IF EXISTS {t}")
+            cur.execute(f"DROP TABLE IF EXISTS {_quote(t)}")
 
         # Create tables
         t_ddl = time.perf_counter()
@@ -152,7 +161,7 @@ class SQLiteWriter:
             schema = entity.schemas[t]
             n_cols = len(schema)
             placeholders = ", ".join("?" * n_cols)
-            self._insert_sql[t] = f"INSERT INTO {t} VALUES ({placeholders})"
+            self._insert_sql[t] = f"INSERT INTO {_quote(t)} VALUES ({placeholders})"
 
             list_cols = set()
             for i, field in enumerate(schema):
@@ -221,7 +230,10 @@ class SQLiteWriter:
             t0 = time.perf_counter()
             cur = self._conn.cursor()
             for t in entity.table_order[1:]:
-                cur.execute(f"CREATE INDEX {t}_{fk_col}_idx ON {t}({fk_col})")
+                cur.execute(
+                    f"CREATE INDEX {_quote(f'{t}_{fk_col}_idx')}"
+                    f" ON {_quote(t)}({_quote(fk_col)})"
+                )
             self._conn.commit()
             n_idx = len(entity.table_order) - 1
             status("Index", f"{n_idx} indexes", f"[{time.perf_counter() - t0:.2f}s]")
