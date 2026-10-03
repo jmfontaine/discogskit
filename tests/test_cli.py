@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gzip
+import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +16,7 @@ from discogskit._console import console
 from discogskit.cli import app
 from discogskit.decompress import DecompressError
 from discogskit.writers import OutputExistsError
+from tests.conftest import ARTISTS_XML
 
 runner = CliRunner()
 
@@ -324,10 +327,10 @@ _COUNT_OPTIONS = {
     "convert": ["--chunk-mb", "--parse-workers", "--write-queue"],
     "load": [
         "--chunk-mb",
-        "--index-workers",
         "--parse-workers",
+        "--pg-index-workers",
+        "--pg-write-workers",
         "--write-queue",
-        "--write-workers",
     ],
 }
 
@@ -350,6 +353,53 @@ class TestOptionMinimums:
         with patch("discogskit.cli.pipeline.run") as run:
             result = runner.invoke(app, [command, str(gz), option, value])
         assert result.exit_code == 2
+        output = click.unstyle(result.output)
         # Typer colors the error panel when it detects CI (GITHUB_ACTIONS).
-        assert option in click.unstyle(result.output)
+        assert option in output
+        assert "is not in the range x>=1" in output
         run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "option", ["--pg-fk", "--write-workers", "--index-workers"]
+    )
+    def test_renamed_options_are_no_such_option(
+        self, tmp_path: Path, option: str
+    ) -> None:
+        """Clean cutover (#38): the old pre-rename flag names are gone, not aliased."""
+        gz = _make_gz(tmp_path)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = runner.invoke(app, ["load", str(gz), option, "1"])
+        assert result.exit_code == 2
+        assert "No such option" in click.unstyle(result.output)
+        run.assert_not_called()
+
+
+class TestFkOption:
+    def test_fk_enforced_in_sqlite(self, tmp_path: Path) -> None:
+        """--fk (renamed from --pg-fk, #38) enforces foreign keys in SQLite too."""
+        gz = tmp_path / "discogs_20260301_artists.xml.gz"
+        with gzip.open(gz, "wb") as f:
+            f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
+            f.write(ARTISTS_XML.encode())
+            f.write(b"</artists>")
+
+        db = tmp_path / "out.db"
+        result = runner.invoke(
+            app,
+            [
+                "load",
+                str(gz),
+                "--dsn",
+                str(db),
+                "--fk",
+                "--parse-workers",
+                "1",
+                "--no-progress",
+            ],
+        )
+        assert result.exit_code == 0, click.unstyle(result.output)
+
+        conn = sqlite3.connect(db)
+        fks = conn.execute("PRAGMA foreign_key_list(artist_aliases)").fetchall()
+        conn.close()
+        assert len(fks) > 0

@@ -349,14 +349,6 @@ def load(
         int,
         typer.Option(help="Number of parallel parse workers", min=1),
     ] = max(1, CPUS // 2),
-    write_workers: Annotated[
-        int,
-        typer.Option(help="Number of parallel database write workers", min=1),
-    ] = 1,
-    index_workers: Annotated[
-        int,
-        typer.Option(help="Number of parallel index creation workers", min=1),
-    ] = 2,
     chunk_mb: Annotated[
         int,
         typer.Option(help="Split XML into chunks of roughly this size (MB)", min=1),
@@ -368,6 +360,10 @@ def load(
         ),
     ] = 2,
     # Behavior
+    fk: Annotated[
+        bool,
+        typer.Option(help="Enforce foreign key constraints (SQLite and PostgreSQL)"),
+    ] = False,
     keep_xml: Annotated[
         bool,
         typer.Option(help="Keep decompressed XML file after loading"),
@@ -396,12 +392,6 @@ def load(
             rich_help_panel="PostgreSQL",
         ),
     ] = False,
-    pg_fk: Annotated[
-        bool,
-        typer.Option(
-            help="Add foreign key constraints after load", rich_help_panel="PostgreSQL"
-        ),
-    ] = False,
     pg_create_schema: Annotated[
         bool,
         typer.Option(
@@ -416,6 +406,22 @@ def load(
             rich_help_panel="PostgreSQL",
         ),
     ] = None,
+    pg_write_workers: Annotated[
+        int,
+        typer.Option(
+            help="Number of parallel database write workers",
+            min=1,
+            rich_help_panel="PostgreSQL",
+        ),
+    ] = 1,
+    pg_index_workers: Annotated[
+        int,
+        typer.Option(
+            help="Number of parallel index creation workers",
+            min=1,
+            rich_help_panel="PostgreSQL",
+        ),
+    ] = 2,
 ) -> None:
     """Load Discogs XML dumps into a database."""
     jobs = _resolve_jobs(paths)
@@ -428,12 +434,12 @@ def load(
         writer = get_writer(
             dsn,
             create_schema=pg_create_schema,
-            fk=pg_fk,
-            index_workers=index_workers,
+            fk=fk,
+            index_workers=pg_index_workers,
             overwrite=overwrite,
             schema=pg_schema,
             unlogged=pg_unlogged,
-            write_workers=write_workers,
+            write_workers=pg_write_workers,
         )
     # Writer construction can fail many ways (bad DSN, driver, connection).
     except Exception as exc:  # noqa: BLE001
