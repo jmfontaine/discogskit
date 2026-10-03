@@ -15,7 +15,7 @@ from discogskit._console import console, status
 from discogskit.decompress import DecompressError
 from discogskit.entities import detect_entity
 from discogskit.entities import get as get_entity
-from discogskit.writers import OutputExistsError, get_writer
+from discogskit.writers import OutputExistsError, Writer, get_writer
 
 CPUS = os.cpu_count() or 1
 
@@ -76,11 +76,9 @@ def _resolve_jobs(paths: list[Path]) -> list[tuple[Path, str]]:
 def _print_result(
     result: pipeline.PipelineResult,
     entity_name: str,
-    n_tables: int,
     entity_def,
     *,
-    verb: str = "loaded",
-    target: str = "tables",
+    verb: str,
     verbose: bool = False,
 ) -> None:
     """Print the summary and optional profile for a completed entity."""
@@ -131,6 +129,69 @@ def _print_result(
             label = "commit" if key == "_commit" else key
             tbl.add_row(label, f"{t:.2f}s", f"{pct:.1f}%")
         console.print(tbl)
+
+
+def _run_jobs(
+    jobs: list[tuple[Path, str]],
+    writer: Writer,
+    *,
+    chunk_mb: int,
+    keep_xml: bool,
+    parse_workers: int,
+    profile: bool,
+    progress: bool,
+    strict: bool,
+    verb: str,
+    write_queue: int,
+) -> None:
+    """Run the pipeline for each job, printing progress and handling errors.
+
+    Builds a ``PipelineConfig`` per job (entity/gz_path vary, the rest is
+    shared across the whole run), calls ``pipeline.run``, and prints the
+    result. Closes ``writer`` once the whole run is done, whether it
+    succeeded, failed, or was interrupted.
+    """
+    verbose = not progress or profile
+    try:
+        for gz_path, entity_name in jobs:
+            console.print()
+            console.print(
+                f"[bold green]{entity_name.capitalize()}[/]  [dim]{gz_path.name}[/]"
+            )
+
+            config = pipeline.PipelineConfig(
+                chunk_mb=chunk_mb,
+                entity=entity_name,
+                gz_path=gz_path,
+                keep_xml=keep_xml,
+                parse_workers=parse_workers,
+                profile=profile,
+                progress=progress,
+                strict=strict,
+                write_queue=write_queue,
+            )
+            result = pipeline.run(config, writer)
+
+            entity_def = get_entity(entity_name)
+            _print_result(
+                result,
+                entity_name,
+                entity_def,
+                verb=verb,
+                verbose=verbose,
+            )
+    except (DecompressError, OutputExistsError) as exc:
+        console.print(f"[red]Error:[/] {exc}")
+        raise typer.Exit(1) from None
+    except KeyboardInterrupt:
+        console.print("\n  [yellow]Interrupted — cleaning up …[/]")
+        raise typer.Exit(130) from None
+    # Top-level error boundary: any failure becomes a one-line error and exit 1.
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Error:[/] {exc}")
+        raise typer.Exit(1) from None
+    finally:
+        writer.close()
 
 
 @app.command()
@@ -229,50 +290,18 @@ def convert(
     else:
         writer = JSONLWriter(str(output), compression=compression, overwrite=overwrite)
 
-    verbose = not progress or profile
-    try:
-        for gz_path, entity_name in jobs:
-            console.print()
-            console.print(
-                f"[bold green]{entity_name.capitalize()}[/]  [dim]{gz_path.name}[/]"
-            )
-
-            config = pipeline.PipelineConfig(
-                chunk_mb=chunk_mb,
-                entity=entity_name,
-                gz_path=gz_path,
-                keep_xml=keep_xml,
-                parse_workers=parse_workers,
-                profile=profile,
-                progress=progress,
-                strict=strict,
-                write_queue=write_queue,
-            )
-            result = pipeline.run(config, writer)
-
-            entity_def = get_entity(entity_name)
-            n_tables = len(entity_def.table_order)
-            _print_result(
-                result,
-                entity_name,
-                n_tables,
-                entity_def,
-                target=f"{fmt} files",
-                verb="converted",
-                verbose=verbose,
-            )
-    except (DecompressError, OutputExistsError) as exc:
-        console.print(f"[red]Error:[/] {exc}")
-        raise typer.Exit(1) from None
-    except KeyboardInterrupt:
-        console.print("\n  [yellow]Interrupted — cleaning up …[/]")
-        raise typer.Exit(130) from None
-    # Top-level error boundary: any failure becomes a one-line error and exit 1.
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]Error:[/] {exc}")
-        raise typer.Exit(1) from None
-    finally:
-        writer.close()
+    _run_jobs(
+        jobs,
+        writer,
+        chunk_mb=chunk_mb,
+        keep_xml=keep_xml,
+        parse_workers=parse_workers,
+        profile=profile,
+        progress=progress,
+        strict=strict,
+        verb="converted",
+        write_queue=write_queue,
+    )
 
 
 @app.command()
@@ -375,39 +404,15 @@ def load(
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(1) from None
-    verbose = not progress or profile
-    try:
-        for gz_path, entity_name in jobs:
-            console.print()
-            console.print(
-                f"[bold green]{entity_name.capitalize()}[/]  [dim]{gz_path.name}[/]"
-            )
-
-            config = pipeline.PipelineConfig(
-                chunk_mb=chunk_mb,
-                entity=entity_name,
-                gz_path=gz_path,
-                keep_xml=keep_xml,
-                parse_workers=parse_workers,
-                profile=profile,
-                progress=progress,
-                strict=strict,
-                write_queue=write_queue,
-            )
-            result = pipeline.run(config, writer)
-
-            entity_def = get_entity(entity_name)
-            n_tables = len(entity_def.table_order)
-            _print_result(result, entity_name, n_tables, entity_def, verbose=verbose)
-    except (DecompressError, OutputExistsError) as exc:
-        console.print(f"[red]Error:[/] {exc}")
-        raise typer.Exit(1) from None
-    except KeyboardInterrupt:
-        console.print("\n  [yellow]Interrupted — cleaning up …[/]")
-        raise typer.Exit(130) from None
-    # Top-level error boundary: any failure becomes a one-line error and exit 1.
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]Error:[/] {exc}")
-        raise typer.Exit(1) from None
-    finally:
-        writer.close()
+    _run_jobs(
+        jobs,
+        writer,
+        chunk_mb=chunk_mb,
+        keep_xml=keep_xml,
+        parse_workers=parse_workers,
+        profile=profile,
+        progress=progress,
+        strict=strict,
+        verb="loaded",
+        write_queue=write_queue,
+    )
