@@ -32,12 +32,19 @@ class ChunkArgs:
 
     Carries the entity name rather than the ``EntityDef`` so it stays cheap to pickle; the worker looks the entity up
     in the registry.
+
+    ``prolog_end`` and ``footer_start`` are offsets into the same file, not bytes: the worker reads the file's own
+    prolog and footer itself, so a large DOCTYPE isn't copied into every chunk's pickled args. Both default to
+    ``None`` for callers with no real envelope to preserve (e.g. tests parsing a bare record snippet), in which
+    case the worker synthesizes a minimal one as before.
     """
 
     entity: str
     file_path: str
     start: int
     end: int
+    prolog_end: int | None = None
+    footer_start: int | None = None
     strict: bool = False
 
 
