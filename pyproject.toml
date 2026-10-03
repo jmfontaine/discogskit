@@ -62,11 +62,13 @@ ini_options.testpaths = [ "tests" ]
 ini_options.markers = [
   "integration: integration tests (SQLite lifecycle, PostgreSQL via testcontainers)",
 ]
-ini_options.filterwarnings = [ "ignore::ResourceWarning" ]
+ini_options.filterwarnings = [
+  "error::ResourceWarning",
+  "error::pytest.PytestUnraisableExceptionWarning",
+]
 
 [tool.coverage]
 run.source = [ "discogskit" ]
-run.omit = [ "src/discogskit/cli.py" ]
 
 [tool.deadcode]
 ignore_names = [

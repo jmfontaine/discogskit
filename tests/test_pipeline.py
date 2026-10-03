@@ -11,7 +11,7 @@ import time
 import pyarrow as pa
 import pytest
 
-from discogskit.pipeline import _DuplicateIdTracker, _fmt_time
+from discogskit.pipeline import _DuplicateIdTracker, _ElapsedEstTotalColumn, _fmt_time
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Helpers
@@ -179,6 +179,34 @@ class TestFmtTime:
         assert _fmt_time(42.9) == "42s"
 
 
+class TestElapsedEstTotalColumn:
+    @staticmethod
+    def _task(*, elapsed, total, completed):
+        """Build a real ``rich.progress.Task`` through the public API, clock advanced to ``elapsed``."""
+        from rich.progress import Progress
+
+        clock = [0.0]
+        progress = Progress(get_time=lambda: clock[0], disable=True)
+        progress.add_task("", total=total, completed=completed)
+        clock[0] = elapsed
+        return progress.tasks[0]
+
+    def test_no_total_shows_elapsed_only(self):
+        column = _ElapsedEstTotalColumn()
+        task = self._task(elapsed=5.0, total=None, completed=0)
+        assert str(column.render(task)) == "5s"
+
+    def test_partial_progress_shows_estimate(self):
+        column = _ElapsedEstTotalColumn()
+        task = self._task(elapsed=10.0, total=20, completed=10)
+        assert str(column.render(task)) == "10s/~20s"
+
+    def test_total_reached_shows_elapsed_only(self):
+        column = _ElapsedEstTotalColumn()
+        task = self._task(elapsed=20.0, total=20, completed=20)
+        assert str(column.render(task)) == "20s"
+
+
 class TestPipelineRunWriters:
     """``pipeline.run`` calls ``write_chunk`` on the writer thread, unlike the
     per-writer tests, which drive every method from the test thread."""
@@ -220,8 +248,9 @@ class TestPipelineRunWriters:
         )
 
         assert result.total_records == 2
-        with sqlite3.connect(db_path) as conn:
-            rows = conn.execute("SELECT id, name FROM artists ORDER BY id").fetchall()
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute("SELECT id, name FROM artists ORDER BY id").fetchall()
+        conn.close()
         assert rows == [(1, "Test"), (2, "Other")]
 
 
@@ -308,10 +337,12 @@ class TestPipelineRunDuplicateIds:
             f.write(xml)
 
         db_path = tmp_path / "out.db"
-        with pytest.raises(ValueError, match="Duplicate artists id: 1"):
-            _run_or_fail_on_hang(
-                _multi_chunk_config(gz_path), SQLiteWriter(str(db_path))
-            )
+        writer = SQLiteWriter(str(db_path))
+        try:
+            with pytest.raises(ValueError, match="Duplicate artists id: 1"):
+                _run_or_fail_on_hang(_multi_chunk_config(gz_path), writer)
+        finally:
+            writer.close()
 
 
 class TestPipelineRunInputValidation:
@@ -335,8 +366,9 @@ class TestPipelineRunInputValidation:
                 SQLiteWriter(str(db_path), overwrite=True),
             )
 
-        with sqlite3.connect(db_path) as conn:
-            rows = conn.execute("SELECT id, name FROM artists ORDER BY id").fetchall()
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute("SELECT id, name FROM artists ORDER BY id").fetchall()
+        conn.close()
         assert rows == [(1, "Test"), (2, "Other")]
 
 
@@ -367,11 +399,10 @@ class TestPipelineRunXmlCleanup:
 
 
 # ------------------------------------------------------------------------------------------------------------------------
-# Integration tests — full pipeline.run()
+# Full pipeline.run() — PostgreSQL cases marked integration, the rest run as unit tests
 # ------------------------------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.integration
 class TestPipelineRun:
     def test_end_to_end_no_progress(self, tmp_path, artists_gz):
         """Full pipeline with progress=False (verbose per-chunk output)."""
@@ -571,6 +602,7 @@ class TestPipelineRun:
         chunk = gz_path.with_suffix("").read_bytes()[start:end]
         assert chunk.split(b"\n")[line - 1] == b"  <name>Artist %d</nam>" % bad
 
+    @pytest.mark.integration
     def test_postgresql_writer(self, artists_gz, pg_dsn):
         """``pipeline.run`` with PostgreSQLWriter, whose chunks land on the writer thread."""
         import psycopg
@@ -586,6 +618,7 @@ class TestPipelineRun:
             rows = conn.execute("SELECT id, name FROM artists ORDER BY id").fetchall()
         assert rows == [(1, "Test"), (2, "Other")]
 
+    @pytest.mark.integration
     def test_postgresql_writer_no_timing_carry_over_between_entities(
         self, tmp_path, artists_gz, pg_dsn
     ):
@@ -624,6 +657,7 @@ class TestPipelineRun:
         assert isinstance(table_timings, dict)
         assert set(table_timings) == set(get_entity("labels").table_order) | {"_commit"}
 
+    @pytest.mark.integration
     def test_postgresql_writer_duplicate_id(self, duplicate_artists_gz, pg_dsn):
         """#25: PostgreSQL catches a duplicate root id during the load, not just at finalize()."""
         from discogskit.writers.postgresql import PostgreSQLWriter
