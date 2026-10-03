@@ -26,10 +26,16 @@ class ParquetWriter:
     """Writer implementation that produces one .parquet file per table."""
 
     def __init__(
-        self, output_dir: str, *, compression: str = "zstd", overwrite: bool = False
+        self,
+        output_dir: str,
+        *,
+        compression: str = "zstd",
+        compression_level: int | None = None,
+        overwrite: bool = False,
     ) -> None:
         self._output_dir = Path(output_dir)
         self._compression = compression
+        self._compression_level = compression_level
         self._overwrite = overwrite
         self._staged: StagedFiles | None = None
         self._writers: dict[str, pq.ParquetWriter] = {}
@@ -58,7 +64,10 @@ class ParquetWriter:
             path = self._staged.path(f"{table_name}.parquet")
             schema: pa.Schema = entity.schemas[table_name]
             self._writers[table_name] = pq.ParquetWriter(
-                str(path), schema, compression=self._compression
+                str(path),
+                schema,
+                compression=self._compression,
+                compression_level=self._compression_level,
             )
         status(
             "Create",

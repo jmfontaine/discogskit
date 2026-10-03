@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import gzip
+import random
 import sqlite3
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import click
+import pyarrow as pa
 import pytest
 from typer.testing import CliRunner
 
@@ -20,6 +23,16 @@ from tests.conftest import ARTISTS_XML
 
 runner = CliRunner()
 
+# (min, max) --compression-level pyarrow's Codec accepts for each Parquet codec under test — read from
+# pyarrow itself, not hard-coded: zstd's range (-131072 to 22) is nothing like gzip's (1 to 9).
+_PARQUET_LEVEL_RANGE = {
+    codec: (
+        pa.Codec.minimum_compression_level(codec),
+        pa.Codec.maximum_compression_level(codec),
+    )
+    for codec in ("gzip", "zstd")
+}
+
 # A valid-looking .xml.gz filename so detect_entity() succeeds.
 _ENTITY_FILE = "discogs_20260301_artists.xml.gz"
 
@@ -28,6 +41,28 @@ def _make_gz(tmp_path: Path) -> Path:
     """Create a dummy .xml.gz file so path validation passes."""
     gz = tmp_path / _ENTITY_FILE
     gz.write_bytes(b"not a real gz")
+    return gz
+
+
+_COMPRESSIBLE_WORDS = [
+    "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
+]  # fmt: skip
+
+
+def _compressible_artists_gz(tmp_path: Path, n: int = 3000) -> Path:
+    """A real .xml.gz with enough varied, repetitive text for --compression-level to produce
+    measurably different output sizes once converted."""
+    rng = random.Random(42)
+    gz = tmp_path / _ENTITY_FILE
+    with gzip.open(gz, "wb") as f:
+        f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
+        for i in range(1, n + 1):
+            profile = " ".join(rng.choices(_COMPRESSIBLE_WORDS, k=30))
+            f.write(
+                f"<artist><id>{i}</id><name>Artist {i}</name>"
+                f"<profile>{profile}</profile></artist>\n".encode()
+            )
+        f.write(b"</artists>")
     return gz
 
 
@@ -403,3 +438,220 @@ class TestFkOption:
         fks = conn.execute("PRAGMA foreign_key_list(artist_aliases)").fetchall()
         conn.close()
         assert len(fks) > 0
+
+
+class TestCompressionLevel:
+    """--compression-level (#32): the level must actually reach the codec through the real CLI."""
+
+    _OUT_PATH: ClassVar[dict[tuple[str, str], str]] = {
+        ("jsonl", "gzip"): "artists/artists.jsonl.gz",
+        ("jsonl", "bzip2"): "artists/artists.jsonl.bz2",
+        ("parquet", "gzip"): "artists/artists.parquet",
+        ("parquet", "zstd"): "artists/artists.parquet",
+    }
+
+    def _convert(self, gz: Path, out: Path, *extra_args: str) -> None:
+        result = runner.invoke(
+            app,
+            [
+                "convert",
+                str(gz),
+                "--output",
+                str(out),
+                "--parse-workers",
+                "1",
+                "--no-progress",
+                *extra_args,
+            ],
+        )
+        assert result.exit_code == 0, click.unstyle(result.output)
+
+    @pytest.mark.parametrize(
+        "fmt, compression, low, high",
+        [
+            ("jsonl", "gzip", 0, 9),
+            ("jsonl", "bzip2", 1, 9),
+            ("parquet", "gzip", *_PARQUET_LEVEL_RANGE["gzip"]),
+            ("parquet", "zstd", *_PARQUET_LEVEL_RANGE["zstd"]),
+        ],
+        ids=["jsonl-gzip", "jsonl-bzip2", "parquet-gzip", "parquet-zstd"],
+    )
+    def test_level_reaches_the_codec(
+        self, tmp_path: Path, fmt: str, compression: str, low: int, high: int
+    ) -> None:
+        """Both boundary levels are accepted, and they produce different output: the level isn't
+        accepted and then silently dropped before reaching the real writer."""
+        gz = _compressible_artists_gz(tmp_path)
+        sizes = {}
+        for level in (low, high):
+            out = tmp_path / f"out-{level}"
+            self._convert(
+                gz,
+                out,
+                "-f",
+                fmt,
+                "--compression",
+                compression,
+                "--compression-level",
+                str(level),
+            )
+            sizes[level] = (out / self._OUT_PATH[(fmt, compression)]).stat().st_size
+        assert sizes[low] != sizes[high]
+
+    def test_default_jsonl_gzip_is_level_6(self, tmp_path: Path) -> None:
+        """Omitting --compression-level keeps #32's gzip-6 default, not the library's level 9."""
+        gz = _compressible_artists_gz(tmp_path)
+        out_default = tmp_path / "out-default"
+        out_level6 = tmp_path / "out-level6"
+        self._convert(gz, out_default, "-f", "jsonl", "--compression", "gzip")
+        self._convert(
+            gz,
+            out_level6,
+            "-f",
+            "jsonl",
+            "--compression",
+            "gzip",
+            "--compression-level",
+            "6",
+        )
+        default_size = (out_default / self._OUT_PATH[("jsonl", "gzip")]).stat().st_size
+        level6_size = (out_level6 / self._OUT_PATH[("jsonl", "gzip")]).stat().st_size
+        assert default_size == level6_size
+
+    @pytest.mark.parametrize(
+        "fmt, compression, library_default",
+        [
+            ("jsonl", "bzip2", 9),
+            ("parquet", "gzip", 9),
+            ("parquet", "zstd", 1),
+        ],
+        ids=["jsonl-bzip2", "parquet-gzip", "parquet-zstd"],
+    )
+    def test_default_other_codecs_match_their_own_library_default(
+        self, tmp_path: Path, fmt: str, compression: str, library_default: int
+    ) -> None:
+        """Omitting --compression-level leaves every codec but JSONL gzip at its own library default."""
+        gz = _compressible_artists_gz(tmp_path)
+        out_default = tmp_path / "out-default"
+        out_explicit = tmp_path / "out-explicit"
+        self._convert(gz, out_default, "-f", fmt, "--compression", compression)
+        self._convert(
+            gz,
+            out_explicit,
+            "-f",
+            fmt,
+            "--compression",
+            compression,
+            "--compression-level",
+            str(library_default),
+        )
+        default_size = (out_default / self._OUT_PATH[(fmt, compression)]).stat().st_size
+        explicit_size = (
+            (out_explicit / self._OUT_PATH[(fmt, compression)]).stat().st_size
+        )
+        assert default_size == explicit_size
+
+    @pytest.mark.parametrize("fmt", ["jsonl", "parquet"])
+    def test_rejects_level_for_none(self, tmp_path: Path, fmt: str) -> None:
+        gz = _make_gz(tmp_path)
+        result = runner.invoke(
+            app,
+            [
+                "convert",
+                str(gz),
+                "-f",
+                fmt,
+                "--compression",
+                "none",
+                "--compression-level",
+                "5",
+            ],
+        )
+        assert result.exit_code == 1
+        output = click.unstyle(result.output)
+        assert "none does not support --compression-level." in output
+
+    def test_rejects_level_for_snappy(self, tmp_path: Path) -> None:
+        gz = _make_gz(tmp_path)
+        result = runner.invoke(
+            app,
+            [
+                "convert",
+                str(gz),
+                "-f",
+                "parquet",
+                "--compression",
+                "snappy",
+                "--compression-level",
+                "5",
+            ],
+        )
+        assert result.exit_code == 1
+        output = click.unstyle(result.output)
+        assert "snappy does not support --compression-level." in output
+
+    @pytest.mark.parametrize(
+        "fmt, compression, level",
+        [
+            ("jsonl", "gzip", -1),
+            ("jsonl", "gzip", 10),
+            ("jsonl", "bzip2", 0),
+            ("jsonl", "bzip2", 10),
+            ("parquet", "gzip", _PARQUET_LEVEL_RANGE["gzip"][0] - 1),
+            ("parquet", "gzip", _PARQUET_LEVEL_RANGE["gzip"][1] + 1),
+            ("parquet", "zstd", _PARQUET_LEVEL_RANGE["zstd"][0] - 1),
+            ("parquet", "zstd", _PARQUET_LEVEL_RANGE["zstd"][1] + 1),
+        ],
+        ids=[
+            "jsonl-gzip-low",
+            "jsonl-gzip-high",
+            "jsonl-bzip2-low",
+            "jsonl-bzip2-high",
+            "parquet-gzip-low",
+            "parquet-gzip-high",
+            "parquet-zstd-low",
+            "parquet-zstd-high",
+        ],
+    )
+    def test_rejects_out_of_range_level(
+        self, tmp_path: Path, fmt: str, compression: str, level: int
+    ) -> None:
+        gz = _make_gz(tmp_path)
+        result = runner.invoke(
+            app,
+            [
+                "convert",
+                str(gz),
+                "-f",
+                fmt,
+                "--compression",
+                compression,
+                "--compression-level",
+                str(level),
+            ],
+        )
+        assert result.exit_code == 1
+        assert "is out of range for" in click.unstyle(result.output)
+
+    def test_format_compression_mismatch_error_still_wins(self, tmp_path: Path) -> None:
+        """An invalid format/compression pairing is rejected before --compression-level is even looked at."""
+        gz = _make_gz(tmp_path)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = runner.invoke(
+                app,
+                [
+                    "convert",
+                    str(gz),
+                    "-f",
+                    "jsonl",
+                    "--compression",
+                    "zstd",
+                    "--compression-level",
+                    "5",
+                ],
+            )
+        assert result.exit_code == 1
+        output = click.unstyle(result.output)
+        assert "unsupported compression 'zstd' for jsonl" in output
+        assert "compression-level" not in output
+        run.assert_not_called()
