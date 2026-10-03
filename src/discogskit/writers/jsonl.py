@@ -1,16 +1,18 @@
 """JSONL writer: Arrow RecordBatches serialized as one JSON object per line.
 
 Arrow list columns become JSON arrays via ``to_pylist()``, so no manual
-conversion is needed. Gzip compression uses level 6 rather than the
-library's level-9 default: output a few percent larger for much less
-compression CPU (measured in #32). bz2 stays at its own default — its
-``compresslevel`` only changes the BWT block size, not compression
+conversion is needed. Gzip compression defaults to level 6 rather than
+the library's level-9 default: output a few percent larger for much
+less compression CPU (measured in #32). bz2 stays at its own default —
+its ``compresslevel`` only changes the BWT block size, not compression
 speed, and level 6 produced no measured speedup and slightly larger
-output. Batching rows into fewer, larger write() calls was tried and
-measured: the speedup didn't reproduce beyond noise, since json.dumps()
-dominates, so write_chunk() still makes two write() calls per row (the
-JSON text, then the newline). Files are staged and only moved to their
-final names by ``finalize()``.
+output. ``compression_level`` overrides either default; see
+``cli._validate_compression_level`` for the accepted range per codec.
+Batching rows into fewer, larger write() calls was tried and measured:
+the speedup didn't reproduce beyond noise, since json.dumps() dominates,
+so write_chunk() still makes two write() calls per row (the JSON text,
+then the newline). Files are staged and only moved to their final names
+by ``finalize()``.
 """
 
 from __future__ import annotations
@@ -39,10 +41,16 @@ class JSONLWriter:
     """Writer implementation that produces one .jsonl file per table."""
 
     def __init__(
-        self, output_dir: str, *, compression: str = "none", overwrite: bool = False
+        self,
+        output_dir: str,
+        *,
+        compression: str = "none",
+        compression_level: int | None = None,
+        overwrite: bool = False,
     ) -> None:
         self._output_dir = Path(output_dir)
         self._compression = compression
+        self._compression_level = compression_level
         self._overwrite = overwrite
         self._files: dict[str, IO] = {}
         self._staged: StagedFiles | None = None
@@ -72,11 +80,24 @@ class JSONLWriter:
             path = self._staged.path(f"{table_name}{ext}")
             # File lifetime is managed by finalize()/close(), not a with-block.
             if self._compression == "gzip":
+                level = (
+                    6 if self._compression_level is None else self._compression_level
+                )
                 self._files[table_name] = gzip.open(  # noqa: SIM115
-                    path, "wt", compresslevel=6, encoding="utf-8"
+                    path, "wt", compresslevel=level, encoding="utf-8"
                 )
             elif self._compression == "bzip2":
-                self._files[table_name] = bz2.open(path, "wt", encoding="utf-8")  # noqa: SIM115
+                if self._compression_level is None:
+                    self._files[table_name] = bz2.open(  # noqa: SIM115
+                        path, "wt", encoding="utf-8"
+                    )
+                else:
+                    self._files[table_name] = bz2.open(  # noqa: SIM115
+                        path,
+                        "wt",
+                        compresslevel=self._compression_level,
+                        encoding="utf-8",
+                    )
             else:
                 self._files[table_name] = open(path, "w", encoding="utf-8")  # noqa: SIM115
         codec = f", {self._compression}" if self._compression != "none" else ""
