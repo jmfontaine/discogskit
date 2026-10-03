@@ -31,10 +31,6 @@ class TestGenerateDDL:
         )
         ddl = generate_ddl("things", schema, pk_column="id")
         assert "PRIMARY KEY" in ddl
-        # PK column should not have DEFAULT
-        lines = ddl.split("\n")
-        id_line = next(line for line in lines if "id" in line and "PRIMARY KEY" in line)
-        assert "DEFAULT" not in id_line
 
     def test_fk_column(self):
         schema = pa.schema(
@@ -62,17 +58,18 @@ class TestGenerateDDL:
         assert "NOT NULL" not in ddl
         assert "DEFAULT" not in ddl
 
-    def test_not_null_with_default(self):
+    def test_not_null_without_default(self):
+        """A DEFAULT would hide a missing value, e.g. DEFAULT 0 on a foreign key (#21)."""
         schema = pa.schema(
             [
                 pa.field("name", pa.utf8(), nullable=False),
-                pa.field("count", pa.int32(), nullable=False),
+                pa.field("parent_id", pa.int32(), nullable=False),
+                pa.field("tags", pa.list_(pa.utf8()), nullable=False),
             ]
         )
         ddl = generate_ddl("t", schema)
-        assert "NOT NULL" in ddl
-        assert "DEFAULT ''" in ddl
-        assert "DEFAULT 0" in ddl
+        assert ddl.count("NOT NULL") == 3
+        assert "DEFAULT" not in ddl
 
     def test_list_type_becomes_text(self):
         schema = pa.schema(
@@ -82,7 +79,6 @@ class TestGenerateDDL:
         )
         ddl = generate_ddl("t", schema)
         assert "TEXT" in ddl
-        assert "DEFAULT '[]'" in ddl
 
     def test_bool_becomes_integer(self):
         schema = pa.schema(

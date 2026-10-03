@@ -39,8 +39,8 @@ if TYPE_CHECKING:
 # ------------------------------------------------------------------------------------------------------------------------
 # Arrow → PostgreSQL DDL generation
 #
-# DDL is generated from the Arrow schemas (defined in entity modules) so that column types, nullability, and defaults
-# stay in sync with the parsing code. The Arrow schemas are the single source of truth.
+# DDL is generated from the Arrow schemas (defined in entity modules) so that column types and nullability stay in sync
+# with the parsing code. The Arrow schemas are the single source of truth.
 # ------------------------------------------------------------------------------------------------------------------------
 
 _ARROW_TO_PG: dict[pa.DataType, sql.SQL] = {
@@ -48,13 +48,6 @@ _ARROW_TO_PG: dict[pa.DataType, sql.SQL] = {
     pa.int32(): sql.SQL("INTEGER"),
     pa.int64(): sql.SQL("BIGINT"),
     pa.utf8(): sql.SQL("TEXT"),
-}
-
-_ARROW_DEFAULTS: dict[pa.DataType, sql.SQL] = {
-    pa.bool_(): sql.SQL("false"),
-    pa.int32(): sql.SQL("0"),
-    pa.int64(): sql.SQL("0"),
-    pa.utf8(): sql.SQL("''"),
 }
 
 
@@ -81,14 +74,6 @@ def generate_ddl(
         col: sql.Composable = sql.Identifier(field.name) + sql.SQL(" ") + pg_type
         if not field.nullable:
             col += sql.SQL(" NOT NULL")
-            # PK column (named 'id') gets NOT NULL but no default
-            if field.name != "id":
-                if isinstance(field.type, pa.ListType):
-                    col += sql.SQL(" DEFAULT '{}'")
-                else:
-                    default = _ARROW_DEFAULTS.get(field.type)
-                    if default:
-                        col += sql.SQL(" DEFAULT ") + default
         col_defs.append(col)
     return sql.SQL("{} {} (\n    {}\n)").format(
         prefix,

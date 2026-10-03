@@ -38,33 +38,33 @@ SCHEMAS = {
     "artists": pa.schema(
         [
             pa.field("id", pa.int32(), nullable=False),
-            pa.field("data_quality", pa.utf8(), nullable=False),
-            pa.field("name", pa.utf8(), nullable=False),
-            pa.field("namevariations", pa.list_(pa.utf8()), nullable=False),
-            pa.field("profile", pa.utf8(), nullable=False),
-            pa.field("realname", pa.utf8(), nullable=False),
-            pa.field("urls", pa.list_(pa.utf8()), nullable=False),
+            pa.field("data_quality", pa.utf8()),
+            pa.field("name", pa.utf8()),
+            pa.field("namevariations", pa.list_(pa.utf8())),
+            pa.field("profile", pa.utf8()),
+            pa.field("realname", pa.utf8()),
+            pa.field("urls", pa.list_(pa.utf8())),
         ]
     ),
     "artist_aliases": pa.schema(
         [
             pa.field("artist_id", pa.int32(), nullable=False),
             pa.field("alias_id", pa.int32()),
-            pa.field("name", pa.utf8(), nullable=False),
+            pa.field("name", pa.utf8()),
         ]
     ),
     "artist_groups": pa.schema(
         [
             pa.field("artist_id", pa.int32(), nullable=False),
             pa.field("group_id", pa.int32()),
-            pa.field("name", pa.utf8(), nullable=False),
+            pa.field("name", pa.utf8()),
         ]
     ),
     "artist_members": pa.schema(
         [
             pa.field("artist_id", pa.int32(), nullable=False),
             pa.field("member_id", pa.int32()),
-            pa.field("name", pa.utf8(), nullable=False),
+            pa.field("name", pa.utf8()),
         ]
     ),
 }
@@ -159,12 +159,12 @@ def _append_artist(
         return
     artist_id = int(id_text)
 
-    data_quality = ""
-    name = ""
-    name_variations = []
-    profile = ""
-    real_name = ""
-    urls = []
+    data_quality = None
+    name = None
+    name_variations = None
+    profile = None
+    real_name = None
+    urls = None
 
     for child in elem:
         tag = child.tag
@@ -181,13 +181,13 @@ def _append_artist(
         elif tag == "name":
             name = child.text or ""
         elif tag == "namevariations":
-            name_variations = [n.text for n in child.findall("name") if n.text]
+            name_variations = [n.text or "" for n in child.findall("name")]
         elif tag == "profile":
             profile = child.text or ""
         elif tag == "realname":
             real_name = child.text or ""
         elif tag == "urls":
-            urls = [u.text for u in child.findall("url") if u.text]
+            urls = [u.text or "" for u in child.findall("url")]
         elif unknown is not None:
             unknown.add(tag)
 

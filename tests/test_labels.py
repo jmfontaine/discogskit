@@ -19,13 +19,13 @@ class TestLabelsParsing:
         assert labels.num_rows == 2
         assert labels.column("id").to_pylist() == [1, 2]
         assert labels.column("name").to_pylist() == ["Test Label", "Minimal Label"]
-        assert labels.column("contactinfo").to_pylist() == ["test@example.com", ""]
-        assert labels.column("profile").to_pylist() == ["A test label", ""]
+        assert labels.column("contactinfo").to_pylist() == ["test@example.com", None]
+        assert labels.column("profile").to_pylist() == ["A test label", None]
         assert labels.column("parent_label_id").to_pylist() == [100, None]
-        assert labels.column("parent_label_name").to_pylist() == ["Parent Label", ""]
+        assert labels.column("parent_label_name").to_pylist() == ["Parent Label", None]
         assert labels.column("urls").to_pylist() == [
             ["https://label.example.com"],
-            [],
+            None,
         ]
 
     def test_sublabels(self, labels_xml_file):

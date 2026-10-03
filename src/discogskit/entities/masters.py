@@ -37,12 +37,12 @@ SCHEMAS = {
     "masters": pa.schema(
         [
             pa.field("id", pa.int32(), nullable=False),
-            pa.field("data_quality", pa.utf8(), nullable=False),
-            pa.field("genres", pa.list_(pa.utf8()), nullable=False),
+            pa.field("data_quality", pa.utf8()),
+            pa.field("genres", pa.list_(pa.utf8())),
             pa.field("main_release", pa.int32()),
-            pa.field("notes", pa.utf8(), nullable=False),
-            pa.field("styles", pa.list_(pa.utf8()), nullable=False),
-            pa.field("title", pa.utf8(), nullable=False),
+            pa.field("notes", pa.utf8()),
+            pa.field("styles", pa.list_(pa.utf8())),
+            pa.field("title", pa.utf8()),
             pa.field("year", pa.int32()),
         ]
     ),
@@ -50,19 +50,19 @@ SCHEMAS = {
         [
             pa.field("master_id", pa.int32(), nullable=False),
             pa.field("artist_id", pa.int32()),
-            pa.field("anv", pa.utf8(), nullable=False),
-            pa.field("join", pa.utf8(), nullable=False),
-            pa.field("name", pa.utf8(), nullable=False),
+            pa.field("anv", pa.utf8()),
+            pa.field("join", pa.utf8()),
+            pa.field("name", pa.utf8()),
         ]
     ),
     "master_videos": pa.schema(
         [
             pa.field("master_id", pa.int32(), nullable=False),
-            pa.field("description", pa.utf8(), nullable=False),
+            pa.field("description", pa.utf8()),
             pa.field("duration", pa.int32()),
             pa.field("embed", pa.bool_()),
-            pa.field("src", pa.utf8(), nullable=False),
-            pa.field("title", pa.utf8(), nullable=False),
+            pa.field("src", pa.utf8()),
+            pa.field("title", pa.utf8()),
         ]
     ),
 }
@@ -137,13 +137,13 @@ def _append_master(
         return
     master_id = int(id_text)
 
-    data_quality = ""
+    data_quality = None
     main_release = None
-    notes = ""
-    title = ""
+    notes = None
+    title = None
     year = None
-    genres = []
-    styles = []
+    genres = None
+    styles = None
 
     for child in elem:
         tag = child.tag
@@ -152,9 +152,9 @@ def _append_master(
                 if artist_elem.tag != "artist":
                     continue
                 artist_id = None
-                anv = ""
-                join_text = ""
-                aname = ""
+                anv = None
+                join_text = None
+                aname = None
                 for ac in artist_elem:
                     at = ac.tag
                     if at == "id":
@@ -176,27 +176,27 @@ def _append_master(
         elif tag == "data_quality":
             data_quality = child.text or ""
         elif tag == "genres":
-            genres = [g.text for g in child.findall("genre") if g.text]
+            genres = [g.text or "" for g in child.findall("genre")]
         elif tag == "main_release":
             if child.text:
                 main_release = int(child.text)
         elif tag == "notes":
             notes = child.text or ""
         elif tag == "styles":
-            styles = [s.text for s in child.findall("style") if s.text]
+            styles = [s.text or "" for s in child.findall("style")]
         elif tag == "title":
             title = child.text or ""
         elif tag == "videos":
             for video in child:
                 if video.tag != "video":
                     continue
-                src = video.get("src") or ""
+                src = video.get("src")
                 dur_str = video.get("duration")
                 duration = int(dur_str) if dur_str else None
                 embed_str = video.get("embed")
                 embed = embed_str == "true" if embed_str else None
-                vdesc = ""
-                vtitle = ""
+                vdesc = None
+                vtitle = None
                 for vc in video:
                     if vc.tag == "description":
                         vdesc = vc.text or ""

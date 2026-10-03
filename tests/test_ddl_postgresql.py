@@ -41,28 +41,19 @@ class TestGenerateDDL:
         )
         ddl = generate_ddl("t", schema).as_string(None)
         assert "TEXT[]" in ddl
-        assert "DEFAULT '{}'" in ddl
 
-    def test_not_null_with_default(self):
-        schema = pa.schema(
-            [
-                pa.field("name", pa.utf8(), nullable=False),
-                pa.field("count", pa.int32(), nullable=False),
-            ]
-        )
-        ddl = generate_ddl("t", schema).as_string(None)
-        assert "NOT NULL" in ddl
-        assert "DEFAULT ''" in ddl
-        assert "DEFAULT 0" in ddl
-
-    def test_id_column_no_default(self):
+    def test_not_null_without_default(self):
+        """A DEFAULT would hide a missing value, e.g. DEFAULT 0 on a foreign key (#21)."""
         schema = pa.schema(
             [
                 pa.field("id", pa.int32(), nullable=False),
+                pa.field("name", pa.utf8(), nullable=False),
+                pa.field("parent_id", pa.int32(), nullable=False),
+                pa.field("tags", pa.list_(pa.utf8()), nullable=False),
             ]
         )
         ddl = generate_ddl("t", schema).as_string(None)
-        assert "NOT NULL" in ddl
+        assert ddl.count("NOT NULL") == 4
         assert "DEFAULT" not in ddl
 
     def test_nullable_no_constraint(self):

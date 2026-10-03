@@ -59,6 +59,11 @@ Runs on the same dump can overlap, e.g. a `convert` and a `load`: one decompress
 read the same `.xml`. A run that finishes while another still reads it leaves it in place for that run. They coordinate
 through a `<name>.xml.lock` file, which stays next to the dump; delete it only while no run is using that dump.
 
+In every output format, a value missing from the XML is `NULL` (`null` in JSONL), while a text value that is present but
+empty is an empty string: `<country/>` gives `""`, no `<country>` element gives `NULL`. List columns follow the same
+rule: no `<genres>` element gives `NULL`, and an empty `<genre/>` stays in the list as `""`. Only IDs and the keys
+linking child tables to their parent are never `NULL`.
+
 ### discogskit convert
 
 Convert Discogs XML dumps into flat files.
