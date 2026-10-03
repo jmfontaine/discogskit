@@ -45,6 +45,57 @@ _COMPRESSIONS_BY_FORMAT: dict[OutputFormat, frozenset[Compression]] = {
     ),
 }
 
+# (min, max) --compression-level Python's own gzip/bz2 modules accept for JSONL output.
+_JSONL_LEVEL_RANGES: dict[Compression, tuple[int, int]] = {
+    Compression.BZIP2: (1, 9),
+    Compression.GZIP: (0, 9),
+}
+
+
+def _parquet_level_range(compression: Compression) -> tuple[int, int] | None:
+    """(min, max) --compression-level pyarrow's Codec accepts for this codec, or None if it has none.
+
+    Asks pyarrow directly rather than hard-coding ranges, since they're codec- (and pyarrow-version-)
+    specific: gzip and bz2 differ from Python's stdlib modules, and zstd's range is nothing like 0-9.
+    """
+    if compression is Compression.NONE:
+        return None
+    import pyarrow as pa
+
+    codec = compression.value
+    if not pa.Codec.supports_compression_level(codec):
+        return None
+    return (
+        pa.Codec.minimum_compression_level(codec),
+        pa.Codec.maximum_compression_level(codec),
+    )
+
+
+def _validate_compression_level(
+    output_format: OutputFormat, compression: Compression, level: int | None
+) -> None:
+    """Reject a --compression-level the codec can't use, before any conversion work starts."""
+    if level is None:
+        return
+    level_range = (
+        _JSONL_LEVEL_RANGES.get(compression)
+        if output_format is OutputFormat.JSONL
+        else _parquet_level_range(compression)
+    )
+    if level_range is None:
+        console.print(
+            f"[red]Error:[/] {compression.value} does not support --compression-level."
+        )
+        raise typer.Exit(1)
+    lo, hi = level_range
+    if not lo <= level <= hi:
+        console.print(
+            f"[red]Error:[/] --compression-level {level} is out of range for "
+            f"{compression.value} ({lo}-{hi})."
+        )
+        raise typer.Exit(1)
+
+
 CPUS = os.cpu_count() or 1
 
 app: typer.Typer = typer.Typer(no_args_is_help=True)
@@ -245,6 +296,16 @@ def convert(
             help="Compression codec. Parquet: gzip, snappy, zstd (default), none. JSONL: bzip2, gzip, none (default)."
         ),
     ] = None,
+    compression_level: Annotated[
+        int | None,
+        typer.Option(
+            help=(
+                "Compression level for codecs that support one: JSONL gzip/bzip2, Parquet gzip/zstd. "
+                "Rejected for snappy and none. Default: JSONL gzip uses level 6 (faster, slightly "
+                "larger output than 9; measured in #32); every other codec uses its own library default."
+            )
+        ),
+    ] = None,
     # Performance tuning
     parse_workers: Annotated[
         int,
@@ -307,13 +368,21 @@ def convert(
         )
         raise typer.Exit(1)
 
+    _validate_compression_level(output_format, compression, compression_level)
+
     if output_format is OutputFormat.PARQUET:
         writer = ParquetWriter(
-            str(output), compression=compression.value, overwrite=overwrite
+            str(output),
+            compression=compression.value,
+            compression_level=compression_level,
+            overwrite=overwrite,
         )
     else:
         writer = JSONLWriter(
-            str(output), compression=compression.value, overwrite=overwrite
+            str(output),
+            compression=compression.value,
+            compression_level=compression_level,
+            overwrite=overwrite,
         )
 
     _run_jobs(

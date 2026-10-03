@@ -80,6 +80,11 @@ end up mixed. A process killed mid-run can leave an `<entity>.partial-*` directo
 | Compression (Parquet) | `zstd` (default), `snappy`, `gzip`, `none` |
 | Compression (JSONL) | `gzip`, `bzip2`, `none` (default) |
 
+`--compression-level` overrides a codec's own default. Valid ranges come from each library: JSONL gzip 0-9
+(defaults to **6**: on the 2026-10-01 dump, gzip output was 4.15% larger at level 6 than 9 across all four
+entities, for roughly 56-68% less compression CPU — see [#32](https://github.com/jmfontaine/discogskit/issues/32)),
+JSONL bz2 1-9, Parquet gzip 1-9, Parquet zstd -131072 to 22. `snappy` and `none` don't take a level and reject one.
+
 <details>
 <summary>Full command help</summary>
 
@@ -93,44 +98,56 @@ end up mixed. A process killed mid-run can leave an `<entity>.partial-*` directo
 │ *    paths      <path>  One or more .xml.gz files or directories containing them [required]  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────╮
-│ --format         -f                    <jsonl|parquet>            Output format              │
-│                                                                   [default: parquet]         │
-│ --output                               <path>                     Output directory           │
-│                                                                   [default: .]               │
-│ --compression                          <bzip2|gzip|none|snappy|z  Compression codec.         │
-│                                        std>                       Parquet: gzip, snappy,     │
-│                                                                   zstd (default), none.      │
-│                                                                   JSONL: bzip2, gzip, none   │
-│                                                                   (default).                 │
-│ --parse-workers                        <int range> [x>=1]         Number of parallel parse   │
-│                                                                   workers                    │
-│                                                                   [default: 4]               │
-│ --chunk-mb                             <int range> [x>=1]         Split XML into chunks of   │
-│                                                                   roughly this size (MB)     │
-│                                                                   [default: 256]             │
-│ --write-queue                          <int range> [x>=1]         Max chunks buffered in     │
-│                                                                   memory before writes must  │
-│                                                                   catch up                   │
-│                                                                   [default: 2]               │
-│ --keep-xml           --no-keep-xml                                Keep decompressed XML file │
-│                                                                   after converting           │
-│                                                                   [default: no-keep-xml]     │
-│ --overwrite          --no-overwrite                               Overwrite existing output  │
-│                                                                   files                      │
-│                                                                   [default: no-overwrite]    │
-│ --profile            --no-profile                                 Print detailed per-table   │
-│                                                                   timing breakdown after     │
-│                                                                   convert                    │
-│                                                                   [default: no-profile]      │
-│ --progress           --no-progress                                Show a progress bar        │
-│                                                                   instead of per-chunk       │
-│                                                                   output                     │
-│                                                                   [default: progress]        │
-│ --strict             --no-strict                                  Warn about unhandled XML   │
-│                                                                   elements during parsing    │
-│                                                                   [default: no-strict]       │
-│ --help                                                            Show this message and      │
-│                                                                   exit.                      │
+│ --format             -f                    <jsonl|parquet>          Output format            │
+│                                                                     [default: parquet]       │
+│ --output                                   <path>                   Output directory         │
+│                                                                     [default: .]             │
+│ --compression                              <bzip2|gzip|none|snappy  Compression codec.       │
+│                                            |zstd>                   Parquet: gzip, snappy,   │
+│                                                                     zstd (default), none.    │
+│                                                                     JSONL: bzip2, gzip, none │
+│                                                                     (default).               │
+│ --compression-level                        <int>                    Compression level for    │
+│                                                                     codecs that support one: │
+│                                                                     JSONL gzip/bzip2,        │
+│                                                                     Parquet gzip/zstd.       │
+│                                                                     Rejected for snappy and  │
+│                                                                     none. Default: JSONL     │
+│                                                                     gzip uses level 6        │
+│                                                                     (faster, slightly larger │
+│                                                                     output than 9; measured  │
+│                                                                     in #32); every other     │
+│                                                                     codec uses its own       │
+│                                                                     library default.         │
+│ --parse-workers                            <int range> [x>=1]       Number of parallel parse │
+│                                                                     workers                  │
+│                                                                     [default: 4]             │
+│ --chunk-mb                                 <int range> [x>=1]       Split XML into chunks of │
+│                                                                     roughly this size (MB)   │
+│                                                                     [default: 256]           │
+│ --write-queue                              <int range> [x>=1]       Max chunks buffered in   │
+│                                                                     memory before writes     │
+│                                                                     must catch up            │
+│                                                                     [default: 2]             │
+│ --keep-xml               --no-keep-xml                              Keep decompressed XML    │
+│                                                                     file after converting    │
+│                                                                     [default: no-keep-xml]   │
+│ --overwrite              --no-overwrite                             Overwrite existing       │
+│                                                                     output files             │
+│                                                                     [default: no-overwrite]  │
+│ --profile                --no-profile                               Print detailed per-table │
+│                                                                     timing breakdown after   │
+│                                                                     convert                  │
+│                                                                     [default: no-profile]    │
+│ --progress               --no-progress                              Show a progress bar      │
+│                                                                     instead of per-chunk     │
+│                                                                     output                   │
+│                                                                     [default: progress]      │
+│ --strict                 --no-strict                                Warn about unhandled XML │
+│                                                                     elements during parsing  │
+│                                                                     [default: no-strict]     │
+│ --help                                                              Show this message and    │
+│                                                                     exit.                    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
 ```
@@ -145,6 +162,9 @@ discogskit convert --format parquet discogs_20260301_releases.xml.gz
 
 # Convert to JSONL with gzip compression
 discogskit convert --format jsonl --compression gzip discogs_20260301_artists.xml.gz
+
+# Convert to JSONL with gzip at a specific level instead of the default (6)
+discogskit convert --format jsonl --compression gzip --compression-level 9 discogs_20260301_artists.xml.gz
 
 # Convert all dump files in the current directory
 discogskit convert --format parquet .
