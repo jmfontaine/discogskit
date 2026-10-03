@@ -560,6 +560,8 @@ class TestSplitFinderLeadingContent:
             (b"<?xml version='1.0'?>\n", 22, "missing <items> start tag"),
             (b"<things>\n", 0, "unexpected content"),
             (b"\n<?xml version='1.0'?>\n<items>\n", 1, "an XML declaration other than"),
+            (b"<items/>\n", 0, "unexpected content"),
+            (b"<itemsx>\n", 0, "unexpected content"),
         ],
         ids=[
             "bom",
@@ -578,6 +580,8 @@ class TestSplitFinderLeadingContent:
             "decl-only-no-container",
             "wrong-container",
             "whitespace-before-decl",
+            "self-closing-container",
+            "longer-container-name",
         ],
     )
     def test_unsupported_prolog_is_rejected_with_offset(
