@@ -93,36 +93,44 @@ end up mixed. A process killed mid-run can leave an `<entity>.partial-*` directo
 │ *    paths      <path>  One or more .xml.gz files or directories containing them [required]  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────╮
-│ --format         -f                    <str>               Output format: parquet or jsonl   │
-│                                                            [default: parquet]                │
-│ --output                               <path>              Output directory [default: .]     │
-│ --compression                          <str>               Compression codec. Parquet: gzip, │
-│                                                            snappy, zstd (default), none.     │
-│                                                            JSONL: bzip2, gzip, none          │
-│                                                            (default).                        │
-│ --parse-workers                        <int range> [x>=1]  Number of parallel parse workers  │
-│                                                            [default: 4]                      │
-│ --chunk-mb                             <int range> [x>=1]  Split XML into chunks of roughly  │
-│                                                            this size (MB)                    │
-│                                                            [default: 256]                    │
-│ --write-queue                          <int range> [x>=1]  Max chunks buffered in memory     │
-│                                                            before writes must catch up       │
-│                                                            [default: 2]                      │
-│ --keep-xml           --no-keep-xml                         Keep decompressed XML file after  │
-│                                                            converting                        │
-│                                                            [default: no-keep-xml]            │
-│ --overwrite          --no-overwrite                        Overwrite existing output files   │
-│                                                            [default: no-overwrite]           │
-│ --profile            --no-profile                          Print detailed per-table timing   │
-│                                                            breakdown after convert           │
-│                                                            [default: no-profile]             │
-│ --progress           --no-progress                         Show a progress bar instead of    │
-│                                                            per-chunk output                  │
-│                                                            [default: progress]               │
-│ --strict             --no-strict                           Warn about unhandled XML elements │
-│                                                            during parsing                    │
-│                                                            [default: no-strict]              │
-│ --help                                                     Show this message and exit.       │
+│ --format         -f                    <jsonl|parquet>            Output format              │
+│                                                                   [default: parquet]         │
+│ --output                               <path>                     Output directory           │
+│                                                                   [default: .]               │
+│ --compression                          <bzip2|gzip|none|snappy|z  Compression codec.         │
+│                                        std>                       Parquet: gzip, snappy,     │
+│                                                                   zstd (default), none.      │
+│                                                                   JSONL: bzip2, gzip, none   │
+│                                                                   (default).                 │
+│ --parse-workers                        <int range> [x>=1]         Number of parallel parse   │
+│                                                                   workers                    │
+│                                                                   [default: 4]               │
+│ --chunk-mb                             <int range> [x>=1]         Split XML into chunks of   │
+│                                                                   roughly this size (MB)     │
+│                                                                   [default: 256]             │
+│ --write-queue                          <int range> [x>=1]         Max chunks buffered in     │
+│                                                                   memory before writes must  │
+│                                                                   catch up                   │
+│                                                                   [default: 2]               │
+│ --keep-xml           --no-keep-xml                                Keep decompressed XML file │
+│                                                                   after converting           │
+│                                                                   [default: no-keep-xml]     │
+│ --overwrite          --no-overwrite                               Overwrite existing output  │
+│                                                                   files                      │
+│                                                                   [default: no-overwrite]    │
+│ --profile            --no-profile                                 Print detailed per-table   │
+│                                                                   timing breakdown after     │
+│                                                                   convert                    │
+│                                                                   [default: no-profile]      │
+│ --progress           --no-progress                                Show a progress bar        │
+│                                                                   instead of per-chunk       │
+│                                                                   output                     │
+│                                                                   [default: progress]        │
+│ --strict             --no-strict                                  Warn about unhandled XML   │
+│                                                                   elements during parsing    │
+│                                                                   [default: no-strict]       │
+│ --help                                                            Show this message and      │
+│                                                                   exit.                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
 ```
