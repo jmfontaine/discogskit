@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from enum import Enum
 from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated, cast
@@ -16,6 +17,33 @@ from discogskit.decompress import DecompressError
 from discogskit.entities import detect_entity
 from discogskit.entities import get as get_entity
 from discogskit.writers import OutputExistsError, Writer, get_writer
+
+
+class OutputFormat(str, Enum):
+    """Output file format for `convert`."""
+
+    JSONL = "jsonl"
+    PARQUET = "parquet"
+
+
+class Compression(str, Enum):
+    """Compression codec for `convert` output. Valid codecs depend on `--format`."""
+
+    BZIP2 = "bzip2"
+    GZIP = "gzip"
+    NONE = "none"
+    SNAPPY = "snappy"
+    ZSTD = "zstd"
+
+
+_COMPRESSIONS_BY_FORMAT: dict[OutputFormat, frozenset[Compression]] = {
+    OutputFormat.JSONL: frozenset(
+        {Compression.BZIP2, Compression.GZIP, Compression.NONE}
+    ),
+    OutputFormat.PARQUET: frozenset(
+        {Compression.GZIP, Compression.NONE, Compression.SNAPPY, Compression.ZSTD}
+    ),
+}
 
 CPUS = os.cpu_count() or 1
 
@@ -65,8 +93,10 @@ def _resolve_jobs(paths: list[Path]) -> list[tuple[Path, str]]:
                         " pass the original .xml.gz dump"
                     )
                     raise typer.Exit(1) from None
-                if p.name.endswith(".xml.gz"):
-                    jobs.append((p, detect_entity(p.name)))
+                if not p.name.endswith(".xml.gz"):
+                    console.print(f"[red]Error:[/] {p}: not a .xml.gz dump")
+                    raise typer.Exit(1) from None
+                jobs.append((p, detect_entity(p.name)))
         except ValueError as exc:
             console.print(f"[red]Error:[/] {exc}")
             raise typer.Exit(1) from None
@@ -201,20 +231,20 @@ def convert(
         typer.Argument(help="One or more .xml.gz files or directories containing them"),
     ],
     # Output
-    format: Annotated[
-        str,
-        typer.Option("-f", "--format", help="Output format: parquet or jsonl"),
-    ] = "parquet",
+    output_format: Annotated[
+        OutputFormat,
+        typer.Option("-f", "--format", case_sensitive=False, help="Output format"),
+    ] = OutputFormat.PARQUET,
     output: Annotated[
         Path,
         typer.Option(help="Output directory"),
     ] = Path("."),
     compression: Annotated[
-        str,
+        Compression | None,
         typer.Option(
             help="Compression codec. Parquet: gzip, snappy, zstd (default), none. JSONL: bzip2, gzip, none (default)."
         ),
-    ] = "",
+    ] = None,
     # Performance tuning
     parse_workers: Annotated[
         int,
@@ -257,38 +287,34 @@ def convert(
     from discogskit.writers.parquet import ParquetWriter
 
     jobs = _resolve_jobs(paths)
-    if not jobs:
-        console.print("[red]Error:[/] No files to convert.")
-        raise typer.Exit(1)
 
-    fmt = format.lower()
-    _VALID_CODECS = {
-        "parquet": {"zstd", "snappy", "gzip", "none"},
-        "jsonl": {"gzip", "bzip2", "none"},
-    }
-    if fmt not in _VALID_CODECS:
+    if compression is None:
+        compression = (
+            Compression.ZSTD
+            if output_format is OutputFormat.PARQUET
+            else Compression.NONE
+        )
+
+    valid_compressions = _COMPRESSIONS_BY_FORMAT[output_format]
+    if compression not in valid_compressions:
+        valid = ", ".join(
+            sorted(c.value for c in valid_compressions if c is not Compression.NONE)
+            + [Compression.NONE.value]
+        )
         console.print(
-            f"[red]Error:[/] unsupported format '{format}'. Use 'parquet' or 'jsonl'."
+            f"[red]Error:[/] unsupported compression '{compression.value}' for "
+            f"{output_format.value}. Valid: {valid}."
         )
         raise typer.Exit(1)
 
-    # Apply per-format defaults when not specified
-    if not compression:
-        compression = "zstd" if fmt == "parquet" else "none"
-
-    if compression not in _VALID_CODECS[fmt]:
-        valid = ", ".join(sorted(_VALID_CODECS[fmt] - {"none"}) + ["none"])
-        console.print(
-            f"[red]Error:[/] unsupported compression '{compression}' for {fmt}. Valid: {valid}."
-        )
-        raise typer.Exit(1)
-
-    if fmt == "parquet":
+    if output_format is OutputFormat.PARQUET:
         writer = ParquetWriter(
-            str(output), compression=compression, overwrite=overwrite
+            str(output), compression=compression.value, overwrite=overwrite
         )
     else:
-        writer = JSONLWriter(str(output), compression=compression, overwrite=overwrite)
+        writer = JSONLWriter(
+            str(output), compression=compression.value, overwrite=overwrite
+        )
 
     _run_jobs(
         jobs,
@@ -386,9 +412,6 @@ def load(
 ) -> None:
     """Load Discogs XML dumps into a database."""
     jobs = _resolve_jobs(paths)
-    if not jobs:
-        console.print("[red]Error:[/] No files to load.")
-        raise typer.Exit(1)
 
     try:
         writer = get_writer(

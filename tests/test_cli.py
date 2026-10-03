@@ -10,6 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from discogskit import pipeline
+from discogskit._console import console
 from discogskit.cli import app
 from discogskit.decompress import DecompressError
 from discogskit.writers import OutputExistsError
@@ -25,6 +26,14 @@ def _make_gz(tmp_path: Path) -> Path:
     gz = tmp_path / _ENTITY_FILE
     gz.write_bytes(b"not a real gz")
     return gz
+
+
+def _widen_console(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop Rich wrapping a long path mid-name, so assertions can match it whole.
+
+    The shared console is created at import time, so CliRunner's ``terminal_width`` and ``COLUMNS`` don't reach it.
+    """
+    monkeypatch.setattr(console, "_width", 1000)
 
 
 _WRITER_CLOSE_FAILURES = [
@@ -177,21 +186,138 @@ class TestWriterAlwaysClosed:
 
 class TestUncompressedXmlInput:
     @pytest.mark.parametrize("command", ["convert", "load"])
-    def test_rejected_before_any_work(self, tmp_path: Path, command: str) -> None:
+    def test_rejected_before_any_work(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: str
+    ) -> None:
         """`.xml` used to be accepted, then failed decompression (issue #15)."""
         gz = _make_gz(tmp_path)
         xml = tmp_path / "discogs_20260301_labels.xml"
         xml.write_bytes(b"<labels></labels>")
+        _widen_console(monkeypatch)
         with (
             patch("discogskit.cli.pipeline.run") as run,
             patch("discogskit.cli.get_writer"),
         ):
             result = runner.invoke(app, [command, str(gz), str(xml)])
         assert result.exit_code == 1
-        output = " ".join(click.unstyle(result.output).split())
-        assert "uncompressed .xml input is not supported" in output
+        assert "uncompressed .xml input is not supported" in click.unstyle(
+            result.output
+        )
         run.assert_not_called()
         assert xml.read_bytes() == b"<labels></labels>"
+
+
+class TestUnrecognizedFileExtension:
+    def test_directory_still_only_globs_xml_gz(self, tmp_path: Path) -> None:
+        """Directory arguments keep globbing *.xml.gz; other files there are ignored."""
+        gz = _make_gz(tmp_path)
+        (tmp_path / "discogs_20260301_labels.xml.bz2").write_bytes(b"not xml")
+        with patch("discogskit.cli.pipeline.run") as run:
+            runner.invoke(app, ["convert", str(tmp_path), "-f", "parquet"])
+        run.assert_called_once()
+        [(config, _writer)] = [call.args for call in run.call_args_list]
+        assert config.gz_path == gz
+
+    @pytest.mark.parametrize("command", ["convert", "load"])
+    def test_rejected_before_any_work(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: str
+    ) -> None:
+        """A typo'd or unsupported extension (e.g. .bz2) used to be silently skipped."""
+        gz = _make_gz(tmp_path)
+        # Spaces in the name: the message must reproduce the path exactly, not just unwrapped.
+        other = tmp_path / "discogs  20260301 labels.xml.bz2"
+        other.write_bytes(b"not xml")
+        _widen_console(monkeypatch)
+        with (
+            patch("discogskit.cli.pipeline.run") as run,
+            patch("discogskit.cli.get_writer"),
+        ):
+            result = runner.invoke(app, [command, str(gz), str(other)])
+        assert result.exit_code == 1
+        assert f"{other}: not a .xml.gz dump" in click.unstyle(result.output)
+        run.assert_not_called()
+
+
+class TestFormatAndCompressionEnums:
+    def test_compression_default_for_jsonl_is_none(self, tmp_path: Path) -> None:
+        gz = _make_gz(tmp_path)
+        with (
+            patch("discogskit.cli.pipeline.run"),
+            patch("discogskit.writers.jsonl.JSONLWriter") as writer_cls,
+        ):
+            runner.invoke(app, ["convert", str(gz), "-f", "jsonl"])
+        assert writer_cls.call_args.kwargs["compression"] == "none"
+
+    def test_compression_default_for_parquet_is_zstd(self, tmp_path: Path) -> None:
+        gz = _make_gz(tmp_path)
+        with (
+            patch("discogskit.cli.pipeline.run"),
+            patch("discogskit.writers.parquet.ParquetWriter") as writer_cls,
+        ):
+            runner.invoke(app, ["convert", str(gz), "-f", "parquet"])
+        assert writer_cls.call_args.kwargs["compression"] == "zstd"
+
+    @pytest.mark.parametrize(
+        "fmt, compression",
+        [("jsonl", "snappy"), ("jsonl", "zstd"), ("parquet", "bzip2")],
+        ids=["jsonl-snappy", "jsonl-zstd", "parquet-bzip2"],
+    )
+    def test_compression_not_valid_for_format_is_rejected(
+        self, tmp_path: Path, fmt: str, compression: str
+    ) -> None:
+        gz = _make_gz(tmp_path)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = runner.invoke(
+                app, ["convert", str(gz), "-f", fmt, "--compression", compression]
+            )
+        assert result.exit_code == 1
+        output = click.unstyle(result.output)
+        assert f"unsupported compression '{compression}' for {fmt}" in output
+        run.assert_not_called()
+
+    def test_compression_value_is_passed_through_to_writer(
+        self, tmp_path: Path
+    ) -> None:
+        gz = _make_gz(tmp_path)
+        with (
+            patch("discogskit.cli.pipeline.run"),
+            patch("discogskit.writers.parquet.ParquetWriter") as writer_cls,
+        ):
+            runner.invoke(
+                app, ["convert", str(gz), "-f", "parquet", "--compression", "gzip"]
+            )
+        assert writer_cls.call_args.kwargs["compression"] == "gzip"
+
+    def test_format_is_case_insensitive(self, tmp_path: Path) -> None:
+        gz = _make_gz(tmp_path)
+        with (
+            patch("discogskit.cli.pipeline.run"),
+            patch("discogskit.writers.parquet.ParquetWriter") as parquet_cls,
+            patch("discogskit.writers.jsonl.JSONLWriter") as jsonl_cls,
+        ):
+            runner.invoke(app, ["convert", str(gz), "-f", "PARQUET"])
+        parquet_cls.assert_called_once()
+        jsonl_cls.assert_not_called()
+        assert parquet_cls.call_args.kwargs["compression"] == "zstd"
+
+    def test_invalid_compression_value_is_a_usage_error(self, tmp_path: Path) -> None:
+        gz = _make_gz(tmp_path)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = runner.invoke(app, ["convert", str(gz), "--compression", "bogus"])
+        assert result.exit_code == 2
+        assert "'bogus'" in click.unstyle(result.output)
+        run.assert_not_called()
+
+    def test_invalid_format_is_a_usage_error(self, tmp_path: Path) -> None:
+        gz = _make_gz(tmp_path)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = runner.invoke(app, ["convert", str(gz), "-f", "bogus"])
+        assert result.exit_code == 2
+        output = click.unstyle(result.output)
+        assert "'bogus'" in output
+        assert "'parquet'" in output
+        assert "'jsonl'" in output
+        run.assert_not_called()
 
 
 _COUNT_OPTIONS = {
