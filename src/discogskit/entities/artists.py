@@ -58,21 +58,24 @@ TABLE_WEIGHTS = {
     "artist_members": 0.15,
 }
 
+# table -> the column that stores the ref's own id (as opposed to the parent artist's id).
+_REF_ID_FIELD = {
+    "artist_aliases": "alias_id",
+    "artist_groups": "group_id",
+    "artist_members": "member_id",
+}
+
 
 def _parse_refs(cols: Cols, table: str, artist_id: int, parent: etree._Element) -> None:
     """Parse artist ref children (aliases, groups, members)."""
+    row = cols[table]
+    ref_field = _REF_ID_FIELD[table]
     for name_elem in parent.findall("name"):
         ref_id_str = name_elem.get("id")
         ref_id = int(ref_id_str) if ref_id_str else None
         name = name_elem.text or ""
-        id_field = {
-            "artist_aliases": "alias_id",
-            "artist_groups": "group_id",
-            "artist_members": "member_id",
-        }[table]
-        row = cols[table]
         row["artist_id"].append(artist_id)
-        row[id_field].append(ref_id)
+        row[ref_field].append(ref_id)
         row["name"].append(name)
 
 
