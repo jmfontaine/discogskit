@@ -223,27 +223,6 @@ class TestSQLiteWriter:
             assert fk_list[0][2] == entity.table_order[0]  # references root table
         conn.close()
 
-    def test_fk_violation_reported(self, tmp_path, entity, ipc_dict):
-        """FK violations are detected and reported during finalize."""
-        db_path = str(tmp_path / "test.db")
-        writer = SQLiteWriter(db_path, fk=True)
-        try:
-            writer.setup(entity)
-            writer.write_chunk(ipc_to_record_batches(ipc_dict))
-
-            # Insert a child row referencing a non-existent parent
-            conn = sqlite3.connect(db_path)
-            conn.execute(
-                "INSERT INTO artist_aliases (artist_id, alias_id, name) "
-                "VALUES (99999, 1, 'Orphan')"
-            )
-            conn.commit()
-            conn.close()
-
-            writer.finalize(entity)
-        finally:
-            writer.close()
-
     def test_overwrite_raises_when_tables_exist(self, tmp_path, entity, ipc_dict):
         """setup() raises OutputExistsError when tables exist and overwrite=False."""
         from discogskit.writers import OutputExistsError

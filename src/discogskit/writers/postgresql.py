@@ -272,7 +272,6 @@ class PostgreSQLWriter:
         self._executor: ThreadPoolExecutor | None = None
         self._groups: list[list[str]] = []
         self._schemas: dict[str, pa.Schema] = {}
-        self._setup_called = False
 
     def setup(self, entity: EntityDef) -> None:
         """Drop/create tables in the current schema, set up ADBC."""
@@ -349,7 +348,6 @@ class PostgreSQLWriter:
                 adbc_pg.connect(self._dsn) for _ in range(self._write_workers)
             ]
             self._executor = ThreadPoolExecutor(max_workers=self._write_workers)
-        self._setup_called = True
 
     def write_chunk(self, tables: dict[str, pa.RecordBatch]) -> dict[str, float]:
         if self._write_workers <= 1:
@@ -389,43 +387,13 @@ class PostgreSQLWriter:
 
         table_order = entity.table_order
 
-        pk_col = entity.pk_column
         fk_col = entity.fk_column
         root = table_order[0]
-
-        if not self._setup_called:
-            # indexes-only path: tables already exist, drop old indexes first
-            t_drop = time.perf_counter()
-            if fk_col:
-                for t in table_order[1:]:
-                    self._conn.execute(
-                        sql.SQL("ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}").format(
-                            sql.Identifier(t),
-                            sql.Identifier(f"{t}_{fk_col}_fkey"),
-                        )
-                    )
-            self._conn.execute(
-                sql.SQL("ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}").format(
-                    sql.Identifier(root), sql.Identifier(f"{root}_pkey")
-                )
-            )
-            if fk_col:
-                for t in table_order[1:]:
-                    self._conn.execute(
-                        sql.SQL("DROP INDEX IF EXISTS {}").format(
-                            sql.Identifier(f"{t}_{fk_col}_idx")
-                        )
-                    )
-            status(
-                "Drop",
-                "indexes + constraints",
-                f"[{time.perf_counter() - t_drop:.2f}s]",
-            )
 
         t0 = time.perf_counter()
         self._conn.execute(
             sql.SQL("ALTER TABLE {} ADD PRIMARY KEY ({})").format(
-                sql.Identifier(root), sql.Identifier(pk_col)
+                sql.Identifier(root), sql.Identifier("id")
             )
         )
         status("Index", f"primary key on {root}", f"[{time.perf_counter() - t0:.2f}s]")
@@ -477,7 +445,7 @@ class PostgreSQLWriter:
                         sql.Identifier(t),
                         sql.Identifier(fk_col),
                         sql.Identifier(root),
-                        sql.Identifier(pk_col),
+                        sql.Identifier("id"),
                     )
                 )
             status(

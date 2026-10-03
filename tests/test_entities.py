@@ -49,7 +49,8 @@ class TestRegistration:
         entity = get(name)
         assert len(entity.table_order) > 0
         assert set(entity.table_weights.keys()) == set(entity.table_order)
-        assert entity.pk_column == "id"
+        root_schema = entity.schemas[entity.table_order[0]]
+        assert root_schema.field(0).name == "id"
 
     @pytest.mark.parametrize(
         "name, fk_column",

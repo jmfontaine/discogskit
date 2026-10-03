@@ -120,24 +120,18 @@ class _ProgressBar:
         self._progress = progress
         self._task_id = task_id
         self._total = total
-        self._total_records = 0
         self._started = False
 
-    def update(self, chunk_records: int, avg_rate: float) -> None:
+    def update(self, avg_rate: float) -> None:
         if not self._started:
             # Switch from indeterminate pulse to determinate bar
             self._progress.update(self._task_id, total=self._total)
             self._started = True
-        self._total_records += chunk_records
         self._progress.update(
             self._task_id,
             advance=1,
             description=f"[cyan]{avg_rate:,.0f} rec/s",
         )
-
-    @property
-    def total_records(self) -> int:  # pragma: no cover
-        return self._total_records
 
 
 @dataclass
@@ -246,9 +240,7 @@ class _ChunkWriter:
             tables = {name: deserialize_batch(data) for name, data in ipc_dict.items()}
             root_batch = tables[self.entity.table_order[0]]
             chunk_count = root_batch.num_rows
-            self._dup_tracker.check(
-                self.entity.name, root_batch.column(self.entity.pk_column)
-            )
+            self._dup_tracker.check(self.entity.name, root_batch.column("id"))
             timings = self.writer.write_chunk(tables)
         except BaseException:
             self._failed = True
@@ -264,7 +256,7 @@ class _ChunkWriter:
 
         if self.progress_bar is not None:
             avg_rate = self.total / elapsed if elapsed > 0 else 0
-            self.progress_bar.update(chunk_count, avg_rate)
+            self.progress_bar.update(avg_rate)
         else:
             print(
                 f"  chunk {self.chunks_done}/{self.n_chunks}: "
