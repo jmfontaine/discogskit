@@ -146,8 +146,17 @@ class PipelineConfig:
 
 
 @dataclass
+class ProfileData:
+    """Per-run ``--profile`` timings, surfaced in ``PipelineResult``."""
+
+    get_wait: float
+    put_blocked: float
+    table_timings: dict[str, float]
+
+
+@dataclass
 class PipelineResult:
-    profile_data: dict[str, object] | None
+    profile_data: ProfileData | None
     t_decompress: float
     t_indexes: float
     t_parse_load: float
@@ -425,11 +434,11 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
     if config.profile:
         table_timings = chunk_writer.table_timings
         assert table_timings is not None
-        profile_data = {
-            "put_blocked": put_blocked,
-            "get_wait": chunk_writer.get_wait,
-            "table_timings": table_timings,
-        }
+        profile_data = ProfileData(
+            get_wait=chunk_writer.get_wait,
+            put_blocked=put_blocked,
+            table_timings=table_timings,
+        )
 
     return PipelineResult(
         profile_data=profile_data,
