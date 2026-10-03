@@ -43,7 +43,9 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> dict[str, bytes]:
         data = f.read(args.end - args.start)
 
     container = entity.name.encode()
-    header = b"<?xml version='1.0' encoding='UTF-8'?>\n<" + container + b">\n"
+    # No newline after the container's opening tag, so the chunk starts on line 1 and lxml's line numbers count from
+    # the chunk's first byte.
+    header = b"<?xml version='1.0' encoding='UTF-8'?><" + container + b">"
     footer = b"\n</" + container + b">"
     # One copy of the chunk; header + data + footer would copy it twice.
     xml_data = b"".join((header, data, footer))
@@ -53,19 +55,29 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> dict[str, bytes]:
     }
     unknown: set[str] | None = set() if args.strict else None
 
-    for _, elem in etree.iterparse(
-        BytesIO(xml_data), events=("end",), tag=entity.root_tag
-    ):
-        # Only records directly under the container are records; e.g. <label> also appears inside <sublabels>.
-        parent = elem.getparent()
-        if parent is None or parent.tag != entity.name:
-            continue
-        entity.append_record(cols, elem, unknown)
-        # Standard lxml memory optimization for iterparse: free each element after processing to prevent the entire
-        # tree from accumulating. Without this, a 256 MB chunk would build a multi-GB tree in memory.
-        elem.clear()
-        while elem.getprevious() is not None:
-            del parent[0]
+    try:
+        for _, elem in etree.iterparse(
+            BytesIO(xml_data), events=("end",), tag=entity.root_tag
+        ):
+            # Only records directly under the container are records; e.g. <label> also appears inside <sublabels>.
+            parent = elem.getparent()
+            if parent is None or parent.tag != entity.name:
+                continue
+            entity.append_record(cols, elem, unknown)
+            # Standard lxml memory optimization for iterparse: free each element after processing to prevent the
+            # entire tree from accumulating. Without this, a 256 MB chunk would build a multi-GB tree in memory.
+            elem.clear()
+            while elem.getprevious() is not None:
+                del parent[0]
+    except etree.XMLSyntaxError as exc:
+        # XMLSyntaxError carries an error log that can't be pickled, so the pool would only report "cannot pickle
+        # '_ListErrorLog'" and the real error would be lost (#60). Re-raise as a plain ValueError with the location.
+        # Only parsing raises it; other errors (e.g. a bug in append_record) propagate unchanged.
+        detail = exc.msg
+        raise ValueError(
+            f"Malformed {entity.name} XML in {args.file_path}, chunk at bytes {args.start}-{args.end}"
+            f" (line numbers count from byte {args.start}): {detail}"
+        ) from exc
 
     if unknown:
         for tag in sorted(unknown):

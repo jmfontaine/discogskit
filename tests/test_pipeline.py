@@ -47,12 +47,17 @@ def artists_gz(tmp_path):
 _MANY_ARTISTS = 60_000
 
 
-def _many_artists_gz(gz_path, bad_id_at=None):
-    """Write a multi-chunk artists .xml.gz; ``bad_id_at`` gets a non-numeric id."""
+def _many_artists_gz(gz_path, bad_id_at=None, bad_close_at=None):
+    """Write a multi-chunk artists .xml.gz; ``bad_id_at`` gets a non-numeric id,
+    ``bad_close_at`` a mismatched ``</nam>`` closing tag."""
     body = b"".join(
-        b"<artist>\n  <id>%s</id>\n  <name>Artist %d</name>\n"
+        b"<artist>\n  <id>%s</id>\n  <name>Artist %d</%s>\n"
         b"  <data_quality>Correct</data_quality>\n</artist>\n"
-        % (b"x" if i == bad_id_at else b"%d" % i, i)
+        % (
+            b"x" if i == bad_id_at else b"%d" % i,
+            i,
+            b"nam" if i == bad_close_at else b"name",
+        )
         for i in range(1, _MANY_ARTISTS + 1)
     )
     # 1 MB chunks: need more than write_queue (2) + 1 in-flight chunks.
@@ -404,6 +409,32 @@ class TestPipelineRun:
         time.sleep(0.5)
         assert writer.active_at_close == 0
         assert writer.writes_after_close == 0
+
+    def test_malformed_xml_error_reaches_caller(self, tmp_path):
+        """lxml's XMLSyntaxError can't be pickled out of a worker; the error and its location must still arrive (#60)."""
+        import re
+
+        from discogskit.writers.jsonl import JSONLWriter
+
+        bad = _MANY_ARTISTS - 10
+        gz_path = _many_artists_gz(tmp_path / "artists.xml.gz", bad_close_at=bad)
+        writer = JSONLWriter(str(tmp_path / "out"))
+
+        with pytest.raises(ValueError, match="Opening and ending tag mismatch") as info:
+            try:
+                _run_or_fail_on_hang(_multi_chunk_config(gz_path), writer)
+            finally:
+                writer.close()
+
+        # The reported chunk and line point at the malformed record in the XML.
+        message = str(info.value)
+        span = re.search(r"bytes (\d+)-(\d+)", message)
+        position = re.search(r", line (\d+), column", message)
+        assert span is not None and position is not None, message
+        start, end = int(span.group(1)), int(span.group(2))
+        line = int(position.group(1))
+        chunk = gz_path.with_suffix("").read_bytes()[start:end]
+        assert chunk.split(b"\n")[line - 1] == b"  <name>Artist %d</nam>" % bad
 
     def test_postgresql_writer(self, artists_gz, pg_dsn):
         """``pipeline.run`` with PostgreSQLWriter, whose chunks land on the writer thread."""
