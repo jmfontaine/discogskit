@@ -6,7 +6,7 @@ import os
 from enum import Enum
 from importlib.metadata import version
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated
 
 import typer
 from rich.table import Table
@@ -189,11 +189,11 @@ def _print_result(
         pd = result.profile_data
         console.print()
         console.rule("[bold]Profile[/]", style="dim")
-        status("Put blocked", f"{pd['put_blocked']:.2f}s")
-        status("Get wait", f"{pd['get_wait']:.2f}s")
+        status("Put blocked", f"{pd.put_blocked:.2f}s")
+        status("Get wait", f"{pd.get_wait:.2f}s")
         console.print()
 
-        table_timings = cast(dict[str, float], pd.get("table_timings", {}))
+        table_timings = pd.table_timings
         flush_total = sum(table_timings.values())
 
         tbl = Table(

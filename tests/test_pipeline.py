@@ -489,9 +489,9 @@ class TestPipelineRun:
 
         assert result.total_records == _MANY_ARTISTS
         assert result.profile_data is not None
-        assert "put_blocked" in result.profile_data
-        assert "get_wait" in result.profile_data
-        table_timings = result.profile_data["table_timings"]
+        assert isinstance(result.profile_data.put_blocked, float)
+        assert isinstance(result.profile_data.get_wait, float)
+        table_timings = result.profile_data.table_timings
         assert isinstance(table_timings, dict)
         assert set(table_timings) == set(get_entity("artists").table_order)
         assert all(v >= 0 for v in table_timings.values())
@@ -528,7 +528,7 @@ class TestPipelineRun:
 
         assert writer.calls > 1
         assert result.profile_data is not None
-        table_timings = result.profile_data["table_timings"]
+        table_timings = result.profile_data.table_timings
         assert isinstance(table_timings, dict)
         assert table_timings == {"artists": float(writer.calls)}
 
@@ -653,7 +653,7 @@ class TestPipelineRun:
             writer.close()
 
         assert result.profile_data is not None
-        table_timings = result.profile_data["table_timings"]
+        table_timings = result.profile_data.table_timings
         assert isinstance(table_timings, dict)
         assert set(table_timings) == set(get_entity("labels").table_order) | {"_commit"}
 

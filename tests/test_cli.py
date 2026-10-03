@@ -661,3 +661,64 @@ class TestCompressionLevel:
         assert "unsupported compression 'zstd' for jsonl" in output
         assert "compression-level" not in output
         run.assert_not_called()
+
+
+class TestLoadRejectsPostgreSqlOnlyOptionsForSqlite:
+    """get_writer()'s SQLite rejection must track the CLI's actual flag names, not copied literals."""
+
+    def test_defaults_do_not_trigger_rejection(self, tmp_path: Path) -> None:
+        gz = _make_gz(tmp_path)
+        db = tmp_path / "out.db"
+        pipeline_result = pipeline.PipelineResult(None, 0.0, 0.0, 0.0, 0.0, 0)
+        with patch("discogskit.cli.pipeline.run", return_value=pipeline_result):
+            result = runner.invoke(app, ["load", str(gz), "--dsn", str(db)])
+        assert result.exit_code == 0, click.unstyle(result.output)
+
+    @pytest.mark.parametrize(
+        "flag, value",
+        [
+            ("--pg-create-schema", None),
+            ("--pg-index-workers", "4"),
+            ("--pg-schema", "custom"),
+            ("--pg-unlogged", None),
+            ("--pg-write-workers", "3"),
+        ],
+        ids=["create-schema", "index-workers", "schema", "unlogged", "write-workers"],
+    )
+    def test_rejects_each_postgresql_only_flag(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        flag: str,
+        value: str | None,
+    ) -> None:
+        _widen_console(monkeypatch)
+        gz = _make_gz(tmp_path)
+        db = tmp_path / "out.db"
+        args = ["load", str(gz), "--dsn", str(db), flag]
+        if value is not None:
+            args.append(value)
+        if flag == "--pg-create-schema":
+            # --pg-create-schema requires --pg-schema; add it so the rejection under test
+            # (not the --pg-create-schema/--pg-schema pairing check) is the one that fires.
+            args += ["--pg-schema", "custom"]
+        pipeline_result = pipeline.PipelineResult(None, 0.0, 0.0, 0.0, 0.0, 0)
+        with patch("discogskit.cli.pipeline.run", return_value=pipeline_result):
+            result = runner.invoke(app, args)
+        output = click.unstyle(result.output)
+        assert result.exit_code == 1, output
+        assert flag in output
+        assert "can only be used with PostgreSQL, not a SQLite DSN." in output
+
+    def test_unknown_flag_is_a_typer_error_not_a_rejection(
+        self, tmp_path: Path
+    ) -> None:
+        """A made-up flag must fail via Typer's own parsing (exit 2), not look like our exit-1 rejection."""
+        gz = _make_gz(tmp_path)
+        db = tmp_path / "out.db"
+        result = runner.invoke(
+            app, ["load", str(gz), "--dsn", str(db), "--pg-bogus-option"]
+        )
+        output = click.unstyle(result.output)
+        assert result.exit_code == 2, output
+        assert "No such option" in output

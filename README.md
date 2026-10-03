@@ -185,9 +185,9 @@ the load stops and lists those objects instead of dropping them.
 
 After a failed or interrupted `load` (crash, Ctrl+C, lost connection), re-run it with `--overwrite`: the tables
 aren't consistent until a load finishes. Chunks commit as they go, so earlier chunks stay in the tables after a
-failure. With PostgreSQL and `--write-workers` above its default of 1, each table group commits on its own
+failure. With PostgreSQL and `--pg-write-workers` above its default of 1, each table group commits on its own
 connection, so the chunk that was in progress when the failure happened can itself end up partially written — some
-of its tables committed, others not. With `--write-workers 1` (the default) and with SQLite, a chunk commits in a
+of its tables committed, others not. With `--pg-write-workers 1` (the default) and with SQLite, a chunk commits in a
 single transaction on one connection, so it's never partially written, but earlier, already-committed chunks are
 still not rolled back.
 
@@ -195,6 +195,9 @@ still not rolled back.
 |----------|----------|
 | SQLite | 3.x |
 | PostgreSQL | 14+ |
+
+`--dsn` accepts `postgresql://` or `postgres://` (both work identically) for PostgreSQL, or a `sqlite:///` DSN
+or a path ending in `.db`, `.sqlite`, or `.sqlite3` for SQLite.
 
 <details>
 <summary>Full command help</summary>
