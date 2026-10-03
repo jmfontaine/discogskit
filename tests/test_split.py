@@ -360,7 +360,7 @@ class TestSplitFinderStrictValidation:
         """A closing tag with no matching opener must fail loudly, not silently truncate the data region."""
         items = b"".join(f"<item>{i}</item>\n".encode() for i in range(30))
         f = tmp_path / "test.xml"
-        f.write_bytes(items + b"</item>\n")
+        f.write_bytes(b"<items>\n" + items + b"</item>\n")
 
         with pytest.raises(ValueError, match="no matching"):
             find_splits(str(f), 64)
@@ -369,7 +369,7 @@ class TestSplitFinderStrictValidation:
         """An element still open at end of file (missing closing tag, or a truncated file) must fail loudly."""
         items = b"".join(f"<item>{i}</item>\n".encode() for i in range(30))
         f = tmp_path / "test.xml"
-        f.write_bytes(items + b"<item>cut off here")
+        f.write_bytes(b"<items>\n" + items + b"<item>cut off here")
 
         with pytest.raises(ValueError, match="unclosed"):
             find_splits(str(f), 64)
@@ -597,4 +597,43 @@ class TestSplitFinderLeadingContent:
         assert (
             f"Unsupported content before the first <item> record at byte {offset}: {what}"
             in message
+        )
+
+    @pytest.mark.parametrize(
+        "content, what",
+        [
+            # The quoted <item> is the first record tag the scan sees; it opens a record that never closes.
+            (
+                b"<items note='<item>'>\n" + _RECORDS + b"</items>\n",
+                "attributes on <items>",
+            ),
+            # Each later structural error would otherwise be reported instead of the prolog.
+            (b"<!-- x -->\n<items>\n" + _RECORDS + b"<item>\n</items>\n", "a comment"),
+            (b"<!-- x -->\n<items>\n" + _RECORDS + b"</item>\n</items>\n", "a comment"),
+            (b"<!-- x -->\n<items>\n" + _RECORDS + b"<item\n</items>\n", "a comment"),
+            # A stray closing tag or bad markup before any record is still preceded by the bad prolog.
+            (b"<!-- x -->\n<items>\n</item>\n" + _RECORDS + b"</items>\n", "a comment"),
+            (b"<!-- x -->\n<items>\n<!-- unterminated\n</items>\n", "a comment"),
+        ],
+        ids=[
+            "record-tag-in-attribute",
+            "later-unclosed-record",
+            "later-stray-closer",
+            "later-malformed-tag",
+            "stray-closer-before-records",
+            "bad-markup-before-records",
+        ],
+    )
+    def test_unsupported_prolog_is_reported_before_later_errors(
+        self, tmp_path, find_splits, content, what
+    ):
+        f = tmp_path / "test.xml"
+        f.write_bytes(content)
+
+        with pytest.raises(ValueError) as info:
+            find_splits(str(f), 1024 * 1024)
+
+        assert (
+            f"Unsupported content before the first <item> record at byte 0: {what}"
+            in str(info.value)
         )
