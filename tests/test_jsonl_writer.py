@@ -197,3 +197,11 @@ class TestJSONLWriter:
         writer2.setup(entity)
         writer2.write_chunk(ipc_to_record_batches(ipc_dict))
         writer2.finalize(entity)
+
+
+class TestJSONLWriterCompression:
+    @pytest.mark.parametrize("compression", ["zstd", "snappy", "GZIP", ""])
+    def test_unsupported_compression_raises(self, tmp_path, compression):
+        """It used to write plain output while the status line claimed the codec."""
+        with pytest.raises(ValueError, match="bzip2, gzip, none"):
+            JSONLWriter(str(tmp_path), compression=compression)
