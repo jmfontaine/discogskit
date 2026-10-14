@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 import pytest
 
@@ -176,29 +177,6 @@ class TestReleasesParsing:
         assert (video["title"], video["description"]) == ("", None)
         assert (video["duration"], video["embed"]) == (None, None)
 
-    def test_invalid_video_duration_fallback(self, tmp_path):
-        """Video with non-integer duration falls back to 0."""
-        xml = (
-            '<release id="1" status="Accepted">\n'
-            "  <title>Test</title>\n"
-            "  <data_quality>Correct</data_quality>\n"
-            "  <videos>\n"
-            '    <video src="http://x" duration="abc" embed="true">\n'
-            "      <title>V</title><description>D</description>\n"
-            "    </video>\n"
-            "  </videos>\n"
-            "</release>\n"
-        )
-        f = tmp_path / "bad_dur.xml"
-        f.write_text(xml)
-
-        ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("releases", str(f), 0, os.path.getsize(f))
-        )
-        tables = ipc_to_tables(ipc_dict, SCHEMAS)
-
-        assert tables["release_videos"].column("duration").to_pylist() == [0]
-
     def test_non_matching_tags_skipped(self, tmp_path):
         """Non-matching sibling tags in artists, extraartists, companies, tracklist, sub_tracks are skipped."""
         xml = (
@@ -242,3 +220,74 @@ class TestReleasesParsing:
         assert tables["release_extraartists"].num_rows == 1
         assert tables["release_companies"].num_rows == 1
         assert tables["release_tracks"].num_rows == 2  # 1 parent + 1 sub
+
+
+class TestReleaseTypedValues:
+    """Video duration, embed and is_main_release are stored typed, missing is NULL, and anything else fails (#95)."""
+
+    @staticmethod
+    def _release(tmp_path, master_id_attrs: str, video_attrs: str) -> dict:
+        f = tmp_path / "release.xml"
+        f.write_text(
+            f'<release id="1" status="Accepted"><master_id{master_id_attrs}>5</master_id>'
+            f'<videos><video src="http://x"{video_attrs}/></videos></release>\n'
+        )
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("releases", str(f), 0, os.path.getsize(f))
+        )
+        return ipc_to_tables(ipc_dict, SCHEMAS)
+
+    @pytest.mark.parametrize(
+        "attr, expected",
+        [(' duration="0"', 0), (' duration="245"', 245), ("", None)],
+        ids=["zero", "positive", "missing"],
+    )
+    def test_duration(self, tmp_path, attr, expected):
+        tables = self._release(tmp_path, "", attr)
+        assert tables["release_videos"].column("duration").to_pylist() == [expected]
+
+    @pytest.mark.parametrize(
+        "attr, expected",
+        [(' embed="true"', True), (' embed="false"', False), ("", None)],
+        ids=["true", "false", "missing"],
+    )
+    def test_embed(self, tmp_path, attr, expected):
+        tables = self._release(tmp_path, "", attr)
+        assert tables["release_videos"].column("embed").to_pylist() == [expected]
+
+    @pytest.mark.parametrize("value", ["abc", "", "1.5"])
+    def test_invalid_duration_fails(self, tmp_path, value):
+        with pytest.raises(
+            ValueError,
+            match=rf"^Invalid <release> record .*: invalid literal for int\(\) with base 10: {re.escape(repr(value))}$",
+        ):
+            self._release(tmp_path, "", f' duration="{value}"')
+
+    @pytest.mark.parametrize("value", ["True", "1", "yes", ""])
+    def test_invalid_embed_fails(self, tmp_path, value):
+        with pytest.raises(
+            ValueError,
+            match=rf"^Invalid <release> record .*: invalid embed {re.escape(repr(value))}, expected 'true' or 'false'$",
+        ):
+            self._release(tmp_path, "", f' embed="{value}"')
+
+    @pytest.mark.parametrize("value", ["True", "1", "yes", ""])
+    def test_invalid_is_main_release_fails(self, tmp_path, value):
+        with pytest.raises(
+            ValueError,
+            match=rf"^Invalid <release> record .*: invalid is_main_release {re.escape(repr(value))}, expected 'true' or 'false'$",
+        ):
+            self._release(tmp_path, f' is_main_release="{value}"', "")
+
+    @pytest.mark.parametrize(
+        "attr, expected",
+        [
+            (' is_main_release="true"', True),
+            (' is_main_release="false"', False),
+            ("", None),
+        ],
+        ids=["true", "false", "missing"],
+    )
+    def test_is_main_release(self, tmp_path, attr, expected):
+        tables = self._release(tmp_path, attr, "")
+        assert tables["releases"].column("is_main_release").to_pylist() == [expected]

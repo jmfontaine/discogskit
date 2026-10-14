@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 import pytest
 
@@ -133,3 +134,50 @@ class TestMastersParsing:
 
         assert tables["master_artists"].num_rows == 1
         assert tables["master_videos"].num_rows == 1
+
+
+class TestMasterVideoTypedValues:
+    """A video's duration and embed are stored typed, missing is NULL, and anything else fails (#95)."""
+
+    @staticmethod
+    def _video(tmp_path, attrs: str) -> dict:
+        f = tmp_path / "video.xml"
+        f.write_text(
+            f'<master id="1"><videos><video src="http://x"{attrs}/></videos></master>\n'
+        )
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("masters", str(f), 0, os.path.getsize(f))
+        )
+        return ipc_to_tables(ipc_dict, SCHEMAS)["master_videos"].to_pylist()[0]
+
+    @pytest.mark.parametrize(
+        "attr, expected",
+        [(' duration="0"', 0), (' duration="245"', 245), ("", None)],
+        ids=["zero", "positive", "missing"],
+    )
+    def test_duration(self, tmp_path, attr, expected):
+        assert self._video(tmp_path, attr)["duration"] == expected
+
+    @pytest.mark.parametrize(
+        "attr, expected",
+        [(' embed="true"', True), (' embed="false"', False), ("", None)],
+        ids=["true", "false", "missing"],
+    )
+    def test_embed(self, tmp_path, attr, expected):
+        assert self._video(tmp_path, attr)["embed"] is expected
+
+    @pytest.mark.parametrize("value", ["abc", "", "1.5"])
+    def test_invalid_duration_fails(self, tmp_path, value):
+        with pytest.raises(
+            ValueError,
+            match=rf"^Invalid <master> record .*: invalid literal for int\(\) with base 10: {re.escape(repr(value))}$",
+        ):
+            self._video(tmp_path, f' duration="{value}"')
+
+    @pytest.mark.parametrize("value", ["True", "1", "yes", ""])
+    def test_invalid_embed_fails(self, tmp_path, value):
+        with pytest.raises(
+            ValueError,
+            match=rf"^Invalid <master> record .*: invalid embed {re.escape(repr(value))}, expected 'true' or 'false'$",
+        ):
+            self._video(tmp_path, f' embed="{value}"')

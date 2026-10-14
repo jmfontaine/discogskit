@@ -79,9 +79,11 @@ Discogs:
 Filter them in your queries where they matter, e.g. `WHERE master_id <> 0`.
 
 A value discogskit can't store, such as a non-numeric id or one too large for its column, stops the run, and so does
-a record with a missing or empty id. The error names the `.xml` file and the byte range of the chunk being parsed,
-plus either the record's line, counted from the chunk's first byte, and its id when it has one, or the table the
-value was meant for.
+a record with a missing or empty id. Typed attributes are never coerced: a video `duration` must be an integer, and
+`embed` and `is_main_release` must be `true` or `false`; a missing one is `NULL`, and any other value, including an
+empty one, stops the run. The error names the `.xml` file and the byte range of the chunk being parsed, plus either
+the record's line, counted from the chunk's first byte, and its id when it has one, or the table the value was meant
+for.
 
 ### discogskit convert
 

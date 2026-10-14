@@ -10,7 +10,7 @@ from __future__ import annotations
 import pyarrow as pa
 from lxml import etree
 
-from discogskit.entities import Cols, EntityDef, register
+from discogskit.entities import Cols, EntityDef, parse_bool, register
 
 _ArtistRec = tuple[int | None, str, str | None, str | None]
 _ExtraArtistRec = tuple[int | None, str, str | None, str | None, str | None]
@@ -313,9 +313,9 @@ def append_record(
             data_quality = child.text or ""
         elif tag == "master_id":
             master_id = int(child.text) if child.text else None
-            attr = child.get("is_main_release")
-            if attr is not None:
-                is_main_release = attr == "true"
+            is_main_release = parse_bool(
+                "is_main_release", child.get("is_main_release")
+            )
         elif tag == "genres":
             genres = [g.text or "" for g in child.findall("genre")]
         elif tag == "styles":
@@ -372,14 +372,8 @@ def append_record(
         elif tag == "videos":
             for vid in child.findall("video"):
                 dur_str = vid.get("duration")
-                vid_dur = None
-                if dur_str:
-                    try:
-                        vid_dur = int(dur_str)
-                    except ValueError:
-                        vid_dur = 0
-                embed_str = vid.get("embed")
-                vid_embed = embed_str == "true" if embed_str else None
+                vid_dur = None if dur_str is None else int(dur_str)
+                vid_embed = parse_bool("embed", vid.get("embed"))
                 vid_title = None
                 vid_desc = None
                 for vch in vid:

@@ -100,6 +100,23 @@ def detect_entity(filename: str) -> str:
     return entity
 
 
+# Only these literals are booleans; any other value fails instead of being read as False (#95).
+_BOOLEANS = {"false": False, "true": True}
+
+
+def parse_bool(name: str, value: str | None) -> bool | None:
+    """Parse the boolean attribute ``name``: ``None`` when it's missing, ``True`` or ``False`` for ``"true"`` or
+    ``"false"``. Any other value, including an empty one, raises ``ValueError``."""
+    if value is None:
+        return None
+    try:
+        return _BOOLEANS[value]
+    except KeyError:
+        raise ValueError(
+            f"invalid {name} {value!r}, expected 'true' or 'false'"
+        ) from None
+
+
 # Import entity modules to trigger registration.
 from discogskit.entities import (
     artists as _artists,  # noqa: F401 — imported after ENTITIES dict for registration side-effects
