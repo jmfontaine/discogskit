@@ -10,9 +10,10 @@ from typing import Annotated
 
 import typer
 from rich.table import Table
+from rich.text import Text
 
 from discogskit import pipeline
-from discogskit._console import console, status
+from discogskit._console import console, error, print_text, status
 from discogskit.decompress import DecompressError
 from discogskit.entities import detect_entity
 from discogskit.entities import get as get_entity
@@ -83,14 +84,12 @@ def _validate_compression_level(
         else _parquet_level_range(compression)
     )
     if level_range is None:
-        console.print(
-            f"[red]Error:[/] {compression.value} does not support --compression-level."
-        )
+        error(f"{compression.value} does not support --compression-level.")
         raise typer.Exit(1)
     lo, hi = level_range
     if not lo <= level <= hi:
-        console.print(
-            f"[red]Error:[/] --compression-level {level} is out of range for "
+        error(
+            f"--compression-level {level} is out of range for "
             f"{compression.value} ({lo} to {hi})."
         )
         raise typer.Exit(1)
@@ -130,26 +129,26 @@ def _resolve_jobs(paths: list[Path]) -> list[tuple[Path, str]]:
             if p.is_dir():
                 gz_files = sorted(p.glob("*.xml.gz"))
                 if not gz_files:
-                    console.print(f"[red]Error:[/] no .xml.gz files found in {p}")
+                    error(f"no .xml.gz files found in {p}")
                     raise typer.Exit(1) from None
                 for gz in gz_files:
                     jobs.append((gz, detect_entity(gz.name)))
             else:
                 if not p.exists():
-                    console.print(f"[red]Error:[/] file not found: {p}")
+                    error(f"file not found: {p}")
                     raise typer.Exit(1) from None
                 if p.name.endswith(".xml"):
-                    console.print(
-                        f"[red]Error:[/] {p}: uncompressed .xml input is not supported;"
+                    error(
+                        f"{p}: uncompressed .xml input is not supported;"
                         " pass the original .xml.gz dump"
                     )
                     raise typer.Exit(1) from None
                 if not p.name.endswith(".xml.gz"):
-                    console.print(f"[red]Error:[/] {p}: not a .xml.gz dump")
+                    error(f"{p}: not a .xml.gz dump")
                     raise typer.Exit(1) from None
                 jobs.append((p, detect_entity(p.name)))
         except ValueError as exc:
-            console.print(f"[red]Error:[/] {exc}")
+            error(str(exc))
             raise typer.Exit(1) from None
     return jobs
 
@@ -183,7 +182,7 @@ def _print_result(
             else "0.00s",
         )
         status("Finalize", f"{result.t_indexes:.2f}s")
-        status("Total", f"[bold]{result.t_total:.2f}s[/]")
+        status("Total", f"{result.t_total:.2f}s", style="bold")
 
     if result.profile_data:
         pd = result.profile_data
@@ -236,8 +235,12 @@ def _run_jobs(
     try:
         for gz_path, entity_name in jobs:
             console.print()
-            console.print(
-                f"[bold green]{entity_name.capitalize()}[/]  [dim]{gz_path.name}[/]"
+            print_text(
+                Text.assemble(
+                    (entity_name.capitalize(), "bold green"),
+                    "  ",
+                    (gz_path.name, "dim"),
+                )
             )
 
             config = pipeline.PipelineConfig(
@@ -262,14 +265,14 @@ def _run_jobs(
                 verbose=verbose,
             )
     except (DecompressError, OutputExistsError) as exc:
-        console.print(f"[red]Error:[/] {exc}")
+        error(str(exc))
         raise typer.Exit(1) from None
     except KeyboardInterrupt:
         console.print("\n  [yellow]Interrupted — cleaning up …[/]")
         raise typer.Exit(130) from None
     # Top-level error boundary: any failure becomes a one-line error and exit 1.
     except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]Error:[/] {exc}")
+        error(str(exc))
         raise typer.Exit(1) from None
     finally:
         writer.close()
@@ -362,8 +365,8 @@ def convert(
             sorted(c.value for c in valid_compressions if c is not Compression.NONE)
             + [Compression.NONE.value]
         )
-        console.print(
-            f"[red]Error:[/] unsupported compression '{compression.value}' for "
+        error(
+            f"unsupported compression '{compression.value}' for "
             f"{output_format.value}. Valid: {valid}."
         )
         raise typer.Exit(1)
@@ -496,7 +499,7 @@ def load(
     jobs = _resolve_jobs(paths)
 
     if pg_create_schema and not pg_schema:
-        console.print("[red]Error:[/] --pg-create-schema requires --pg-schema.")
+        error("--pg-create-schema requires --pg-schema.")
         raise typer.Exit(1)
 
     try:
@@ -512,7 +515,7 @@ def load(
         )
     # Writer construction can fail many ways (bad DSN, driver, connection).
     except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]Error:[/] {exc}")
+        error(str(exc))
         raise typer.Exit(1) from None
     _run_jobs(
         jobs,
