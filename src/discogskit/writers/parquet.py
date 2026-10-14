@@ -40,7 +40,8 @@ class ParquetWriter:
         self._staged: StagedFiles | None = None
         self._writers: dict[str, pq.ParquetWriter] = {}
 
-    def setup(self, entity: EntityDef) -> None:
+    def check(self, entity: EntityDef) -> None:
+        """Raise ``OutputExistsError`` if ``entity``'s directory holds Parquet files and overwrite is off."""
         entity_dir = self._output_dir / entity.name
 
         if not self._overwrite and entity_dir.exists():
@@ -52,6 +53,10 @@ class ParquetWriter:
                     f"Output files already exist in {entity_dir} "
                     f"(e.g. {existing[0]}). Use --overwrite to replace them."
                 )
+
+    def setup(self, entity: EntityDef) -> None:
+        # Checked again here: output can appear after the caller's own check().
+        self.check(entity)
 
         self._staged = StagedFiles(
             self._output_dir,

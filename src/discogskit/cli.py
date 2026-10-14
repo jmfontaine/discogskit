@@ -122,7 +122,11 @@ def _callback(
 
 
 def _resolve_jobs(paths: list[Path]) -> list[tuple[Path, str]]:
-    """Resolve paths to a list of (gz_path, entity_name) pairs."""
+    """Resolve paths to a list of (gz_path, entity_name) pairs.
+
+    Fails on the first entity with two inputs, or file given twice, before any work: a second job for an entity
+    either fails on the first job's output after it has run, or (with --overwrite) silently replaces it.
+    """
     jobs: list[tuple[Path, str]] = []
     for p in paths:
         try:
@@ -150,6 +154,20 @@ def _resolve_jobs(paths: list[Path]) -> list[tuple[Path, str]]:
         except ValueError as exc:
             error(str(exc))
             raise typer.Exit(1) from None
+
+    by_entity: dict[str, Path] = {}
+    by_file: dict[Path, Path] = {}
+    for gz, entity_name in jobs:
+        if entity_name in by_entity:
+            error(f"two inputs for {entity_name}: {by_entity[entity_name]} and {gz}")
+            raise typer.Exit(1)
+        # A file under another entity's name (e.g. a symlink) is still the same dump.
+        resolved = gz.resolve()
+        if resolved in by_file:
+            error(f"same file given twice: {by_file[resolved]} and {gz}")
+            raise typer.Exit(1)
+        by_entity[entity_name] = gz
+        by_file[resolved] = gz
     return jobs
 
 
@@ -230,13 +248,17 @@ def _run_jobs(
 ) -> None:
     """Run the pipeline for each job, printing progress and handling errors.
 
-    Builds a ``PipelineConfig`` per job (entity/gz_path vary, the rest is
-    shared across the whole run), calls ``pipeline.run``, and prints the
-    result. Closes ``writer`` once the whole run is done, whether it
-    succeeded, failed, or was interrupted.
+    Checks every job's output first, so existing output for a later job fails
+    the run before an earlier one does hours of work. Builds a
+    ``PipelineConfig`` per job (entity/gz_path vary, the rest is shared across
+    the whole run), calls ``pipeline.run``, and prints the result. Closes
+    ``writer`` once the whole run is done, whether it succeeded, failed, or was
+    interrupted.
     """
     verbose = not progress or profile
     try:
+        for _, entity_name in jobs:
+            writer.check(get_entity(entity_name))
         for gz_path, entity_name in jobs:
             console.print()
             print_text(

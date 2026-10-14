@@ -59,7 +59,8 @@ class JSONLWriter:
         self._files: dict[str, IO] = {}
         self._staged: StagedFiles | None = None
 
-    def setup(self, entity: EntityDef) -> None:
+    def check(self, entity: EntityDef) -> None:
+        """Raise ``OutputExistsError`` if ``entity``'s directory holds JSONL files and overwrite is off."""
         entity_dir = self._output_dir / entity.name
         ext = _COMPRESSED_EXT.get(self._compression, ".jsonl")
 
@@ -72,6 +73,11 @@ class JSONLWriter:
                     f"Output files already exist in {entity_dir} "
                     f"(e.g. {existing[0]}). Use --overwrite to replace them."
                 )
+
+    def setup(self, entity: EntityDef) -> None:
+        # Checked again here: output can appear after the caller's own check().
+        self.check(entity)
+        ext = _COMPRESSED_EXT.get(self._compression, ".jsonl")
 
         self._staged = StagedFiles(
             self._output_dir,

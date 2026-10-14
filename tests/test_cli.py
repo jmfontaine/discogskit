@@ -8,6 +8,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
@@ -24,7 +25,7 @@ from discogskit.decompress import DecompressError
 from discogskit.entities import ChunkArgs, get
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers import OutputExistsError
-from tests.conftest import ARTISTS_XML
+from tests.conftest import ARTISTS_XML, LABELS_XML
 
 runner = CliRunner()
 
@@ -394,6 +395,145 @@ class TestUnrecognizedFileExtension:
         assert result.exit_code == 1
         assert f"{other}: not a .xml.gz dump" in _unstyle(result.output)
         run.assert_not_called()
+
+
+def _dump_gz(directory: Path, entity: str, xml: str, date: str = "20260301") -> Path:
+    """A real ``discogs_<date>_<entity>.xml.gz`` holding ``xml`` (records without their envelope)."""
+    gz = directory / f"discogs_{date}_{entity}.xml.gz"
+    with gzip.open(gz, "wb") as f:
+        f.write(f"<?xml version='1.0' encoding='UTF-8'?>\n<{entity}>\n".encode())
+        f.write(xml.encode())
+        f.write(f"</{entity}>".encode())
+    return gz
+
+
+def _two_months(tmp_path: Path) -> tuple[list[Path], str]:
+    dumps = tmp_path / "dumps"
+    dumps.mkdir()
+    older = _dump_gz(dumps, "artists", ARTISTS_XML, date="20260201")
+    newer = _dump_gz(dumps, "artists", ARTISTS_XML)
+    return [dumps], f"two inputs for artists: {older} and {newer}"
+
+
+def _directory_and_its_file(tmp_path: Path) -> tuple[list[Path], str]:
+    dumps = tmp_path / "dumps"
+    dumps.mkdir()
+    gz = _dump_gz(dumps, "artists", ARTISTS_XML)
+    return [dumps, gz], f"two inputs for artists: {gz} and {gz}"
+
+
+def _file_twice(tmp_path: Path) -> tuple[list[Path], str]:
+    gz = _dump_gz(tmp_path, "artists", ARTISTS_XML)
+    return [gz, gz], f"two inputs for artists: {gz} and {gz}"
+
+
+def _file_by_another_path(tmp_path: Path) -> tuple[list[Path], str]:
+    dumps = tmp_path / "dumps"
+    dumps.mkdir()
+    gz = _dump_gz(dumps, "artists", ARTISTS_XML)
+    other = tmp_path / "dumps" / ".." / "dumps" / gz.name
+    return [gz, other], f"two inputs for artists: {gz} and {other}"
+
+
+def _file_under_another_name(tmp_path: Path) -> tuple[list[Path], str]:
+    """A symlink named for another entity still points at the same dump."""
+    gz = _dump_gz(tmp_path, "artists", ARTISTS_XML)
+    link = tmp_path / "discogs_20260301_labels.xml.gz"
+    link.symlink_to(gz)
+    return [gz, link], f"same file given twice: {gz} and {link}"
+
+
+class TestDuplicateInputs:
+    """Two inputs for one entity, or one file given twice, fail before any job runs (#102)."""
+
+    @pytest.mark.parametrize("command", ["convert", "load"])
+    @pytest.mark.parametrize(
+        "case",
+        [
+            _two_months,
+            _directory_and_its_file,
+            _file_twice,
+            _file_by_another_path,
+            _file_under_another_name,
+        ],
+        ids=lambda case: case.__name__.lstrip("_"),
+    )
+    def test_rejected_before_any_work(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        command: str,
+        case: Callable[[Path], tuple[list[Path], str]],
+    ) -> None:
+        paths, message = case(tmp_path)
+        db = tmp_path / "out.db"
+        extra = (
+            ["--dsn", str(db)]
+            if command == "load"
+            else ["--output", str(tmp_path / "out")]
+        )
+        _widen_console(monkeypatch)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = runner.invoke(app, [command, *map(str, paths), *extra])
+        assert result.exit_code == 1, _unstyle(result.output)
+        assert f"Error: {message}\n" in _unstyle(result.output)
+        run.assert_not_called()
+        assert not db.exists()
+        assert not (tmp_path / "out").exists()
+
+
+class TestExistingOutputCheckedUpFront:
+    """Existing output for any job fails the run before the first job starts (#102)."""
+
+    @staticmethod
+    def _args(target: str, tmp_path: Path) -> list[str]:
+        if target == "sqlite":
+            return ["load", "--dsn", str(tmp_path / "out.db")]
+        return ["convert", "-f", target, "--output", str(tmp_path / "out")]
+
+    @staticmethod
+    def _run(args: list[str], *paths: Path) -> Result:
+        return runner.invoke(
+            app, [*args, *map(str, paths), "--parse-workers", "1", "--no-progress"]
+        )
+
+    @pytest.mark.parametrize("target", ["jsonl", "parquet", "sqlite"])
+    def test_existing_second_entity_fails_before_first_job(
+        self, monkeypatch: pytest.MonkeyPatch, target: str, tmp_path: Path
+    ) -> None:
+        args = self._args(target, tmp_path)
+        artists = _dump_gz(tmp_path, "artists", ARTISTS_XML)
+        labels = _dump_gz(tmp_path, "labels", LABELS_XML)
+        first = self._run(args, labels)
+        assert first.exit_code == 0, _unstyle(first.output)
+
+        _widen_console(monkeypatch)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = self._run(args, artists, labels)
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        [message] = [line for line in output.splitlines() if line.strip()]
+        assert message.startswith("Error: ")
+        assert message.endswith("Use --overwrite to replace them.")
+        # Every labels table name starts with "label"; none of the artists tables' does.
+        assert "(e.g. label" in message
+        run.assert_not_called()
+
+    @pytest.mark.parametrize("target", ["jsonl", "parquet", "sqlite"])
+    def test_overwrite_replaces_existing_output(
+        self, target: str, tmp_path: Path
+    ) -> None:
+        args = self._args(target, tmp_path)
+        artists = _dump_gz(tmp_path, "artists", ARTISTS_XML)
+        labels = _dump_gz(tmp_path, "labels", LABELS_XML)
+        first = self._run(args, labels)
+        assert first.exit_code == 0, _unstyle(first.output)
+
+        result = self._run([*args, "--overwrite"], artists, labels)
+        output = _unstyle(result.output)
+        assert result.exit_code == 0, output
+        assert "artists converted" in output or "artists loaded" in output
+        assert "labels converted" in output or "labels loaded" in output
 
 
 # Discogs text is full of BBCode-style tags that Rich reads as markup: an unmatched closer

@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from urllib.parse import urlsplit
 
 import click
@@ -18,7 +18,7 @@ from typer.testing import CliRunner
 
 from discogskit.entities import ChunkArgs, get
 from discogskit.entities._worker import extract_chunk_to_ipc
-from tests.conftest import ARTISTS_XML, empty_ipc, ipc_to_record_batches
+from tests.conftest import ARTISTS_XML, LABELS_XML, empty_ipc, ipc_to_record_batches
 
 
 def _load(dsn, entity, ipc_dict, **options):
@@ -1154,6 +1154,89 @@ class TestPgSchema:
                 conn.execute(
                     sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
                 )
+
+
+@pytest.mark.integration
+class TestExistingTablesCheckedUpFront:
+    """Existing tables for any job fail the load before the first job starts (#102)."""
+
+    @pytest.fixture()
+    def dsn(self, pg_dsn):
+        import psycopg
+        from psycopg import sql
+
+        schema = f"upfront_{uuid.uuid4().hex[:8]}"
+        with psycopg.connect(pg_dsn, autocommit=True) as conn:
+            conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        yield f"{pg_dsn}?options=-csearch_path%3D{schema}"
+        with psycopg.connect(pg_dsn, autocommit=True) as conn:
+            conn.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+            )
+
+    @staticmethod
+    def _gz(tmp_path, entity, xml):
+        gz = tmp_path / f"discogs_20260301_{entity}.xml.gz"
+        with gzip.open(gz, "wb") as f:
+            f.write(f"<?xml version='1.0' encoding='UTF-8'?>\n<{entity}>\n".encode())
+            f.write(xml.encode())
+            f.write(f"</{entity}>".encode())
+        return gz
+
+    @staticmethod
+    def _load_cli(dsn, *paths, overwrite=False):
+        from discogskit.cli import app
+
+        args = ["load", *map(str, paths), "--dsn", dsn, "--no-progress"]
+        args += ["--parse-workers", "1"]
+        if overwrite:
+            args.append("--overwrite")
+        return CliRunner().invoke(app, args)
+
+    @staticmethod
+    def _tables(dsn):
+        import psycopg
+
+        with psycopg.connect(dsn) as conn:
+            rows = conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = current_schema()"
+            ).fetchall()
+        return {r[0] for r in rows}
+
+    def test_existing_second_entity_fails_before_first_job(self, dsn, tmp_path):
+        artists = self._gz(tmp_path, "artists", ARTISTS_XML)
+        labels = self._gz(tmp_path, "labels", LABELS_XML)
+        first = self._load_cli(dsn, labels)
+        assert first.exit_code == 0, click.unstyle(first.output)
+        labels_tables = set(get("labels").table_order)
+        assert self._tables(dsn) == labels_tables
+
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = self._load_cli(dsn, artists, labels)
+        output = click.unstyle(result.output)
+        assert result.exit_code == 1, output
+        # Rich may wrap the message at the terminal width.
+        message = " ".join(output.split())
+        assert message.startswith("Error: Tables already exist in schema upfront_")
+        assert message.endswith(
+            "(e.g. label_sublabels). Use --overwrite to replace them."
+        )
+        run.assert_not_called()
+        assert self._tables(dsn) == labels_tables
+
+    def test_overwrite_replaces_existing_tables(self, dsn, tmp_path):
+        artists = self._gz(tmp_path, "artists", ARTISTS_XML)
+        labels = self._gz(tmp_path, "labels", LABELS_XML)
+        first = self._load_cli(dsn, labels)
+        assert first.exit_code == 0, click.unstyle(first.output)
+
+        result = self._load_cli(dsn, artists, labels, overwrite=True)
+        assert result.exit_code == 0, click.unstyle(result.output)
+        assert self._tables(dsn) == {
+            *get("artists").table_order,
+            *get("labels").table_order,
+        }
 
 
 class TestSplitTableGroups:

@@ -106,27 +106,31 @@ class SQLiteWriter:
         self._journal_mode: str | None = None
         self._list_columns: dict[str, set[int]] = {}
 
+    def check(self, entity: EntityDef) -> None:
+        """Raise ``OutputExistsError`` if any of ``entity``'s tables exists and overwrite is off."""
+        if self._overwrite:
+            return
+        existing = {
+            row[0]
+            for row in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        conflict = existing & set(entity.table_order)
+        if conflict:
+            from discogskit.writers import OutputExistsError
+
+            example = min(conflict)
+            raise OutputExistsError(
+                f"Tables already exist in {self._path} "
+                f"(e.g. {example}). Use --overwrite to replace them."
+            )
+
     def setup(self, entity: EntityDef) -> None:
         """Apply PRAGMAs, drop/create tables."""
+        # Checked again here, before any destructive operation: tables can appear after the caller's own check().
+        self.check(entity)
         cur = self._conn.cursor()
-
-        # Check for existing tables before any destructive operations
-        if not self._overwrite:
-            existing = {
-                row[0]
-                for row in cur.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                )
-            }
-            conflict = existing & set(entity.table_order)
-            if conflict:
-                from discogskit.writers import OutputExistsError
-
-                example = min(conflict)
-                raise OutputExistsError(
-                    f"Tables already exist in {self._path} "
-                    f"(e.g. {example}). Use --overwrite to replace them."
-                )
 
         # Performance PRAGMAs, outside the transaction: journal_mode can't change inside one.
         self._journal_mode = cur.execute("PRAGMA journal_mode").fetchone()[0]
