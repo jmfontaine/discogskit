@@ -390,6 +390,47 @@ def _check_last_member(
                 out.seek(offset)
                 prefix_crc = zlib.crc32(out.read(start - offset), prefix_crc)
         # CRC(prefix + member) = shift(CRC(prefix), len(member)) ^ CRC(member)
-        if total_crc ^ _crc32_shift(prefix_crc, size) == footer_crc:
+        if total_crc ^ _crc32_shift(prefix_crc, size) != footer_crc:
+            continue
+        # An empty member's footer is eight zero bytes, so it matches whenever
+        # the file ends in zeros, as a header cut after a zero-filled extra
+        # field does: only accept it if an empty member is really there.
+        if size > 0 or _ends_with_empty_member(gz_path):
             return
     raise ValueError("the output doesn't end with a complete gzip member")
+
+
+# How far back from the end of the .gz to look for an empty last member.  Real
+# ones are small: a header (its extra field is at most 64 KiB, plus a file name
+# and a comment) and an empty deflate stream of a few bytes.  A valid file whose
+# empty last member is longer, which takes a huge name or comment or thousands
+# of empty deflate blocks, is rejected rather than risk publishing a truncated
+# one.  The bound also caps the cost: each candidate is parsed to the end.
+_EMPTY_MEMBER_SEARCH_BYTES = 256 * 1024
+
+
+def _ends_with_empty_member(gz_path: Path) -> bool:
+    """Whether the .gz ends with a complete gzip member that decompresses to
+    nothing, starting within its last ``_EMPTY_MEMBER_SEARCH_BYTES``.
+    """
+    with open(gz_path, "rb") as gz:
+        gz.seek(max(0, os.fstat(gz.fileno()).st_size - _EMPTY_MEMBER_SEARCH_BYTES))
+        tail = gz.read()
+    view = memoryview(tail)
+    start = tail.rfind(b"\x1f\x8b\x08")
+    while start >= 0:
+        member = zlib.decompressobj(wbits=31)  # gzip framing
+        try:
+            # One byte of output is enough to rule a candidate out.
+            output = member.decompress(view[start:], 1)
+        except zlib.error:
+            output = None
+        if (
+            output == b""
+            and member.eof
+            and not member.unused_data
+            and not member.unconsumed_tail
+        ):
+            return True
+        start = tail.rfind(b"\x1f\x8b\x08", 0, start)
+    return False
