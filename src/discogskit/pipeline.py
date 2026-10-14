@@ -42,9 +42,12 @@ Key design decisions
   spawned, never forked: by the time they start, this process runs Rich's
   refresh thread and the writer thread and holds database connections, none
   of which a forked child can safely inherit.
-- **Arrow IPC as inter-process format**: compact (columnar, no copies on
-  deserialization), avoids pickling overhead. Buffers are ~150 MB per chunk
-  at the default ``--chunk-mb``.
+- **Arrow IPC as inter-process format**: each worker serializes every table
+  of a chunk to an Arrow IPC buffer and sends the chunk's result over its
+  pipe, which pickles it. Pickling a few large ``bytes`` buffers only copies
+  them, where pickling the rows as Python objects would walk every value;
+  the main process then reads each buffer without copying it again
+  (columnar). Buffers are ~150 MB per chunk at the default ``--chunk-mb``.
 - **Bounded chunks in flight**: a chunk counts against a budget of
   ``parse_workers + write_queue`` from its submission to a parse worker until
   its write completes, and the main thread submits a chunk only while under

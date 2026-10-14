@@ -177,7 +177,7 @@ class TestRecordErrorOutput:
     def test_record_error_reaches_output_intact(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """A record error keeps its file, chunk and line through the process pool and Rich (#93).
+        """A record error keeps its file, chunk and line through the parse worker process and Rich (#93).
 
         The id looks like Rich markup, which Rich would otherwise swallow.
         """
