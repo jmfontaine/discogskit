@@ -25,6 +25,106 @@ PLAIN_RECORDS = {
     "releases": RELEASES_XML,
 }
 
+_ARTIST = "<artist><id>2</id><name>A</name><new_tag/></artist>"
+_TRACK = "<track><position>A1</position><title>T</title>{inner}</track>"
+
+# (entity, one record with an element no parser handles, the path --strict reports for it): one case per level where
+# the parsers report unhandled elements.
+_UNHANDLED = [
+    ("artists", "<artist><id>1</id><new_tag/></artist>", "new_tag"),
+    ("labels", "<label><id>1</id><new_tag/></label>", "new_tag"),
+    ("masters", '<master id="1"><new_tag/></master>', "new_tag"),
+    (
+        "masters",
+        f'<master id="1"><artists>{_ARTIST}</artists></master>',
+        "artists/artist/new_tag",
+    ),
+    (
+        "masters",
+        '<master id="1"><videos><video src="u"><new_tag/></video></videos></master>',
+        "videos/video/new_tag",
+    ),
+    ("releases", '<release id="1" status="Accepted"><new_tag/></release>', "new_tag"),
+    (
+        "releases",
+        f'<release id="1" status="Accepted"><artists>{_ARTIST}</artists></release>',
+        "artist/new_tag",
+    ),
+    (
+        "releases",
+        f'<release id="1" status="Accepted"><extraartists>{_ARTIST}</extraartists></release>',
+        "extraartist/new_tag",
+    ),
+    (
+        "releases",
+        '<release id="1" status="Accepted"><videos><video src="u"><new_tag/></video></videos></release>',
+        "videos/video/new_tag",
+    ),
+    (
+        "releases",
+        '<release id="1" status="Accepted"><companies><company><id>3</id><new_tag/></company></companies></release>',
+        "companies/company/new_tag",
+    ),
+    (
+        "releases",
+        '<release id="1" status="Accepted"><tracklist>'
+        + _TRACK.format(inner="<new_tag/>")
+        + "</tracklist></release>",
+        "track/new_tag",
+    ),
+    (
+        "releases",
+        '<release id="1" status="Accepted"><tracklist>'
+        + _TRACK.format(inner=f"<artists>{_ARTIST}</artists>")
+        + "</tracklist></release>",
+        "artist/new_tag",
+    ),
+    (
+        "releases",
+        '<release id="1" status="Accepted"><tracklist>'
+        + _TRACK.format(inner=f"<extraartists>{_ARTIST}</extraartists>")
+        + "</tracklist></release>",
+        "extraartist/new_tag",
+    ),
+    (
+        "releases",
+        '<release id="1" status="Accepted"><tracklist>'
+        + _TRACK.format(
+            inner="<sub_tracks>" + _TRACK.format(inner="<new_tag/>") + "</sub_tracks>"
+        )
+        + "</tracklist></release>",
+        "track/new_tag",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("entity_name", "record", "path"),
+    _UNHANDLED,
+    ids=[
+        "artists",
+        "labels",
+        "masters",
+        "masters-artist",
+        "masters-video",
+        "releases",
+        "releases-artist",
+        "releases-extraartist",
+        "releases-video",
+        "releases-company",
+        "releases-track",
+        "releases-track-artist",
+        "releases-track-extraartist",
+        "releases-sub-track",
+    ],
+)
+def test_strict_reports_unhandled_element_path(tmp_path, entity_name, record, path):
+    f = tmp_path / "chunk.xml"
+    f.write_text(record)
+    args = ChunkArgs(entity_name, str(f), 0, os.path.getsize(f), strict=True)
+
+    assert extract_chunk_to_ipc(args).unknown == [path]
+
 
 @pytest.mark.parametrize("entity_name", sorted(PLAIN_RECORDS))
 @pytest.mark.parametrize(
@@ -82,7 +182,9 @@ def test_namespaced_element_in_nested_container_is_not_a_record(tmp_path):
     f = tmp_path / "artists.xml"
     f.write_text(xml)
 
-    ipc_dict = extract_chunk_to_ipc(ChunkArgs("artists", str(f), 0, os.path.getsize(f)))
+    ipc_dict = extract_chunk_to_ipc(
+        ChunkArgs("artists", str(f), 0, os.path.getsize(f))
+    ).tables
 
     assert 1 in ipc_to_tables(ipc_dict, SCHEMAS)["artists"].column("id").to_pylist()
 

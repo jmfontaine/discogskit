@@ -58,7 +58,7 @@ def test_unicode_text_round_trips(
     size = os.path.getsize(unicode_artists_xml_file)
     ipc_dict = extract_chunk_to_ipc(
         ChunkArgs("artists", str(unicode_artists_xml_file), 0, size)
-    )
+    ).tables
     writer = make_writer(tmp_path)
     try:
         writer.setup(entity)

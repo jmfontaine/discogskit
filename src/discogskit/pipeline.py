@@ -96,7 +96,7 @@ from discogskit import decompress
 from discogskit._console import console, status
 from discogskit.entities import ChunkArgs, EntityDef
 from discogskit.entities import get as get_entity
-from discogskit.entities._worker import extract_chunk_to_ipc
+from discogskit.entities._worker import ChunkResult, extract_chunk_to_ipc
 from discogskit.writers import Writer
 from discogskit.writers._ipc import deserialize_batch
 
@@ -306,11 +306,15 @@ class _ChunkWriter:
             avg_rate = self.total / elapsed if elapsed > 0 else 0
             self.progress_bar.update(avg_rate)
         else:
-            print(
+            # Through the console, which flushes each line, so piped output
+            # shows every chunk as it's written. Literal text, never wrapped.
+            console.print(
                 f"  chunk {self.chunks_done}/{self.n_chunks}: "
                 f"{chunk_count:,} {self.entity.name} ({self.total:,} total) "
                 f"[{chunk_count / chunk_elapsed:,.0f} rec/s chunk, "
-                f"{self.total / elapsed:,.0f} rec/s avg]"
+                f"{self.total / elapsed:,.0f} rec/s avg]",
+                markup=False,
+                soft_wrap=True,
             )
 
 
@@ -366,7 +370,7 @@ def _parse_and_write(
     profile: bool,
     progress_bar: _ProgressBar | None,
     write_queue: int,
-) -> float:
+) -> tuple[float, list[str]]:
     """Parse ``chunks`` in worker processes and write each one on the writer thread.
 
     A chunk counts against a budget of ``parse_workers + write_queue`` from its
@@ -377,12 +381,15 @@ def _parse_and_write(
 
     Returns ``put_blocked``: how long parse workers sat idle because the
     writer held the whole budget (measured only with ``profile``).  High
-    put_blocked = write-bound pipeline.  See --profile output.
+    put_blocked = write-bound pipeline.  See --profile output. Also returns the
+    sorted paths of the elements no parser handled, across all chunks (found
+    only with ``--strict``).
     """
     budget = parse_workers + write_queue
     queued = deque(chunks)
-    parsing: set[Future[dict[str, bytes]]] = set()
+    parsing: set[Future[ChunkResult]] = set()
     put_blocked = 0.0
+    unknown: set[str] = set()
     # Unfinished writes in submission order, which is the order they finish in.
     writes: deque[Future[None]] = deque()
 
@@ -435,13 +442,15 @@ def _parse_and_write(
                 writes.popleft().result()
             parsed = parsing & done
             parsing -= parsed
-            # pop() leaves no name bound to a handed-off future, which holds its
-            # chunk's IPC buffers until released; the write keeps its own
-            # reference only until the write is done.
+            # pop() leaves no name bound to a handed-off future, and tables is
+            # deleted once handed off: either would hold the chunk's IPC buffers
+            # until released; the write keeps its own reference only until the
+            # write is done.
             while parsed:
-                writes.append(
-                    write_executor.submit(chunk_writer.write, parsed.pop().result())
-                )
+                tables, chunk_unknown = parsed.pop().result()
+                unknown.update(chunk_unknown)
+                writes.append(write_executor.submit(chunk_writer.write, tables))
+                del tables
         parse_executor.shutdown()
         write_executor.shutdown()
     except BaseException as exc:
@@ -472,7 +481,7 @@ def _parse_and_write(
         # caller closes it.
         write_executor.shutdown()
         raise
-    return put_blocked
+    return put_blocked, sorted(unknown)
 
 
 def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
@@ -484,8 +493,10 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
     parse_workers = config.parse_workers
     chunk_bytes = config.chunk_mb * 1024 * 1024
 
-    # Profiling requires verbose per-chunk output, so disable progress bar
-    use_progress = config.progress and not config.profile
+    # Profiling requires verbose per-chunk output, so disable progress bar. So
+    # does output that isn't a terminal (a pipe, a file, CI): a live display
+    # only shows there once it ends.
+    use_progress = config.progress and not config.profile and console.is_terminal
 
     # Stage 1: Decompress. The lease keeps other runs from deleting or
     # rewriting the XML while this run reads it.
@@ -521,7 +532,7 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
         # One boundary for the display and the executors: whatever fails, even
         # starting the parse workers, removes the bar and restores the terminal.
         with progress_bar or nullcontext():
-            put_blocked = _parse_and_write(
+            put_blocked, unknown = _parse_and_write(
                 worker_args,
                 chunk_writer,
                 parse_workers=parse_workers,
@@ -529,6 +540,9 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
                 progress_bar=progress_bar,
                 write_queue=config.write_queue,
             )
+        # Reported here, once per run: each worker only sees its own chunks.
+        for path in unknown:
+            status("Strict", f"unhandled XML element <{path}> in <{entity.root_tag}>")
 
         total = chunk_writer.total
         # Load time covers splitting and parse + write, but not writer setup.

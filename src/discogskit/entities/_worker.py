@@ -13,10 +13,9 @@ the end of each chunk. This is faster than appending to Arrow arrays incremental
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Callable
 from io import BytesIO
-from typing import TypeVar
+from typing import NamedTuple, TypeVar
 from xml.parsers import expat
 
 import pyarrow as pa
@@ -26,6 +25,16 @@ from pyarrow import ipc
 from discogskit.entities import ChunkArgs, Cols, ElementValueError, get
 
 _T = TypeVar("_T")
+
+
+class ChunkResult(NamedTuple):
+    """One parsed chunk."""
+
+    # Table name -> one serialized RecordBatch, in the entity's table order.
+    tables: dict[str, bytes]
+    # Sorted paths of the elements no parser handled, relative to the record (e.g. ``videos/video/foo``); only
+    # collected with ``--strict``.
+    unknown: list[str]
 
 
 class _ScanResult(Exception):
@@ -175,11 +184,12 @@ def _to_batch(
         ) from exc
 
 
-def extract_chunk_to_ipc(args: ChunkArgs) -> dict[str, bytes]:
+def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
     """Parse one chunk of ``<root_tag>`` records into one serialized RecordBatch per table.
 
     Reads the byte range from the decompressed XML, wraps it in the ``<name>`` container so it is a valid document,
-    and parses it with lxml iterparse.
+    and parses it with lxml iterparse. With ``args.strict``, also returns the paths of the elements no parser handled;
+    the main process reports them once per run, so workers print nothing.
     """
     entity = get(args.entity)
     with open(args.file_path, "rb") as f:
@@ -280,13 +290,10 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> dict[str, bytes]:
             f" (line numbers count from byte {args.start}): {detail}"
         ) from exc
 
-    if unknown:
-        for tag in sorted(unknown):
-            warnings.warn(
-                f"unhandled XML element <{tag}> in <{entity.root_tag}>", stacklevel=1
-            )
-
-    return {
-        name: _serialize_batch(_to_batch(args, cols[name], name, schema), schema)
-        for name, schema in entity.schemas.items()
-    }
+    return ChunkResult(
+        tables={
+            name: _serialize_batch(_to_batch(args, cols[name], name, schema), schema)
+            for name, schema in entity.schemas.items()
+        },
+        unknown=sorted(unknown) if unknown else [],
+    )

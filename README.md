@@ -57,6 +57,10 @@ files, or the same file given twice stops the run before any work, e.g. with `tw
 Before the first entity starts, the run also checks every entity's output: without `--overwrite`, existing output for
 any of them stops the run before anything is written.
 
+The progress bar shows only on a terminal. When output goes to a pipe, a file or CI, a run prints one line per chunk as
+it's written instead, as with `--no-progress`. With `--strict`, once an entity's records are parsed, the run prints a
+`Strict` line for each element path no parser handled, such as `unhandled XML element <videos/video/foo> in <master>`.
+
 Both commands decompress each `.xml.gz` to a `.xml` next to it, and delete the `.xml` after a successful run unless
 `--keep-xml` is set. A run that fails or is interrupted (including Ctrl+C) after decompression finished keeps the
 `.xml`, and the next run reuses it instead of decompressing again. One stopped during decompression leaves no `.xml`.

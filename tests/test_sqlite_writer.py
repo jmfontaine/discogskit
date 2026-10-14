@@ -42,7 +42,7 @@ def test_every_entity_loads(tmp_path, entity_name, xml, fk):
     f.write_text(xml)
     ipc_dict = extract_chunk_to_ipc(
         ChunkArgs(entity_name, str(f), 0, os.path.getsize(f))
-    )
+    ).tables
     expected = {
         name: table.num_rows
         for name, table in ipc_to_tables(ipc_dict, entity.schemas).items()
@@ -132,10 +132,10 @@ class TestSQLiteWriter:
 
         ipc1 = extract_chunk_to_ipc(
             ChunkArgs("artists", str(f1), 0, os.path.getsize(f1))
-        )
+        ).tables
         ipc2 = extract_chunk_to_ipc(
             ChunkArgs("artists", str(f2), 0, os.path.getsize(f2))
-        )
+        ).tables
 
         db_path = str(tmp_path / "test.db")
         writer = SQLiteWriter(db_path)
@@ -376,7 +376,7 @@ class TestSQLiteWriter:
         f.write_text(xml, encoding="utf-8")
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("artists", str(f), 0, os.path.getsize(f))
-        )
+        ).tables
         db_path = str(tmp_path / "test.db")
         self._load(db_path, entity, ipc_dict)
 

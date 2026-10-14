@@ -491,10 +491,13 @@ class TestPipelineRun:
         xml_path = artists_gz.with_suffix("")
         assert not xml_path.exists()
 
-    def test_end_to_end_with_progress(self, tmp_path, artists_gz):
+    def test_end_to_end_with_progress(self, monkeypatch, tmp_path, artists_gz):
         """Full pipeline with progress=True (Rich progress bar)."""
         from discogskit import pipeline
         from discogskit.writers.jsonl import JSONLWriter
+
+        # The progress bar shows only on a terminal.
+        monkeypatch.setattr(console, "_force_terminal", True)
 
         out_dir = tmp_path / "out"
         writer = JSONLWriter(str(out_dir))
@@ -820,6 +823,42 @@ class TestPipelineRun:
         assert writer.calls == 1
 
 
+class TestStrictReport:
+    def test_each_unhandled_element_reported_once_by_the_main_process(
+        self, capfd, tmp_path
+    ):
+        """With several workers each seeing the same unknown elements, each is reported once, not once per worker
+        (#105). capfd also captures the spawned workers' own output."""
+        from discogskit.writers.jsonl import JSONLWriter
+
+        n = _MANY_ARTISTS
+        gz_path = tmp_path / "artists.xml.gz"
+        with gzip.open(gz_path, "wb", compresslevel=1) as f:
+            f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
+            for i in range(1, n + 1):
+                rare = b"<rare_tag/>" if i % 10_000 == 0 else b""
+                f.write(
+                    b"<artist>\n  <id>%d</id>\n  <name>Artist %d</name>\n"
+                    b"  <new_tag/>%s\n</artist>\n" % (i, i, rare)
+                )
+            f.write(b"</artists>")
+        config = dataclasses.replace(_multi_chunk_config(gz_path), strict=True)
+        assert config.parse_workers >= 2
+
+        result = _run_and_close(config, JSONLWriter(str(tmp_path / "out")))
+
+        out, err = capfd.readouterr()
+        assert result.total_records == n
+        # Enough chunks that every worker parsed some.
+        assert out.count("  chunk ") > config.parse_workers
+        strict = [line.strip() for line in out.splitlines() if "Strict" in line]
+        assert strict == [
+            "Strict         unhandled XML element <new_tag> in <artist>",
+            "Strict         unhandled XML element <rare_tag> in <artist>",
+        ]
+        assert "unhandled" not in err
+
+
 class TestPipelineRunParseWorkers:
     """#92: parse-ahead memory is bounded, and a dead worker, Ctrl+C or a failed start ends the run cleanly."""
 
@@ -901,7 +940,9 @@ class TestPipelineRunParseWorkers:
             lock.close()
 
     @pytest.mark.parametrize("progress", [False, True], ids=["no-progress", "progress"])
-    def test_sigint_waits_for_the_in_flight_write(self, tmp_path, progress):
+    def test_sigint_waits_for_the_in_flight_write(
+        self, monkeypatch, tmp_path, progress
+    ):
         """Ctrl+C reaches the main thread mid-write: the write finishes, queued work is dropped, workers exit."""
 
         class InterruptingWriter(_StubWriter):
@@ -920,6 +961,8 @@ class TestPipelineRunParseWorkers:
                 self.active -= 1
                 return {}
 
+        # The progress bar shows only on a terminal.
+        monkeypatch.setattr(console, "_force_terminal", progress)
         gz_path = _many_artists_gz(tmp_path / "artists.xml.gz")
         config = dataclasses.replace(
             _multi_chunk_config(gz_path), keep_xml=False, progress=progress

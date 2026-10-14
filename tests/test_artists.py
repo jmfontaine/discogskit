@@ -17,7 +17,7 @@ class TestArtistsParsing:
         size = os.path.getsize(artists_xml_file)
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("artists", str(artists_xml_file), 0, size)
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         # 2 artists
@@ -35,7 +35,7 @@ class TestArtistsParsing:
         size = os.path.getsize(artists_xml_file)
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("artists", str(artists_xml_file), 0, size)
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         aliases = tables["artist_aliases"]
@@ -48,7 +48,7 @@ class TestArtistsParsing:
         size = os.path.getsize(artists_xml_file)
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("artists", str(artists_xml_file), 0, size)
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         groups = tables["artist_groups"]
@@ -60,7 +60,7 @@ class TestArtistsParsing:
         size = os.path.getsize(artists_xml_file)
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("artists", str(artists_xml_file), 0, size)
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         members = tables["artist_members"]
@@ -72,7 +72,7 @@ class TestArtistsParsing:
         size = os.path.getsize(artists_xml_file)
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("artists", str(artists_xml_file), 0, size)
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         for name, table in tables.items():
@@ -95,38 +95,16 @@ class TestArtistsParsing:
             extract_chunk_to_ipc(ChunkArgs("artists", str(f), 0, os.path.getsize(f)))
 
     @pytest.mark.filterwarnings("error")
-    def test_strict_no_warnings_on_known_xml(self, artists_xml_file):
-        """Strict mode produces no warnings when all XML elements are handled."""
+    def test_strict_reports_nothing_on_known_xml(self, artists_xml_file):
+        """Strict mode reports nothing when all XML elements are handled."""
         size = os.path.getsize(artists_xml_file)
-        ipc_dict = extract_chunk_to_ipc(
+        result = extract_chunk_to_ipc(
             ChunkArgs("artists", str(artists_xml_file), 0, size, strict=True)
         )
-        tables = ipc_to_tables(ipc_dict, SCHEMAS)
+        tables = ipc_to_tables(result.tables, SCHEMAS)
 
         assert tables["artists"].num_rows == 2
-
-    def test_strict_warns_on_unknown_element(self, tmp_path):
-        """Strict mode warns about unhandled XML elements."""
-
-        xml = (
-            "<artist>\n"
-            "  <id>1</id>\n"
-            "  <name>Test</name>\n"
-            "  <data_quality>Correct</data_quality>\n"
-            "  <brand_new_tag>surprise</brand_new_tag>\n"
-            "</artist>\n"
-        )
-        f = tmp_path / "unknown.xml"
-        f.write_text(xml)
-
-        with pytest.warns(UserWarning, match="unhandled") as record:
-            extract_chunk_to_ipc(
-                ChunkArgs("artists", str(f), 0, os.path.getsize(f), strict=True)
-            )
-
-        assert [str(w.message) for w in record] == [
-            "unhandled XML element <brand_new_tag> in <artist>"
-        ]
+        assert result.unknown == []
 
     def test_strict_ignores_comments_and_pis(self, tmp_path):
         """Comments and processing instructions inside a record aren't elements: strict mode reports only the unknown
@@ -145,21 +123,17 @@ class TestArtistsParsing:
         f = tmp_path / "comments.xml"
         f.write_text(xml)
 
-        with pytest.warns(UserWarning, match="unhandled") as record:
-            ipc_dict = extract_chunk_to_ipc(
-                ChunkArgs("artists", str(f), 0, os.path.getsize(f), strict=True)
-            )
-        tables = ipc_to_tables(ipc_dict, SCHEMAS)
+        result = extract_chunk_to_ipc(
+            ChunkArgs("artists", str(f), 0, os.path.getsize(f), strict=True)
+        )
+        tables = ipc_to_tables(result.tables, SCHEMAS)
 
-        assert [str(w.message) for w in record] == [
-            "unhandled XML element <brand_new_tag> in <artist>"
-        ]
+        assert result.unknown == ["brand_new_tag"]
         assert tables["artists"].column("name").to_pylist() == ["Test"]
 
     @pytest.mark.filterwarnings("error")
-    def test_no_warnings_without_strict(self, tmp_path):
-        """Without strict mode, unknown elements produce no warnings."""
-
+    def test_nothing_reported_without_strict(self, tmp_path):
+        """Without strict mode, unknown elements aren't collected."""
         xml = (
             "<artist>\n"
             "  <id>1</id>\n"
@@ -171,4 +145,8 @@ class TestArtistsParsing:
         f = tmp_path / "unknown.xml"
         f.write_text(xml)
 
-        extract_chunk_to_ipc(ChunkArgs("artists", str(f), 0, os.path.getsize(f)))
+        result = extract_chunk_to_ipc(
+            ChunkArgs("artists", str(f), 0, os.path.getsize(f))
+        )
+
+        assert result.unknown == []
