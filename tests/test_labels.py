@@ -16,7 +16,9 @@ class TestLabelsParsing:
     def test_extract_chunk(self, labels_xml_file):
         size = os.path.getsize(labels_xml_file)
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("labels", str(labels_xml_file), 0, size)
+            ChunkArgs(
+                end=size, entity="labels", file_path=str(labels_xml_file), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -36,7 +38,9 @@ class TestLabelsParsing:
     def test_sublabels(self, labels_xml_file):
         size = os.path.getsize(labels_xml_file)
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("labels", str(labels_xml_file), 0, size)
+            ChunkArgs(
+                end=size, entity="labels", file_path=str(labels_xml_file), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -49,7 +53,9 @@ class TestLabelsParsing:
     def test_schema_matches(self, labels_xml_file):
         size = os.path.getsize(labels_xml_file)
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("labels", str(labels_xml_file), 0, size)
+            ChunkArgs(
+                end=size, entity="labels", file_path=str(labels_xml_file), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -70,4 +76,8 @@ class TestLabelsParsing:
             ValueError,
             match=r"^Invalid <label> record in .* at chunk line 2 .*: missing or empty id$",
         ):
-            extract_chunk_to_ipc(ChunkArgs("labels", str(f), 0, os.path.getsize(f)))
+            extract_chunk_to_ipc(
+                ChunkArgs(
+                    end=os.path.getsize(f), entity="labels", file_path=str(f), start=0
+                )
+            )

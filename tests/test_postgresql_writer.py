@@ -463,7 +463,9 @@ class TestWriteGroupFailure:
         entity = get("artists")
         size = os.path.getsize(artists_xml_file)
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("artists", str(artists_xml_file), 0, size)
+            ChunkArgs(
+                end=size, entity="artists", file_path=str(artists_xml_file), start=0
+            )
         ).tables
         errors = []
         writer = PostgreSQLWriter(pg_dsn, overwrite=True, write_workers=2)

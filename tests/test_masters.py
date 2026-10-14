@@ -17,7 +17,9 @@ class TestMastersParsing:
     def test_extract_chunk(self, masters_xml_file):
         size = os.path.getsize(masters_xml_file)
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("masters", str(masters_xml_file), 0, size)
+            ChunkArgs(
+                end=size, entity="masters", file_path=str(masters_xml_file), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -33,7 +35,9 @@ class TestMastersParsing:
     def test_artists(self, masters_xml_file):
         size = os.path.getsize(masters_xml_file)
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("masters", str(masters_xml_file), 0, size)
+            ChunkArgs(
+                end=size, entity="masters", file_path=str(masters_xml_file), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -48,7 +52,9 @@ class TestMastersParsing:
     def test_genres(self, masters_xml_file):
         size = os.path.getsize(masters_xml_file)
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("masters", str(masters_xml_file), 0, size)
+            ChunkArgs(
+                end=size, entity="masters", file_path=str(masters_xml_file), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -58,7 +64,9 @@ class TestMastersParsing:
     def test_styles(self, masters_xml_file):
         size = os.path.getsize(masters_xml_file)
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("masters", str(masters_xml_file), 0, size)
+            ChunkArgs(
+                end=size, entity="masters", file_path=str(masters_xml_file), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -68,7 +76,9 @@ class TestMastersParsing:
     def test_videos(self, masters_xml_file):
         size = os.path.getsize(masters_xml_file)
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("masters", str(masters_xml_file), 0, size)
+            ChunkArgs(
+                end=size, entity="masters", file_path=str(masters_xml_file), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -83,7 +93,9 @@ class TestMastersParsing:
     def test_schema_matches(self, masters_xml_file):
         size = os.path.getsize(masters_xml_file)
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("masters", str(masters_xml_file), 0, size)
+            ChunkArgs(
+                end=size, entity="masters", file_path=str(masters_xml_file), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -104,7 +116,11 @@ class TestMastersParsing:
             ValueError,
             match=r"^Invalid <master> record in .* at chunk line 2 .*: missing or empty id$",
         ):
-            extract_chunk_to_ipc(ChunkArgs("masters", str(f), 0, os.path.getsize(f)))
+            extract_chunk_to_ipc(
+                ChunkArgs(
+                    end=os.path.getsize(f), entity="masters", file_path=str(f), start=0
+                )
+            )
 
     def test_non_matching_tags_skipped(self, tmp_path):
         """Non-<artist> siblings in <artists> and non-<video> in <videos> are skipped."""
@@ -128,7 +144,9 @@ class TestMastersParsing:
         f.write_text(xml)
 
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("masters", str(f), 0, os.path.getsize(f))
+            ChunkArgs(
+                end=os.path.getsize(f), entity="masters", file_path=str(f), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -146,7 +164,9 @@ class TestMasterVideoTypedValues:
             f'<master id="1"><videos><video src="http://x"{attrs}/></videos></master>\n'
         )
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("masters", str(f), 0, os.path.getsize(f))
+            ChunkArgs(
+                end=os.path.getsize(f), entity="masters", file_path=str(f), start=0
+            )
         ).tables
         return ipc_to_tables(ipc_dict, SCHEMAS)["master_videos"].to_pylist()[0]
 

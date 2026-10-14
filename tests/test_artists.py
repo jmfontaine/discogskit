@@ -16,7 +16,9 @@ class TestArtistsParsing:
     def test_extract_chunk(self, artists_xml_file):
         size = os.path.getsize(artists_xml_file)
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("artists", str(artists_xml_file), 0, size)
+            ChunkArgs(
+                end=size, entity="artists", file_path=str(artists_xml_file), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -34,7 +36,9 @@ class TestArtistsParsing:
     def test_aliases(self, artists_xml_file):
         size = os.path.getsize(artists_xml_file)
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("artists", str(artists_xml_file), 0, size)
+            ChunkArgs(
+                end=size, entity="artists", file_path=str(artists_xml_file), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -47,7 +51,9 @@ class TestArtistsParsing:
     def test_groups(self, artists_xml_file):
         size = os.path.getsize(artists_xml_file)
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("artists", str(artists_xml_file), 0, size)
+            ChunkArgs(
+                end=size, entity="artists", file_path=str(artists_xml_file), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -59,7 +65,9 @@ class TestArtistsParsing:
     def test_members(self, artists_xml_file):
         size = os.path.getsize(artists_xml_file)
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("artists", str(artists_xml_file), 0, size)
+            ChunkArgs(
+                end=size, entity="artists", file_path=str(artists_xml_file), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -71,7 +79,9 @@ class TestArtistsParsing:
     def test_schema_matches(self, artists_xml_file):
         size = os.path.getsize(artists_xml_file)
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("artists", str(artists_xml_file), 0, size)
+            ChunkArgs(
+                end=size, entity="artists", file_path=str(artists_xml_file), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -92,14 +102,24 @@ class TestArtistsParsing:
             ValueError,
             match=r"^Invalid <artist> record in .* at chunk line 2 .*: missing or empty id$",
         ):
-            extract_chunk_to_ipc(ChunkArgs("artists", str(f), 0, os.path.getsize(f)))
+            extract_chunk_to_ipc(
+                ChunkArgs(
+                    end=os.path.getsize(f), entity="artists", file_path=str(f), start=0
+                )
+            )
 
     @pytest.mark.filterwarnings("error")
     def test_strict_reports_nothing_on_known_xml(self, artists_xml_file):
         """Strict mode reports nothing when all XML elements are handled."""
         size = os.path.getsize(artists_xml_file)
         result = extract_chunk_to_ipc(
-            ChunkArgs("artists", str(artists_xml_file), 0, size, strict=True)
+            ChunkArgs(
+                end=size,
+                entity="artists",
+                file_path=str(artists_xml_file),
+                start=0,
+                strict=True,
+            )
         )
         tables = ipc_to_tables(result.tables, SCHEMAS)
 
@@ -124,7 +144,13 @@ class TestArtistsParsing:
         f.write_text(xml)
 
         result = extract_chunk_to_ipc(
-            ChunkArgs("artists", str(f), 0, os.path.getsize(f), strict=True)
+            ChunkArgs(
+                end=os.path.getsize(f),
+                entity="artists",
+                file_path=str(f),
+                start=0,
+                strict=True,
+            )
         )
         tables = ipc_to_tables(result.tables, SCHEMAS)
 
@@ -146,7 +172,9 @@ class TestArtistsParsing:
         f.write_text(xml)
 
         result = extract_chunk_to_ipc(
-            ChunkArgs("artists", str(f), 0, os.path.getsize(f))
+            ChunkArgs(
+                end=os.path.getsize(f), entity="artists", file_path=str(f), start=0
+            )
         )
 
         assert result.unknown == []

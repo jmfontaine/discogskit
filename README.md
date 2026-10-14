@@ -143,10 +143,6 @@ JSONL bzip2 1-9, Parquet gzip 1-9, Parquet zstd -131072 to 22. `snappy` and `non
 │ *    paths      <path>  One or more .xml.gz files or directories containing them [required]  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────╮
-│ --format             -f                    <jsonl|parquet>          Output format            │
-│                                                                     [default: parquet]       │
-│ --output                                   <path>                   Output directory         │
-│                                                                     [default: .]             │
 │ --compression                              <bzip2|gzip|none|snappy  Compression codec.       │
 │                                            |zstd>                   Parquet: gzip, snappy,   │
 │                                                                     zstd (default), none.    │
@@ -164,12 +160,16 @@ JSONL bzip2 1-9, Parquet gzip 1-9, Parquet zstd -131072 to 22. `snappy` and `non
 │                                                                     in #32); every other     │
 │                                                                     codec uses its own       │
 │                                                                     library default.         │
-│ --parse-workers                            <int range> [x>=1]       Number of parallel parse │
-│                                                                     workers                  │
-│                                                                     [default: 4]             │
+│ --format             -f                    <jsonl|parquet>          Output format            │
+│                                                                     [default: parquet]       │
+│ --output                                   <path>                   Output directory         │
+│                                                                     [default: .]             │
 │ --chunk-mb                                 <int range> [x>=1]       Split XML into chunks of │
 │                                                                     roughly this size (MB)   │
 │                                                                     [default: 256]           │
+│ --parse-workers                            <int range> [x>=1]       Number of parallel parse │
+│                                                                     workers                  │
+│                                                                     [default: 4]             │
 │ --write-queue                              <int range> [x>=1]       Chunks parsing may run   │
 │                                                                     ahead of writing: at     │
 │                                                                     most --parse-workers     │
@@ -289,11 +289,11 @@ absolute) or a plain path ending in `.db`, `.sqlite`, or `.sqlite3`. Other `sqli
 │                                                          [env var: DATABASE_URL]             │
 │                                                          [default:                           │
 │                                                          postgresql://localhost/discogskit]  │
-│ --parse-workers                      <int range> [x>=1]  Number of parallel parse workers    │
-│                                                          [default: 4]                        │
 │ --chunk-mb                           <int range> [x>=1]  Split XML into chunks of roughly    │
 │                                                          this size (MB)                      │
 │                                                          [default: 256]                      │
+│ --parse-workers                      <int range> [x>=1]  Number of parallel parse workers    │
+│                                                          [default: 4]                        │
 │ --write-queue                        <int range> [x>=1]  Chunks parsing may run ahead of     │
 │                                                          writing: at most --parse-workers    │
 │                                                          plus this many chunks are parsing   │
@@ -320,24 +320,24 @@ absolute) or a plain path ending in `.db`, `.sqlite`, or `.sqlite3`. Other `sqli
 │ --help                                                   Show this message and exit.         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ PostgreSQL ─────────────────────────────────────────────────────────────────────────────────╮
+│ --pg-create-schema    --no-pg-create-schema                        Create --pg-schema if it  │
+│                                                                    doesn't exist             │
+│                                                                    [default:                 │
+│                                                                    no-pg-create-schema]      │
+│ --pg-index-workers                             <int range> [x>=1]  Number of parallel index  │
+│                                                                    creation workers          │
+│                                                                    [default: 2]              │
+│ --pg-schema                                    <str>               Schema to create tables   │
+│                                                                    in (must exist unless     │
+│                                                                    --pg-create-schema)       │
 │ --pg-unlogged         --no-pg-unlogged                             Skip WAL for faster       │
 │                                                                    writes (tables stay       │
 │                                                                    unlogged; data lost on    │
 │                                                                    crash)                    │
 │                                                                    [default: no-pg-unlogged] │
-│ --pg-create-schema    --no-pg-create-schema                        Create --pg-schema if it  │
-│                                                                    doesn't exist             │
-│                                                                    [default:                 │
-│                                                                    no-pg-create-schema]      │
-│ --pg-schema                                    <str>               Schema to create tables   │
-│                                                                    in (must exist unless     │
-│                                                                    --pg-create-schema)       │
 │ --pg-write-workers                             <int range> [x>=1]  Number of parallel        │
 │                                                                    database write workers    │
 │                                                                    [default: 1]              │
-│ --pg-index-workers                             <int range> [x>=1]  Number of parallel index  │
-│                                                                    creation workers          │
-│                                                                    [default: 2]              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
 ```

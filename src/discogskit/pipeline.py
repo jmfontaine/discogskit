@@ -512,7 +512,13 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
         splits = entity.find_split_points(str(xml_path), chunk_bytes)
         t_split = time.perf_counter() - t_split_start
         worker_args = [
-            ChunkArgs(entity.name, str(xml_path), s, e, config.strict)
+            ChunkArgs(
+                end=e,
+                entity=entity.name,
+                file_path=str(xml_path),
+                start=s,
+                strict=config.strict,
+            )
             for s, e in splits
         ]
         n_chunks = len(splits)

@@ -210,7 +210,9 @@ class TestRecordErrorOutput:
         xml = str(gz.with_suffix(""))
         [(start, end)] = get("artists").find_split_points(xml, 1 << 20)
         with pytest.raises(ValueError) as info:
-            extract_chunk_to_ipc(ChunkArgs("artists", xml, start, end))
+            extract_chunk_to_ipc(
+                ChunkArgs(end=end, entity="artists", file_path=xml, start=start)
+            )
         message = str(info.value)
         assert message.startswith(
             f"Invalid <artist> record in {xml} at chunk line 4 (chunk bytes {start}-{end}, id='[b]'): "

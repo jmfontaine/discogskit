@@ -316,14 +316,6 @@ def convert(
         typer.Argument(help="One or more .xml.gz files or directories containing them"),
     ],
     # Output
-    output_format: Annotated[
-        OutputFormat,
-        typer.Option("-f", "--format", case_sensitive=False, help="Output format"),
-    ] = OutputFormat.PARQUET,
-    output: Annotated[
-        Path,
-        typer.Option(help="Output directory"),
-    ] = Path("."),
     compression: Annotated[
         Compression | None,
         typer.Option(
@@ -340,15 +332,23 @@ def convert(
             )
         ),
     ] = None,
+    output_format: Annotated[
+        OutputFormat,
+        typer.Option("-f", "--format", case_sensitive=False, help="Output format"),
+    ] = OutputFormat.PARQUET,
+    output: Annotated[
+        Path,
+        typer.Option(help="Output directory"),
+    ] = Path("."),
     # Performance tuning
-    parse_workers: Annotated[
-        int,
-        typer.Option(help="Number of parallel parse workers", min=1),
-    ] = max(1, CPUS // 2),
     chunk_mb: Annotated[
         int,
         typer.Option(help="Split XML into chunks of roughly this size (MB)", min=1),
     ] = 256,
+    parse_workers: Annotated[
+        int,
+        typer.Option(help="Number of parallel parse workers", min=1),
+    ] = max(1, CPUS // 2),
     write_queue: Annotated[
         int,
         typer.Option(
@@ -449,14 +449,14 @@ def load(
         ),
     ] = "postgresql://localhost/discogskit",
     # Performance tuning
-    parse_workers: Annotated[
-        int,
-        typer.Option(help="Number of parallel parse workers", min=1),
-    ] = max(1, CPUS // 2),
     chunk_mb: Annotated[
         int,
         typer.Option(help="Split XML into chunks of roughly this size (MB)", min=1),
     ] = 256,
+    parse_workers: Annotated[
+        int,
+        typer.Option(help="Number of parallel parse workers", min=1),
+    ] = max(1, CPUS // 2),
     write_queue: Annotated[
         int,
         typer.Option(
@@ -490,13 +490,6 @@ def load(
         typer.Option(help="Warn about unhandled XML elements during parsing"),
     ] = False,
     # PostgreSQL options
-    pg_unlogged: Annotated[
-        bool,
-        typer.Option(
-            help="Skip WAL for faster writes (tables stay unlogged; data lost on crash)",
-            rich_help_panel="PostgreSQL",
-        ),
-    ] = False,
     pg_create_schema: Annotated[
         bool,
         typer.Option(
@@ -504,21 +497,6 @@ def load(
             rich_help_panel="PostgreSQL",
         ),
     ] = False,
-    pg_schema: Annotated[
-        str | None,
-        typer.Option(
-            help="Schema to create tables in (must exist unless --pg-create-schema)",
-            rich_help_panel="PostgreSQL",
-        ),
-    ] = None,
-    pg_write_workers: Annotated[
-        int,
-        typer.Option(
-            help="Number of parallel database write workers",
-            min=1,
-            rich_help_panel="PostgreSQL",
-        ),
-    ] = 1,
     pg_index_workers: Annotated[
         int,
         typer.Option(
@@ -527,6 +505,28 @@ def load(
             rich_help_panel="PostgreSQL",
         ),
     ] = 2,
+    pg_schema: Annotated[
+        str | None,
+        typer.Option(
+            help="Schema to create tables in (must exist unless --pg-create-schema)",
+            rich_help_panel="PostgreSQL",
+        ),
+    ] = None,
+    pg_unlogged: Annotated[
+        bool,
+        typer.Option(
+            help="Skip WAL for faster writes (tables stay unlogged; data lost on crash)",
+            rich_help_panel="PostgreSQL",
+        ),
+    ] = False,
+    pg_write_workers: Annotated[
+        int,
+        typer.Option(
+            help="Number of parallel database write workers",
+            min=1,
+            rich_help_panel="PostgreSQL",
+        ),
+    ] = 1,
 ) -> None:
     """Load Discogs XML dumps into a database."""
     jobs = _resolve_jobs(paths)
