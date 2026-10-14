@@ -15,7 +15,7 @@ from rich.text import Text
 from discogskit import _skills, pipeline
 from discogskit._console import current, error, print_text, status
 from discogskit.entities import ENTITIES, detect_entity
-from discogskit.writers import Writer, get_writer
+from discogskit.writers import Writer, get_file_writer, get_writer
 
 
 class OutputFormat(str, Enum):
@@ -33,64 +33,6 @@ class Compression(str, Enum):
     NONE = "none"
     SNAPPY = "snappy"
     ZSTD = "zstd"
-
-
-_COMPRESSIONS_BY_FORMAT: dict[OutputFormat, frozenset[Compression]] = {
-    OutputFormat.JSONL: frozenset(
-        {Compression.BZIP2, Compression.GZIP, Compression.NONE}
-    ),
-    OutputFormat.PARQUET: frozenset(
-        {Compression.GZIP, Compression.NONE, Compression.SNAPPY, Compression.ZSTD}
-    ),
-}
-
-# (min, max) --compression-level Python's own gzip/bz2 modules accept for JSONL output.
-_JSONL_LEVEL_RANGES: dict[Compression, tuple[int, int]] = {
-    Compression.BZIP2: (1, 9),
-    Compression.GZIP: (0, 9),
-}
-
-
-def _parquet_level_range(compression: Compression) -> tuple[int, int] | None:
-    """(min, max) --compression-level pyarrow's Codec accepts for this codec, or None if it has none.
-
-    Asks pyarrow directly rather than hard-coding ranges, since they're codec- (and pyarrow-version-)
-    specific: gzip and bz2 differ from Python's stdlib modules, and zstd's range is nothing like 0-9.
-    """
-    if compression is Compression.NONE:
-        return None
-    import pyarrow as pa
-
-    codec = compression.value
-    if not pa.Codec.supports_compression_level(codec):
-        return None
-    return (
-        pa.Codec.minimum_compression_level(codec),
-        pa.Codec.maximum_compression_level(codec),
-    )
-
-
-def _validate_compression_level(
-    output_format: OutputFormat, compression: Compression, level: int | None
-) -> None:
-    """Reject a --compression-level the codec can't use, before any conversion work starts."""
-    if level is None:
-        return
-    level_range = (
-        _JSONL_LEVEL_RANGES.get(compression)
-        if output_format is OutputFormat.JSONL
-        else _parquet_level_range(compression)
-    )
-    if level_range is None:
-        error(f"{compression.value} does not support --compression-level.")
-        raise typer.Exit(1)
-    lo, hi = level_range
-    if not lo <= level <= hi:
-        error(
-            f"--compression-level {level} is out of range for "
-            f"{compression.value} ({lo} to {hi})."
-        )
-        raise typer.Exit(1)
 
 
 CPUS = os.cpu_count() or 1
@@ -382,46 +324,20 @@ def convert(
     ] = False,
 ) -> None:
     """Convert Discogs XML dumps into flat files (Parquet or JSONL)."""
-    from discogskit.writers.jsonl import JSONLWriter
-    from discogskit.writers.parquet import ParquetWriter
-
     jobs = _resolve_jobs(paths)
 
-    if compression is None:
-        compression = (
-            Compression.ZSTD
-            if output_format is OutputFormat.PARQUET
-            else Compression.NONE
-        )
-
-    valid_compressions = _COMPRESSIONS_BY_FORMAT[output_format]
-    if compression not in valid_compressions:
-        valid = ", ".join(
-            sorted(c.value for c in valid_compressions if c is not Compression.NONE)
-            + [Compression.NONE.value]
-        )
-        error(
-            f"unsupported compression '{compression.value}' for "
-            f"{output_format.value}. Valid: {valid}."
-        )
-        raise typer.Exit(1)
-
-    _validate_compression_level(output_format, compression, compression_level)
-
-    if output_format is OutputFormat.PARQUET:
-        writer = ParquetWriter(
-            str(output),
-            compression=compression.value,
+    try:
+        writer = get_file_writer(
+            output,
+            output_format.value,
+            compression=None if compression is None else compression.value,
             compression_level=compression_level,
             overwrite=overwrite,
         )
-    else:
-        writer = JSONLWriter(
-            str(output),
-            compression=compression.value,
-            compression_level=compression_level,
-            overwrite=overwrite,
-        )
+    # An unsupported codec or level for the format, rejected before any file exists.
+    except ValueError as exc:
+        error(str(exc))
+        raise typer.Exit(1) from None
 
     _run_jobs(
         jobs,

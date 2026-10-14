@@ -1,4 +1,4 @@
-"""Writer protocol and the factory for database writers."""
+"""Writer protocol and the factories for database and file writers."""
 
 from __future__ import annotations
 
@@ -6,11 +6,13 @@ import re
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
+    import os
+
     import pyarrow as pa
 
     from discogskit.entities import EntityDef
 
-__all__ = ["OutputExistsError", "Writer", "get_writer"]
+__all__ = ["OutputExistsError", "Writer", "get_file_writer", "get_writer"]
 
 # Table name -> seconds spent flushing it. "_commit" holds any shared commit cost.
 TableTimings = dict[str, float]
@@ -60,6 +62,44 @@ class Writer(Protocol):
         ...
 
 
+def get_file_writer(
+    output_dir: str | os.PathLike[str],
+    output_format: str,
+    *,
+    compression: str | None = None,
+    compression_level: int | None = None,
+    overwrite: bool = False,
+) -> Writer:
+    """Construct a file writer for ``output_format`` (``"jsonl"`` or ``"parquet"``) that writes under ``output_dir``.
+
+    ``compression`` defaults to the format's own: ``"zstd"`` for Parquet (also ``"gzip"``, ``"snappy"``, ``"none"``),
+    ``"none"`` for JSONL (also ``"bzip2"``, ``"gzip"``). ``compression_level`` defaults to the codec's library
+    default, except JSONL gzip, which uses 6. Raises ``ValueError``, before any file exists, for an unknown format, a
+    codec the format can't use, or a level the codec doesn't accept.
+    """
+    if output_format == "jsonl":
+        from discogskit.writers.jsonl import JSONLWriter
+
+        return JSONLWriter(
+            output_dir,
+            compression=compression,
+            compression_level=compression_level,
+            overwrite=overwrite,
+        )
+    if output_format == "parquet":
+        from discogskit.writers.parquet import ParquetWriter
+
+        return ParquetWriter(
+            output_dir,
+            compression=compression,
+            compression_level=compression_level,
+            overwrite=overwrite,
+        )
+    raise ValueError(
+        f"unsupported output format {output_format!r}. Valid: jsonl, parquet."
+    )
+
+
 # Writer kwargs that only PostgreSQLWriter understands, mapped to the CLI flag that sets them and the
 # default get_writer shares with the CLI's own Typer defaults. A SQLite DSN rejects these, but only when
 # the caller passed a value other than that default — so CLI defaults the user never touched never
@@ -84,10 +124,9 @@ def get_writer(
     unlogged: bool = False,
     write_workers: int = 1,
 ) -> Writer:
-    """Auto-detect and construct a writer from a DSN string.
+    """Auto-detect and construct a database writer (PostgreSQL or SQLite) from a DSN string.
 
-    Only database targets (PostgreSQL, SQLite) are supported via this factory.
-    File-format writers (Parquet, JSONL) should be constructed directly.
+    For Parquet or JSONL output, use ``get_file_writer``.
     """
     if dsn.startswith(("postgresql://", "postgres://")):
         from discogskit.writers.postgresql import PostgreSQLWriter
