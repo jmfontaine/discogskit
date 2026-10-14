@@ -85,6 +85,14 @@ def generate_ddl(
     return f"CREATE TABLE {_quote(table_name)} (\n{cols}\n)"
 
 
+def _index_ddl(table_name: str, column: str) -> str:
+    """CREATE INDEX on a child table's link column, run after the bulk load."""
+    return (
+        f"CREATE INDEX {_quote(f'{table_name}_{column}_idx')}"
+        f" ON {_quote(table_name)}({_quote(column)})"
+    )
+
+
 # ------------------------------------------------------------------------------------------------------------------------
 # SQLiteWriter
 # ------------------------------------------------------------------------------------------------------------------------
@@ -225,10 +233,7 @@ class SQLiteWriter:
             t0 = time.perf_counter()
             cur = self._conn.cursor()
             for t in entity.table_order[1:]:
-                cur.execute(
-                    f"CREATE INDEX {_quote(f'{t}_{fk_col}_idx')}"
-                    f" ON {_quote(t)}({_quote(fk_col)})"
-                )
+                cur.execute(_index_ddl(t, fk_col))
             self._conn.commit()
             n_idx = len(entity.table_order) - 1
             status("Index", f"{n_idx} indexes", f"[{time.perf_counter() - t0:.2f}s]")

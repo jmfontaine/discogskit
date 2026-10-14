@@ -82,6 +82,30 @@ def generate_ddl(
     )
 
 
+def _primary_key_ddl(table_name: str) -> sql.Composed:
+    """ALTER TABLE adding the root table's primary key on ``id``, run after the bulk load."""
+    return sql.SQL("ALTER TABLE {} ADD PRIMARY KEY ({})").format(
+        sql.Identifier(table_name), sql.Identifier("id")
+    )
+
+
+def _index_ddl(table_name: str, column: str) -> sql.Composed:
+    """CREATE INDEX on a child table's link column, run after the bulk load."""
+    return sql.SQL("CREATE INDEX ON {} ({})").format(
+        sql.Identifier(table_name), sql.Identifier(column)
+    )
+
+
+def _foreign_key_ddl(table_name: str, column: str, ref_table: str) -> sql.Composed:
+    """ALTER TABLE adding a child table's foreign key to its root table's ``id``, run after the indexes."""
+    return sql.SQL("ALTER TABLE {} ADD FOREIGN KEY ({}) REFERENCES {}({})").format(
+        sql.Identifier(table_name),
+        sql.Identifier(column),
+        sql.Identifier(ref_table),
+        sql.Identifier("id"),
+    )
+
+
 # ------------------------------------------------------------------------------------------------------------------------
 # Table group splitting (for multi-writer parallelism)
 #
@@ -162,11 +186,7 @@ def _create_indexes(dsn: str, tables: list[str], column: str, workers: int) -> N
                 if aborted:
                     return
                 running.add(conn)
-            conn.execute(
-                sql.SQL("CREATE INDEX ON {} ({})").format(
-                    sql.Identifier(table), sql.Identifier(column)
-                )
-            )
+            conn.execute(_index_ddl(table, column))
         finally:
             # Under the lock, so the connection is never cancelled once closed.
             with lock:
@@ -538,22 +558,14 @@ class PostgreSQLWriter:
         root = table_order[0]
 
         t0 = time.perf_counter()
-        self._conn.execute(
-            sql.SQL("ALTER TABLE {} ADD PRIMARY KEY ({})").format(
-                sql.Identifier(root), sql.Identifier("id")
-            )
-        )
+        self._conn.execute(_primary_key_ddl(root))
         status("Index", f"primary key on {root}", f"[{time.perf_counter() - t0:.2f}s]")
 
         if fk_col and len(table_order) > 1:
             t1 = time.perf_counter()
             if self._index_workers <= 1:
                 for t in table_order[1:]:
-                    self._conn.execute(
-                        sql.SQL("CREATE INDEX ON {} ({})").format(
-                            sql.Identifier(t), sql.Identifier(fk_col)
-                        )
-                    )
+                    self._conn.execute(_index_ddl(t, fk_col))
             else:
                 _create_indexes(self._dsn, table_order[1:], fk_col, self._index_workers)
 
@@ -570,16 +582,7 @@ class PostgreSQLWriter:
         if self._fk and fk_col and len(table_order) > 1:
             t2 = time.perf_counter()
             for t in table_order[1:]:
-                self._conn.execute(
-                    sql.SQL(
-                        "ALTER TABLE {} ADD FOREIGN KEY ({}) REFERENCES {}({})"
-                    ).format(
-                        sql.Identifier(t),
-                        sql.Identifier(fk_col),
-                        sql.Identifier(root),
-                        sql.Identifier("id"),
-                    )
-                )
+                self._conn.execute(_foreign_key_ddl(t, fk_col, root))
             status(
                 "Constrain",
                 f"{len(table_order) - 1} foreign keys",

@@ -12,7 +12,7 @@ import typer
 from rich.table import Table
 from rich.text import Text
 
-from discogskit import pipeline
+from discogskit import _skills, pipeline
 from discogskit._console import console, error, print_text, status
 from discogskit.entities import detect_entity
 from discogskit.entities import get as get_entity
@@ -343,7 +343,11 @@ def convert(
     # Performance tuning
     parse_workers: Annotated[
         int,
-        typer.Option(help="Number of parallel parse workers", min=1),
+        typer.Option(
+            help="Number of parallel parse workers",
+            min=1,
+            show_default="half the CPU count, at least 1",
+        ),
     ] = max(1, CPUS // 2),
     chunk_mb: Annotated[
         int,
@@ -451,7 +455,11 @@ def load(
     # Performance tuning
     parse_workers: Annotated[
         int,
-        typer.Option(help="Number of parallel parse workers", min=1),
+        typer.Option(
+            help="Number of parallel parse workers",
+            min=1,
+            show_default="half the CPU count, at least 1",
+        ),
     ] = max(1, CPUS // 2),
     chunk_mb: Annotated[
         int,
@@ -562,3 +570,6 @@ def load(
         verb="loaded",
         write_queue=write_queue,
     )
+
+
+app.add_typer(_skills.app, name="skills")
