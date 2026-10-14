@@ -17,6 +17,10 @@ from discogskit.decompress import DecompressError, ensure_xml
 
 _XML = b"<?xml version='1.0'?>\n<root>hello</root>"
 
+# A complete gzip member header whose extra field is eight zero bytes: cut
+# here, the file ends like an empty member's all-zero footer.
+_HEADER_ZERO_EXTRA = bytes.fromhex("1f8b0804000000000000") + b"\x08\x00" + bytes(8)
+
 
 def _write_gz(path):
     with gzip.open(path, "wb") as f:
@@ -217,8 +221,14 @@ class TestPartialFile:
             lambda gz: gz[:10],
             lambda gz: gz + gz[:-20],
             lambda gz: gz + gz[:10],
+            lambda gz: gz + _HEADER_ZERO_EXTRA,
         ],
-        ids=["header_only", "second_member_cut", "second_member_header_only"],
+        ids=[
+            "header_only",
+            "second_member_cut",
+            "second_member_header_only",
+            "second_member_header_ending_in_zeros",
+        ],
     )
     def test_truncation_rapidgzip_misses_raises_decompress_error(self, tmp_path, cut):
         """rapidgzip reads these as a clean end of data (with ISA-L: its Linux
@@ -236,15 +246,19 @@ class TestPartialFile:
         assert not xml_path.exists()
         assert not (tmp_path / "test.xml.partial").exists()
 
+    @pytest.mark.parametrize(
+        "tail",
+        [gzip.compress(_XML)[:10], _HEADER_ZERO_EXTRA],
+        ids=["header", "header_ending_in_zeros"],
+    )
     def test_unfinished_last_member_raises_decompress_error(
-        self, monkeypatch, tmp_path
+        self, monkeypatch, tmp_path, tail
     ):
         """Like rapidgzip with ISA-L on a .gz cut right after a later member's
         header: the first member's output, every byte reported as consumed.
         """
-        member = gzip.compress(_XML)
         gz_path = tmp_path / "test.xml.gz"
-        gz_path.write_bytes(member + member[:10])
+        gz_path.write_bytes(gzip.compress(_XML) + tail)
         xml_path = tmp_path / "test.xml"
         monkeypatch.setattr(
             decompress.rapidgzip,
@@ -377,12 +391,17 @@ class TestDecompress:
 
         assert xml_path.read_bytes() == b"already here"
 
-    def test_multi_member_gz_decompressed(self, tmp_path):
-        """The footer check finds the last member's start inside the output."""
+    @pytest.mark.parametrize(
+        "last", [_XML, b""], ids=["non_empty_last_member", "empty_last_member"]
+    )
+    def test_multi_member_gz_decompressed(self, tmp_path, last):
+        """The footer check finds the last member's start inside the output,
+        and accepts a real empty last member (an all-zero footer).
+        """
         gz_path = tmp_path / "test.xml.gz"
-        gz_path.write_bytes(gzip.compress(_XML * 1000) + gzip.compress(_XML))
+        gz_path.write_bytes(gzip.compress(_XML * 1000) + gzip.compress(last))
         xml_path = tmp_path / "test.xml"
 
         ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
 
-        assert xml_path.read_bytes() == _XML * 1001
+        assert xml_path.read_bytes() == _XML * 1000 + last
