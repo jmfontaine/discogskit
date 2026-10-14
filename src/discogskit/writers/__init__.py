@@ -19,6 +19,13 @@ class OutputExistsError(Exception):
 
 
 class Writer(Protocol):
+    def check(self, entity: EntityDef) -> None:
+        """Raise ``OutputExistsError`` if ``entity``'s output already exists and overwrite is off.
+
+        Changes nothing, so a caller can check every entity before writing any. ``setup()`` checks again.
+        """
+        ...
+
     def setup(self, entity: EntityDef) -> None:
         """Prepare destination (create tables / create output dir)."""
         ...

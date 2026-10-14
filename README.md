@@ -52,6 +52,11 @@ uvx discogskit
 
 ```
 
+Each run takes at most one dump per entity. A directory holding two months of one entity, a directory plus one of its
+files, or the same file given twice stops the run before any work, e.g. with `two inputs for artists: <a> and <b>`.
+Before the first entity starts, the run also checks every entity's output: without `--overwrite`, existing output for
+any of them stops the run before anything is written.
+
 Both commands decompress each `.xml.gz` to a `.xml` next to it, and delete the `.xml` after a successful run unless
 `--keep-xml` is set. A run that fails or is interrupted (including Ctrl+C) after decompression finished keeps the
 `.xml`, and the next run reuses it instead of decompressing again. One stopped during decompression leaves no `.xml`.

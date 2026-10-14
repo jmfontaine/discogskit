@@ -356,6 +356,41 @@ class PostgreSQLWriter:
         self._groups: list[list[str]] = []
         self._schemas: dict[str, pa.Schema] = {}
 
+    def _current_schema(self) -> str:
+        """The schema unqualified CREATE TABLE lands in. Raises ValueError if search_path names no existing one."""
+        row = self._conn.execute("SELECT current_schema()").fetchone()
+        schema = row[0] if row else None
+        if schema is None:
+            raise ValueError(
+                "No schema to create tables in: search_path names no existing schema"
+            )
+        return schema
+
+    def check(self, entity: EntityDef) -> None:
+        """Raise ``OutputExistsError`` if any of ``entity``'s tables exists in the current schema and overwrite is
+        off."""
+        from discogskit.writers import OutputExistsError
+
+        if self._overwrite:
+            return
+        # Only the current schema counts: a same-named table elsewhere on search_path is never ours.
+        schema = self._current_schema()
+        existing = {
+            row[0]
+            for row in self._conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = %s AND table_type = 'BASE TABLE'",
+                (schema,),
+            )
+        }
+        conflict = existing & set(entity.table_order)
+        if conflict:
+            example = min(conflict)
+            raise OutputExistsError(
+                f"Tables already exist in schema {schema} "
+                f"(e.g. {example}). Use --overwrite to replace them."
+            )
+
     def setup(self, entity: EntityDef) -> None:
         """Open the ADBC write connections, then drop/create tables in the current schema."""
         import adbc_driver_postgresql.dbapi as adbc_pg
@@ -366,29 +401,10 @@ class PostgreSQLWriter:
         # Unqualified CREATE TABLE lands in current_schema(); every check and drop
         # names it explicitly, so a same-named table elsewhere on search_path is
         # never mistaken for ours.
-        row = self._conn.execute("SELECT current_schema()").fetchone()
-        schema = row[0] if row else None
-        if schema is None:
-            raise ValueError(
-                "No schema to create tables in: search_path names no existing schema"
-            )
-
-        if not self._overwrite:
-            existing = {
-                row[0]
-                for row in self._conn.execute(
-                    "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema = %s AND table_type = 'BASE TABLE'",
-                    (schema,),
-                )
-            }
-            conflict = existing & set(entity.table_order)
-            if conflict:
-                example = min(conflict)
-                raise OutputExistsError(
-                    f"Tables already exist in schema {schema} "
-                    f"(e.g. {example}). Use --overwrite to replace them."
-                )
+        schema = self._current_schema()
+        # Checked again here, before any destructive operation: tables can appear
+        # after the caller's own check().
+        self.check(entity)
 
         # Open the write connections before touching any table, so a connection
         # that can't open (driver, max_connections) leaves the old tables in place.
