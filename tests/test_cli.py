@@ -261,11 +261,12 @@ class TestRecordErrorOutput:
                 "1",
             ],
         )
-        output = click.unstyle(result.output)
+        output = _unstyle(result.output)
         assert result.exit_code == 1, output
         assert re.search(
-            rf"Error: Invalid <{entity[:-1]}> record in .* at chunk line 2 .*: missing or empty id\n",
+            rf"^Error: Invalid <{entity[:-1]}> record in .* at chunk line 2 .*: missing or empty id$",
             output,
+            re.MULTILINE,
         ), output
 
 
