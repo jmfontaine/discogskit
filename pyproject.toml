@@ -72,13 +72,20 @@ ini_options.filterwarnings = [
 run.source = [ "discogskit" ]
 
 [tool.deadcode]
+exclude = [ "benchmarks/alternatives" ]  # competitor checkouts from `just bench-setup`
 ignore_names = [
+  "DefaultHandler",      # expat parser callback
   "EndElementHandler",   # expat parser callback
   "StartElementHandler", # expat parser callback
+  "XmlDeclHandler",      # expat parser callback
   "_callback",           # Typer app.callback()
-  "_version_callback",   # Typer Option callback
   "convert",             # Typer app.command()
+  "fetch_command",       # Typer app.command()
+  "handle_starttag",     # HTMLParser override
   "load",                # Typer app.command()
-  "render",              # Rich ProgressColumn override
+  "main",                # Typer app.command()
+  "ordered_attributes",  # expat parser setting
+  "readable",            # RawIOBase override
+  "resolve_command",     # Typer app.command()
   "return_value",        # mock attribute setup
 ]

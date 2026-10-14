@@ -24,9 +24,12 @@ from rich.table import Table
 console = Console()
 
 SCRIPT_DIR = Path(__file__).parent
-REPO_DIR = SCRIPT_DIR.parent
+# The venv's entry point directly, not `uv run`, which would add its own startup to every timed run.
+DISCOGSKIT = str(Path(sys.executable).parent / "discogskit")
 ALTERNATIVES_DIR = SCRIPT_DIR / "alternatives"
 DEFAULT_RESULTS_DIR = SCRIPT_DIR / "results"
+# Lines of a failed run's output (stdout and stderr) to print.
+_OUTPUT_TAIL_LINES = 40
 
 
 # ---------------------------------------------------------------------------
@@ -71,8 +74,8 @@ def _parse_gtime_output(text: str) -> dict[str, Any]:
             stats["user_time_seconds"] = float(line.rsplit(": ", 1)[1].strip())
         elif "System time" in line:
             stats["system_time_seconds"] = float(line.rsplit(": ", 1)[1].strip())
-        elif "Exit status" in line:
-            stats["exit_code"] = int(line.rsplit(": ", 1)[1].strip())
+        elif line.startswith("Command terminated by signal"):
+            stats["signal"] = int(line.rsplit(" ", 1)[1])
     return stats
 
 
@@ -162,25 +165,19 @@ class ToolDef:
     name: str
     build_cmd: Any  # Callable[[Path, Path], list[str]]
     default_runs: int = 1
-    setup: Any = None  # Callable[[], None] | None
-    teardown: Any = None  # Callable[[], None] | None
     version_cmd: list[str] | None = None
 
 
 def _discogskit_cmd(input_path: Path, output_dir: Path) -> list[str]:
     return [
-        "uv",
-        "run",
-        "--directory",
-        str(REPO_DIR),
-        "discogskit",
+        DISCOGSKIT,
         "convert",
-        str(input_path),
-        "-f",
+        "--format",
         "jsonl",
-        "-o",
-        str(output_dir),
         "--no-progress",
+        "--output",
+        str(output_dir),
+        str(input_path),
     ]
 
 
@@ -201,14 +198,7 @@ TOOLS: dict[str, ToolDef] = {
         build_cmd=_discogskit_cmd,
         default_runs=3,
         name="discogskit",
-        version_cmd=[
-            "uv",
-            "run",
-            "--directory",
-            str(REPO_DIR),
-            "discogskit",
-            "--version",
-        ],
+        version_cmd=[DISCOGSKIT, "--version"],
     ),
     "xml2db-python": ToolDef(
         build_cmd=_xml2db_python_cmd,
@@ -234,16 +224,6 @@ class RunResult:
     system_time_seconds: float
     max_rss_mb: float
     exit_code: int
-
-
-@dataclass
-class Stats:
-    """Aggregate statistics over multiple runs."""
-
-    median: float
-    stddev: float | None
-    min: float
-    max: float
 
 
 @dataclass
@@ -316,7 +296,15 @@ def _run_once(
     full_cmd = time_cmd + ["-v", "-o", str(time_output_path)] + cmd
 
     try:
-        result = subprocess.run(full_cmd, capture_output=True, check=False, text=True)
+        # stderr goes to the same pipe: discogskit prints its errors on stdout.
+        result = subprocess.run(
+            full_cmd,
+            check=False,
+            errors="replace",
+            stderr=subprocess.STDOUT,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
     except FileNotFoundError:
         if sys.platform == "darwin":
             console.print(
@@ -342,16 +330,22 @@ def _run_once(
 
     stats = _parse_gtime_output(gtime_output)
 
-    # If the tool itself failed, note it but still record the timing
+    # GNU time exits with the command's status, or 128 + N when signal N killed it. Its own "Exit status" line reads 0
+    # for a killed command, so it can't tell whether a run succeeded.
     if result.returncode != 0:
-        console.print(
-            f"  [yellow]Warning:[/] {tool.name} run {run_number} "
-            f"exited with code {result.returncode}"
+        reason = (
+            f"was killed by signal {stats['signal']}"
+            if "signal" in stats
+            else f"exited with code {result.returncode}"
         )
+        console.print(f"  [yellow]Warning:[/] {tool.name} run {run_number} {reason}")
+        tail = "\n".join(result.stdout.splitlines()[-_OUTPUT_TAIL_LINES:])
+        if tail:
+            console.print(tail, highlight=False, markup=False)
 
     return RunResult(
         command=" ".join(cmd),
-        exit_code=stats.get("exit_code", result.returncode),
+        exit_code=result.returncode,
         max_rss_mb=stats.get("max_rss_mb", 0.0),
         run_number=run_number,
         system_time_seconds=stats.get("system_time_seconds", 0.0),
@@ -373,32 +367,19 @@ def run_benchmark(
 
     output_dir = output_base / tool.name
 
-    # Run setup if defined
-    if tool.setup:
-        try:
-            tool.setup()
-        # A competitor tool's setup can fail in any way; skip that tool, keep benchmarking.
-        except Exception:  # noqa: BLE001
-            console.print(f"[red]Error:[/] {tool.name} setup failed")
+    for i in range(1, runs + 1):
+        label = f"run {i}/{runs}" if runs > 1 else "run"
+        with console.status(f"[bold green]{tool.name}[/] {label}..."):
+            result = _run_once(tool, input_path, output_dir, i, time_cmd)
+        if result is None:
             return None
+        benchmark.runs.append(result)
 
-    try:
-        for i in range(1, runs + 1):
-            label = f"run {i}/{runs}" if runs > 1 else "run"
-            with console.status(f"[bold green]{tool.name}[/] {label}..."):
-                result = _run_once(tool, input_path, output_dir, i, time_cmd)
-            if result is None:
-                return None
-            benchmark.runs.append(result)
-
-            # Show per-run wall clock for multi-run benchmarks
-            if runs > 1:
-                console.print(
-                    f"  {tool.name} run {i}: [cyan]{result.wall_clock_seconds:.2f}s[/]"
-                )
-    finally:
-        if tool.teardown:
-            tool.teardown()
+        # Show per-run wall clock for multi-run benchmarks
+        if runs > 1:
+            console.print(
+                f"  {tool.name} run {i}: [cyan]{result.wall_clock_seconds:.2f}s[/]"
+            )
 
     # Compute aggregate stats
     successful = [r for r in benchmark.runs if r.exit_code == 0]
