@@ -88,6 +88,11 @@ point, no files appear under their final names and any previous output stays unc
 `--overwrite`. Don't run two conversions of the same entity into the same output directory at once: their files can
 end up mixed. A process killed mid-run can leave an `<entity>.partial-*` directory behind; it's safe to delete.
 
+A run checks that it can move files into an existing `<output>/<entity>/` before it parses anything, and fails
+early if it can't (e.g. the directory isn't writable). If moving the finished files fails anyway, the run keeps
+them: the error names the `<entity>.partial-*` directory that holds the files not moved yet, which can then be
+moved by hand. Files moved before the failure are already in `<output>/<entity>/`, next to any older files.
+
 | Option | Values |
 |-----------------|-------------------------------|
 | Output formats | `parquet`, `jsonl` |
