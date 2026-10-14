@@ -94,11 +94,12 @@ from rich.text import Text
 
 from discogskit import decompress
 from discogskit._console import console, status
-from discogskit.entities import ChunkArgs, EntityDef
+from discogskit._ipc import deserialize_batch
+from discogskit.entities import EntityDef
 from discogskit.entities import get as get_entity
+from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import ChunkResult, extract_chunk_to_ipc
 from discogskit.writers import Writer
-from discogskit.writers._ipc import deserialize_batch
 
 
 class _ElapsedEstTotalColumn(ProgressColumn):

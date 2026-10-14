@@ -8,7 +8,7 @@ from __future__ import annotations
 import pyarrow as pa
 from lxml import etree
 
-from discogskit.entities import Cols, EntityDef, register
+from discogskit.entities._def import Cols, EntityDef
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Arrow schemas (the first table is the root table)
@@ -133,14 +133,12 @@ def record_id(elem: etree._Element) -> str | None:
     return elem.findtext("id")
 
 
-register(
-    EntityDef(
-        append_record=append_record,
-        fk_column="artist_id",
-        name="artists",
-        record_id=record_id,
-        root_tag="artist",
-        schemas=SCHEMAS,
-        table_weights=TABLE_WEIGHTS,
-    )
+ENTITY = EntityDef(
+    append_record=append_record,
+    fk_column="artist_id",
+    name="artists",
+    record_id=record_id,
+    root_tag="artist",
+    schemas=SCHEMAS,
+    table_weights=TABLE_WEIGHTS,
 )

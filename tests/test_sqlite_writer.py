@@ -9,7 +9,8 @@ import sqlite3
 import pyarrow as pa
 import pytest
 
-from discogskit.entities import ChunkArgs, get
+from discogskit.entities import get
+from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers.sqlite import SQLiteWriter
 from tests.conftest import (

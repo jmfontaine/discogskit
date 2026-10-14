@@ -7,7 +7,7 @@ import re
 
 import pytest
 
-from discogskit.entities import ChunkArgs
+from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.entities.masters import SCHEMAS
 from tests.conftest import ipc_to_tables

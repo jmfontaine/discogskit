@@ -10,10 +10,11 @@ from typing import NoReturn
 import pyarrow as pa
 import pytest
 
-from discogskit.entities import ChunkArgs, get
+from discogskit._ipc import deserialize_batch
+from discogskit.entities import get
+from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers import _staging
-from discogskit.writers._ipc import deserialize_batch
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Helper: IPC dict → dict[str, pa.Table] / dict[str, pa.RecordBatch]

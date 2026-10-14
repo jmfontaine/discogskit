@@ -42,18 +42,21 @@ Multiprocessing is used because lxml is CPU-bound and holds the GIL. Arrow IPC i
 
 ### Key modules
 
-- **`entities/`** — One module per Discogs entity (artists, labels, masters, releases) with its table schemas and record parser, plus the shared splitter (`_split.py`) and chunk worker (`_worker.py`). Writers generate SQL DDL from the schemas. Releases is the most complex (12 normalized tables).
+- **`entities/`** — One module per Discogs entity (artists, labels, masters, releases) with its table schemas and record parser, plus the definitions they share (`_def.py`: `EntityDef`, `ChunkArgs`, `Cols`), the shared splitter (`_split.py`) and chunk worker (`_worker.py`). `entities/__init__.py` builds `ENTITIES` from an explicit tuple of the modules' `ENTITY` definitions. Writers generate SQL DDL from the schemas. Releases is the most complex (12 normalized tables).
 - **`writers/`** — Output format implementations (parquet, jsonl, sqlite, postgresql). Factory in `__init__.py` selects writer by format string.
 - **`cli.py`** — Typer CLI with `convert` and `load` commands.
 - **`decompress.py`** — Gzip decompression wrapper using rapidgzip; `ensure_xml` returns an `XmlLease` the pipeline holds while it reads the XML.
 
 ### Entity pattern
 
-Each entity module (e.g., `artists.py`) defines this interface, plus any private helpers its parser needs (e.g. `_parse_refs`):
+Each entity module (e.g., `artists.py`) imports what it shares from `entities/_def.py`, never from the `entities` package, and defines this interface, plus any private helpers its parser needs (e.g. `_parse_refs`):
 - `SCHEMAS: dict[str, pa.Schema]` — one Arrow schema per table; the first table is the root table, and dict order is the table order
 - `TABLE_WEIGHTS` — relative flush cost per table, used to balance PostgreSQL write workers
 - `append_record(cols, elem, unknown)` — parses one record element into the column accumulators
-- A `register(EntityDef(...))` call. `name` is the XML container (`artists`), which the worker uses for the XML envelope; `root_tag` is the record element (`artist`), which the splitter uses for its patterns and the worker for the records it parses
+- `record_id(elem)` — returns a record element's id as written in the XML, or `None` when it has none
+- `ENTITY = EntityDef(...)`. `name` is the XML container (`artists`), which the worker uses for the XML envelope; `root_tag` is the record element (`artist`), which the splitter uses for its patterns and the worker for the records it parses; `fk_column` (required) is the column every non-root table uses to reference the root table's `id`, which the SQLite and PostgreSQL writers index and, with `--fk`, constrain
+
+A new entity module also needs its `ENTITY` added to the tuple in `entities/__init__.py`.
 
 ## Testing
 

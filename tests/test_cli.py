@@ -24,7 +24,8 @@ from typer.testing import CliRunner, Result
 from discogskit import pipeline
 from discogskit.cli import app
 from discogskit.decompress import DecompressError
-from discogskit.entities import ChunkArgs, get
+from discogskit.entities import get
+from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers import OutputExistsError
 from tests.conftest import (

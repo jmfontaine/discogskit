@@ -221,7 +221,7 @@ class SQLiteWriter:
         """Create indexes on FK columns, then make the database durable and restore its journal mode."""
         fk_col = entity.fk_column
 
-        if fk_col and len(entity.table_order) > 1:
+        if len(entity.table_order) > 1:
             t0 = time.perf_counter()
             cur = self._conn.cursor()
             for t in entity.table_order[1:]:

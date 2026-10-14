@@ -17,7 +17,8 @@ import click
 import pytest
 from typer.testing import CliRunner
 
-from discogskit.entities import ChunkArgs, get
+from discogskit.entities import get
+from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from tests.conftest import ARTISTS_XML, LABELS_XML, empty_ipc, ipc_to_record_batches
 

@@ -10,7 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from discogskit.entities import ChunkArgs
+from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers.jsonl import JSONLWriter
 from discogskit.writers.parquet import ParquetWriter
