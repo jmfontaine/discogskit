@@ -20,9 +20,10 @@ from xml.parsers import expat
 
 import pyarrow as pa
 from lxml import etree
-from pyarrow import ipc
 
-from discogskit.entities import ChunkArgs, Cols, ElementValueError, get
+from discogskit._ipc import serialize_batch
+from discogskit.entities import get
+from discogskit.entities._def import ChunkArgs, Cols, ElementValueError
 
 _T = TypeVar("_T")
 
@@ -164,14 +165,6 @@ def _scan_lines(
     return None
 
 
-def _serialize_batch(batch: pa.RecordBatch, schema: pa.Schema) -> bytes:
-    sink = pa.BufferOutputStream()
-    writer = ipc.new_stream(sink, schema)
-    writer.write_batch(batch)
-    writer.close()
-    return sink.getvalue().to_pybytes()
-
-
 def _to_batch(
     args: ChunkArgs, columns: dict[str, list], name: str, schema: pa.Schema
 ) -> pa.RecordBatch:
@@ -292,7 +285,7 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
 
     return ChunkResult(
         tables={
-            name: _serialize_batch(_to_batch(args, cols[name], name, schema), schema)
+            name: serialize_batch(_to_batch(args, cols[name], name, schema), schema)
             for name, schema in entity.schemas.items()
         },
         unknown=sorted(unknown) if unknown else [],

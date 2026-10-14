@@ -6,15 +6,7 @@ import pyarrow as pa
 import pytest
 from pyarrow import ipc
 
-from discogskit.writers._ipc import deserialize_batch
-
-
-def _serialize(batch: pa.RecordBatch) -> bytes:
-    sink = pa.BufferOutputStream()
-    writer = ipc.new_stream(sink, batch.schema)
-    writer.write_batch(batch)
-    writer.close()
-    return sink.getvalue().to_pybytes()
+from discogskit._ipc import deserialize_batch, serialize_batch
 
 
 class TestDeserializeBatch:
@@ -23,7 +15,7 @@ class TestDeserializeBatch:
         batch = pa.RecordBatch.from_pydict(
             {"x": [1, 2, 3], "y": ["a", "b", "c"]}, schema=schema
         )
-        ipc_bytes = _serialize(batch)
+        ipc_bytes = serialize_batch(batch, schema)
 
         result = deserialize_batch(ipc_bytes)
 
@@ -34,7 +26,7 @@ class TestDeserializeBatch:
     def test_empty_batch_preserves_schema(self):
         schema = pa.schema([pa.field("id", pa.int32()), pa.field("name", pa.utf8())])
         batch = pa.RecordBatch.from_pydict({"id": [], "name": []}, schema=schema)
-        ipc_bytes = _serialize(batch)
+        ipc_bytes = serialize_batch(batch, schema)
 
         result = deserialize_batch(ipc_bytes)
 

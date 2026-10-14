@@ -10,12 +10,11 @@ from __future__ import annotations
 import pyarrow as pa
 from lxml import etree
 
-from discogskit.entities import (
+from discogskit.entities._def import (
     Cols,
     ElementValueError,
     EntityDef,
     parse_bool,
-    register,
 )
 
 _ArtistRec = tuple[int | None, str | None, str | None, str | None]
@@ -564,14 +563,12 @@ def record_id(elem: etree._Element) -> str | None:
     return elem.get("id")
 
 
-register(
-    EntityDef(
-        append_record=append_record,
-        fk_column="release_id",
-        name="releases",
-        record_id=record_id,
-        root_tag="release",
-        schemas=SCHEMAS,
-        table_weights=TABLE_WEIGHTS,
-    )
+ENTITY = EntityDef(
+    append_record=append_record,
+    fk_column="release_id",
+    name="releases",
+    record_id=record_id,
+    root_tag="release",
+    schemas=SCHEMAS,
+    table_weights=TABLE_WEIGHTS,
 )

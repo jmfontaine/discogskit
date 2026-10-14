@@ -1,10 +1,12 @@
-"""Tests for entity registry: detect_entity(), get(), registration."""
+"""Tests for the entity definitions: detect_entity(), get(), ENTITIES."""
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
-from discogskit.entities import ENTITIES, EntityDef, detect_entity, get
+from discogskit.entities import ENTITIES, EntityDef, _by_name, detect_entity, get
 
 
 class TestDetectEntity:
@@ -39,10 +41,16 @@ class TestGet:
             get("nonexistent")
 
 
-class TestRegistration:
+class TestEntities:
     @pytest.mark.parametrize("name", ["artists", "labels", "masters", "releases"])
-    def test_entity_registered(self, name):
-        assert name in ENTITIES
+    def test_entity_listed(self, name):
+        assert ENTITIES[name].name == name
+
+    def test_duplicate_name_raises(self):
+        artists = get("artists")
+        twin = dataclasses.replace(artists, root_tag="other")
+        with pytest.raises(ValueError, match="Duplicate entity name 'artists'"):
+            _by_name((artists, twin))
 
     @pytest.mark.parametrize("name", ["artists", "labels", "masters", "releases"])
     def test_entity_has_required_fields(self, name):

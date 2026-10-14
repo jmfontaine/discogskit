@@ -9,7 +9,7 @@ from functools import partial
 
 import pytest
 
-from discogskit.entities import ChunkArgs
+from discogskit.entities._def import ChunkArgs
 from discogskit.entities._split import find_split_points
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.entities.labels import SCHEMAS as LABELS_SCHEMAS
