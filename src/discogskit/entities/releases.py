@@ -431,9 +431,15 @@ def append_record(
                     for sub in sub_elem:
                         if sub.tag != "track":
                             continue
-                        s_pos, s_ttl, s_dur, s_art, s_ea, _ = _parse_single_track(
+                        s_pos, s_ttl, s_dur, s_art, s_ea, nested = _parse_single_track(
                             sub, unknown
                         )
+                        if nested is not None:
+                            # Only one level of sub-tracks is parsed, so fail rather than drop the deeper ones. Name the
+                            # positions, not the element's line: from line 65535 on, lxml can report another node's.
+                            raise ValueError(
+                                f"<sub_tracks> nested in sub-track {s_pos!r} of track {pos!r}"
+                            )
                         r_tracks.append(
                             (track_idx, parent, s_pos, s_ttl, s_dur, s_art, s_ea)
                         )

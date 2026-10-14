@@ -101,6 +101,33 @@ class TestReleasesParsing:
         assert t.column("position").to_pylist() == ["A1", "A1.1"]
         assert t.column("title").to_pylist() == ["Track One", "Sub Track"]
 
+    def test_sub_tracks_nested_in_a_sub_track_fail(self, tmp_path):
+        """A <sub_tracks> inside a sub-track fails instead of vanishing with everything below it (#96)."""
+        xml = (
+            '<release id="7" status="Accepted">\n'
+            "  <tracklist>\n"
+            "    <track><position>1</position>\n"
+            "      <sub_tracks>\n"
+            "        <track><position>1a</position>\n"
+            "          <sub_tracks>\n"
+            "            <track><position>1a.i</position></track>\n"
+            "          </sub_tracks>\n"
+            "        </track>\n"
+            "      </sub_tracks>\n"
+            "    </track>\n"
+            "  </tracklist>\n"
+            "</release>\n"
+        )
+        f = tmp_path / "nested_sub_tracks.xml"
+        f.write_text(xml)
+
+        with pytest.raises(
+            ValueError,
+            match=r"^Invalid <release> record in .* at chunk line 1 \(chunk bytes \d+-\d+, id='7'\):"
+            r" <sub_tracks> nested in sub-track '1a' of track '1'$",
+        ):
+            extract_chunk_to_ipc(ChunkArgs("releases", str(f), 0, os.path.getsize(f)))
+
     def test_track_artists(self, releases_xml_file):
         tables = self._parse(releases_xml_file)
         ta = tables["release_track_artists"]
