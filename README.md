@@ -251,6 +251,11 @@ of its tables committed, others not. When one group fails, the load waits for th
 reports the error. With `--pg-write-workers 1` (the default) and with SQLite, a chunk commits in a single transaction
 on one connection, so it's never partially written, but earlier, already-committed chunks are still not rolled back.
 
+On Ctrl+C, a PostgreSQL load cancels the write in progress on the server instead of waiting for it, so it stops
+promptly even when that write waits on a lock held by another session. The cancelled transaction commits nothing,
+though with `--pg-write-workers` above 1, other table groups may already have committed their part of that chunk. A
+server that doesn't answer the cancel request at all can still hold the load until its write ends.
+
 | Database | Versions |
 |----------|----------|
 | SQLite | 3.x |

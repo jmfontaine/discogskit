@@ -24,7 +24,7 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from contextlib import suppress
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING, Protocol
 
 import pyarrow as pa
@@ -258,6 +258,12 @@ def _close_with_timeout(conn: _Closeable) -> None:
         )
 
 
+def _cancel_quietly(conn) -> None:
+    """Ask the server to cancel ``conn``'s running statement. Best effort: the interrupt is what gets reported."""
+    with suppress(Exception):
+        conn.adbc_cancel()
+
+
 class PostgreSQLWriter:
     """Writer implementation for PostgreSQL via psycopg (DDL) and ADBC (ingest)."""
 
@@ -355,6 +361,28 @@ class PostgreSQLWriter:
         self._executor: ThreadPoolExecutor | None = None
         self._groups: list[list[str]] = []
         self._schemas: dict[str, pa.Schema] = {}
+        # cancel() only flags a request; this thread sends it, because libpq sends a cancel request over a new
+        # connection to the server and waits for it with no deadline. Started last, once nothing above can fail.
+        self._cancel_requested = Event()
+        self._closing = False
+        self._canceller = Thread(
+            daemon=True,
+            name="discogskit-pg-cancel",
+            target=self._send_cancel_requests,
+        )
+        self._canceller.start()
+
+    def _send_cancel_requests(self) -> None:
+        """Run on ``self._canceller``: ask the server to cancel each write connection's statement per request."""
+        while True:
+            self._cancel_requested.wait()
+            # Cleared before sending, so a request made while sending gets its own round.
+            self._cancel_requested.clear()
+            if self._closing:
+                return
+            for conn in [self._adbc_conn, *self._adbc_conns]:
+                if conn is not None:
+                    _cancel_quietly(conn)
 
     def _current_schema(self) -> str:
         """The schema unqualified CREATE TABLE lands in. Raises ValueError if search_path names no existing one."""
@@ -365,6 +393,15 @@ class PostgreSQLWriter:
                 "No schema to create tables in: search_path names no existing schema"
             )
         return schema
+
+    def cancel(self) -> None:
+        """Ask the server to cancel any statement running on the write connections, e.g. a COPY waiting on a lock.
+
+        ADBC cancels a statement on Ctrl+C only when it runs on the main thread, and writes run on the pipeline's
+        writer thread, so the pipeline calls this instead. The cancelled write fails; ``close()`` still follows.
+        Returns at once: the requests go out on a thread of their own, since one can wait on the server forever.
+        """
+        self._cancel_requested.set()
 
     def check(self, entity: EntityDef) -> None:
         """Raise ``OutputExistsError`` if any of ``entity``'s tables exists in the current schema and overwrite is
@@ -552,17 +589,31 @@ class PostgreSQLWriter:
     def close(self) -> None:
         """Release all resources.
 
-        Waits for in-flight group writes before closing their connections, then
-        closes each connection with ``_close_with_timeout`` so that ``close()``
-        doesn't block forever on an unresponsive server.
+        Waits for in-flight group writes and stops the cancel thread (up to
+        ``_CLOSE_TIMEOUT``) before closing the write connections, then closes
+        each connection with ``_close_with_timeout`` so that ``close()`` doesn't
+        block forever on an unresponsive server.
         """
         if self._executor is not None:
             self._executor.shutdown()
             self._executor = None
 
-        for closeable in [self._adbc_conn, *self._adbc_conns]:
-            if closeable is not None:
-                _close_with_timeout(closeable)
+        # The driver frees a connection's cancel handle when it closes, so the
+        # canceller must be done with every connection first. If a request
+        # still waits on the server, the write connections stay open instead.
+        self._closing = True
+        self._cancel_requested.set()
+        self._canceller.join(_CLOSE_TIMEOUT)
+        if self._canceller.is_alive():
+            status(
+                "Close",
+                f"gave up on a cancel request after {_CLOSE_TIMEOUT:.0f}s; "
+                "the write connections stay open until discogskit exits",
+            )
+        else:
+            for closeable in [self._adbc_conn, *self._adbc_conns]:
+                if closeable is not None:
+                    _close_with_timeout(closeable)
         self._adbc_conn = None
         self._adbc_conns = []
 

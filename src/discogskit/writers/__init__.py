@@ -19,6 +19,14 @@ class OutputExistsError(Exception):
 
 
 class Writer(Protocol):
+    def cancel(self) -> None:
+        """Cancel an in-flight ``write_chunk()`` that may block indefinitely (e.g. a COPY on a stalled server).
+
+        Called from another thread than the one writing, on Ctrl+C. Best effort: the cancelled write fails, and
+        ``close()`` still follows. Writers whose writes can't stall do nothing.
+        """
+        ...
+
     def check(self, entity: EntityDef) -> None:
         """Raise ``OutputExistsError`` if ``entity``'s output already exists and overwrite is off.
 

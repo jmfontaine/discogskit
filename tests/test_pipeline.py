@@ -186,6 +186,9 @@ def _dying_once_extract(args):
 class _StubWriter:
     """A writer whose ``write_chunk`` subclasses define; every other method does nothing."""
 
+    def cancel(self):
+        pass
+
     def close(self):
         pass
 
@@ -856,6 +859,143 @@ class TestPipelineRunParseWorkers:
         assert writer.calls == 1
         assert gz_path.with_suffix("").exists()
         assert multiprocessing.active_children() == []
+
+    def test_sigint_cancels_the_in_flight_write(self, tmp_path):
+        """Ctrl+C cancels a write that would otherwise block on, e.g., a stalled server (#110).
+
+        The first cancel is lost, as on a server that gets it before the statement starts; the request repeats.
+        """
+
+        class BlockingWriter(_StubWriter):
+            """The first write blocks until a second cancel(), then fails as a cancelled COPY does."""
+
+            def __init__(self):
+                self.calls = 0
+                self.cancels = 0
+                self.cancelled = threading.Event()
+
+            def cancel(self):
+                self.cancels += 1
+                if self.cancels > 1:
+                    self.cancelled.set()
+
+            def write_chunk(self, tables):
+                self.calls += 1
+                os.kill(os.getpid(), signal.SIGINT)
+                if not self.cancelled.wait(10):
+                    raise AssertionError("write was never cancelled")
+                raise RuntimeError("canceling statement due to user request")
+
+        gz_path = _many_artists_gz(tmp_path / "artists.xml.gz")
+        config = dataclasses.replace(_multi_chunk_config(gz_path), keep_xml=False)
+        writer = BlockingWriter()
+
+        t0 = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            _run_and_close(config, writer)
+        elapsed = time.monotonic() - t0
+
+        assert writer.cancelled.is_set()
+        assert writer.calls == 1
+        assert elapsed < 5
+        assert multiprocessing.active_children() == []
+
+    def test_sigint_during_write_submission_still_cancels_it(
+        self, monkeypatch, tmp_path
+    ):
+        """Ctrl+C right after a write was handed to the writer thread, before its future was recorded (#110).
+
+        The write starts only after the first cancel, which it therefore misses; the request must repeat.
+        """
+        from discogskit import pipeline
+
+        class LateStartingWriter(_StubWriter):
+            def __init__(self):
+                self.calls = 0
+                self.cancelled = threading.Event()
+                self.first_cancel = threading.Event()
+                self.started = threading.Event()
+
+            def cancel(self):
+                if self.started.is_set():
+                    self.cancelled.set()
+                else:
+                    self.first_cancel.set()
+
+            def write_chunk(self, tables):
+                self.calls += 1
+                assert self.first_cancel.wait(10)
+                self.started.set()
+                if not self.cancelled.wait(10):
+                    raise AssertionError("write was never cancelled")
+                raise RuntimeError("canceling statement due to user request")
+
+        class InterruptingExecutor(pipeline.ThreadPoolExecutor):
+            def submit(self, fn, /, *args, **kwargs):
+                future = super().submit(fn, *args, **kwargs)
+                if fn is not threading.current_thread:
+                    raise KeyboardInterrupt
+                return future
+
+        monkeypatch.setattr(pipeline, "ThreadPoolExecutor", InterruptingExecutor)
+        gz_path = _many_artists_gz(tmp_path / "artists.xml.gz")
+        config = dataclasses.replace(_multi_chunk_config(gz_path), keep_xml=False)
+        writer = LateStartingWriter()
+
+        t0 = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            _run_and_close(config, writer)
+        elapsed = time.monotonic() - t0
+
+        assert writer.cancelled.is_set()
+        assert writer.calls == 1
+        assert elapsed < 5
+        assert multiprocessing.active_children() == []
+
+    def test_second_sigint_while_cancelling_still_waits_for_the_write(self, tmp_path):
+        """A second Ctrl+C while the write is being cancelled mustn't let close() run during the write (#110).
+
+        Before Python 3.13, a Ctrl+C that interrupts ``Thread.join()`` marks the thread as stopped while it runs.
+        """
+
+        class TwiceInterruptedWriter(_StubWriter):
+            def __init__(self):
+                self.active = 0
+                self.active_at_close = None
+                self.cancelled = threading.Event()
+                self.cancels = 0
+
+            def cancel(self):
+                self.cancels += 1
+                if self.cancels == 1:
+                    # The second Ctrl+C lands while the pipeline waits for the write to stop.
+                    threading.Timer(0.1, os.kill, (os.getpid(), signal.SIGINT)).start()
+                else:
+                    self.cancelled.set()
+
+            def close(self):
+                self.active_at_close = self.active
+
+            def write_chunk(self, tables):
+                self.active += 1
+                try:
+                    os.kill(os.getpid(), signal.SIGINT)
+                    assert self.cancelled.wait(10)
+                    # A cancelled statement takes a moment to fail.
+                    time.sleep(0.2)
+                finally:
+                    self.active -= 1
+                raise RuntimeError("canceling statement due to user request")
+
+        gz_path = _many_artists_gz(tmp_path / "artists.xml.gz")
+        config = dataclasses.replace(_multi_chunk_config(gz_path), keep_xml=False)
+        writer = TwiceInterruptedWriter()
+
+        with pytest.raises(KeyboardInterrupt):
+            _run_and_close(config, writer)
+
+        assert writer.cancels >= 2
+        assert writer.active_at_close == 0
 
     def test_executor_construction_failure_restores_the_terminal(
         self, monkeypatch, tmp_path, artists_gz

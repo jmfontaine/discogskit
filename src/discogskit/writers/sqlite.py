@@ -106,6 +106,9 @@ class SQLiteWriter:
         self._journal_mode: str | None = None
         self._list_columns: dict[str, set[int]] = {}
 
+    def cancel(self) -> None:
+        """Do nothing: a write to a local SQLite file can't stall the way a database server can."""
+
     def check(self, entity: EntityDef) -> None:
         """Raise ``OutputExistsError`` if any of ``entity``'s tables exists and overwrite is off."""
         if self._overwrite:
