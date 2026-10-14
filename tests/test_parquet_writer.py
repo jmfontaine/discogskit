@@ -1,4 +1,4 @@
-"""Integration tests for ParquetWriter full lifecycle."""
+"""Tests for ParquetWriter full lifecycle."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from tests.conftest import (
 )
 
 
-@pytest.mark.integration
 class TestParquetWriter:
     @pytest.fixture()
     def entity(self):
