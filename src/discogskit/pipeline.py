@@ -107,7 +107,7 @@ from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import ChunkResult, extract_chunk_to_ipc
 from discogskit.writers import Writer
 
-__all__ = ["PipelineConfig", "PipelineResult", "run"]
+__all__ = ["PipelineConfig", "PipelineResult", "UnhandledElementsError", "run"]
 
 
 class _ElapsedEstTotalColumn(ProgressColumn):
@@ -196,7 +196,7 @@ class PipelineConfig:
     being parsed or waiting to be written at once. ``keep_xml`` keeps the decompressed XML after a successful run.
     ``profile`` fills ``PipelineResult.profile_data`` and prints per-chunk lines instead of a progress bar;
     ``progress`` shows a progress bar when the console is a terminal. ``strict`` reports the XML elements no parser
-    handled.
+    handled and then fails the run with ``UnhandledElementsError``, before the writer's ``finalize()``.
     """
 
     chunk_mb: int
@@ -233,6 +233,28 @@ class PipelineResult:
     t_parse_load: float
     t_total: float
     total_records: int
+
+
+class UnhandledElementsError(Exception):
+    """Raised by a ``strict`` run whose input has XML elements no parser handled, which it would otherwise drop.
+
+    ``run()`` raises it once the entity's records are parsed and written and a ``Strict`` line is printed for each
+    path, but before the writer's ``finalize()``: file writers publish nothing, and database writers build no indexes.
+    ``entity`` is the entity's name (``artists``); ``paths`` are the sorted element paths, relative to the record
+    (``videos/video/foo``).
+    """
+
+    entity: str
+    paths: list[str]
+
+    def __init__(self, entity: EntityDef, paths: list[str]) -> None:
+        noun = "path" if len(paths) == 1 else "paths"
+        super().__init__(
+            f"--strict: {len(paths)} unhandled XML element {noun} in <{entity.root_tag}>; "
+            "see the Strict lines above"
+        )
+        self.entity = entity.name
+        self.paths = paths
 
 
 class _DuplicateIdTracker:
@@ -689,6 +711,9 @@ def run(
     Everything the run prints, from the pipeline and from ``writer``'s ``setup()`` and ``finalize()``, goes to
     ``console``; by default, a console on stdout. Pass ``Console(quiet=True)`` to print nothing, or a ``Console``
     of your own to capture the output. The caller keeps ownership of ``writer`` and closes it.
+
+    With ``config.strict``, raises ``UnhandledElementsError`` before ``finalize()`` if the input has XML elements no
+    parser handled.
     """
     if console is None:
         return _run(config, writer)
@@ -762,9 +787,12 @@ def _run(config: PipelineConfig, writer: Writer) -> PipelineResult:
                 progress_bar=progress_bar,
                 write_queue=config.write_queue,
             )
-        # Reported here, once per run: each worker only sees its own chunks.
+        # Reported here, once per run: each worker only sees its own chunks. All of them, so the user sees every
+        # finding at once, then the run fails before finalize() publishes the output or builds indexes.
         for path in unknown:
             status("Strict", f"unhandled XML element <{path}> in <{entity.root_tag}>")
+        if unknown:
+            raise UnhandledElementsError(entity, unknown)
 
         total = chunk_writer.total
         # Load time covers splitting and parse + write, but not writer setup.

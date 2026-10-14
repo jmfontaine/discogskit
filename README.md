@@ -72,7 +72,11 @@ any of them stops the run before anything is written.
 
 The progress bar shows only on a terminal. When output goes to a pipe, a file or CI, a run prints one line per chunk as
 it's written instead, as with `--no-progress`. With `--strict`, once an entity's records are parsed, the run prints a
-`Strict` line for each element path no parser handled, such as `unhandled XML element <videos/video/foo> in <master>`.
+`Strict` line for each element path no parser handled, such as `unhandled XML element <videos/video/foo> in <master>`,
+then fails with `--strict: 1 unhandled XML element path in <master>; see the Strict lines above` and exits 1. Like any
+failed run, it stops before finishing that entity: `convert` doesn't move its files into the output directory, and
+`load` builds no indexes, though the rows it wrote stay in the tables. Entities earlier in the run are already done;
+later ones don't run. Without `--strict`, those elements are dropped silently.
 
 Both commands decompress each `.xml.gz` to a `.xml` next to it, and delete the `.xml` after a successful run unless
 `--keep-xml` is set. A run that fails or is interrupted (including Ctrl+C) after decompression finished keeps the
@@ -205,8 +209,9 @@ JSONL bzip2 1-9, Parquet gzip 1-9, Parquet zstd -131072 to 22. `snappy` and `non
 │                                                                     instead of per-chunk     │
 │                                                                     output                   │
 │                                                                     [default: progress]      │
-│ --strict                 --no-strict                                Warn about unhandled XML │
-│                                                                     elements during parsing  │
+│ --strict                 --no-strict                                Fail on unhandled XML    │
+│                                                                     elements, after listing  │
+│                                                                     them all                 │
 │                                                                     [default: no-strict]     │
 │ --help                                                              Show this message and    │
 │                                                                     exit.                    │
@@ -330,8 +335,8 @@ absolute) or a plain path ending in `.db`, `.sqlite`, or `.sqlite3`. Other `sqli
 │ --progress         --no-progress                         Show a progress bar instead of      │
 │                                                          per-chunk output                    │
 │                                                          [default: progress]                 │
-│ --strict           --no-strict                           Warn about unhandled XML elements   │
-│                                                          during parsing                      │
+│ --strict           --no-strict                           Fail on unhandled XML elements,     │
+│                                                          after listing them all              │
 │                                                          [default: no-strict]                │
 │ --help                                                   Show this message and exit.         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -452,6 +457,7 @@ and name may change in any release.
 | `detect_entity(filename)` | The entity a Discogs dump file name holds, e.g. `artists` |
 | `OutputExistsError` | Raised when the output exists and the writer doesn't overwrite it |
 | `DecompressError` | Raised when a `.xml.gz` is truncated, corrupt or not gzip |
+| `UnhandledElementsError` | Raised by a `strict` run whose input has XML elements no parser handled, before the writer's `finalize()`; its `entity` and `paths` attributes name them |
 
 `get_writer()` and `get_file_writer()` raise `ValueError` for an option they can't use, such as a codec the format
 doesn't support or a compression level out of the codec's range, before creating any file. Other failures raise other

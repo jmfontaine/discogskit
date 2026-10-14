@@ -49,7 +49,7 @@ Options:
 - `--overwrite / --no-overwrite`: Overwrite existing output files [default: no-overwrite]
 - `--profile / --no-profile`: Print detailed per-table timing breakdown after convert [default: no-profile]
 - `--progress / --no-progress`: Show a progress bar instead of per-chunk output [default: progress]
-- `--strict / --no-strict`: Warn about unhandled XML elements during parsing [default: no-strict]
+- `--strict / --no-strict`: Fail on unhandled XML elements, after listing them all [default: no-strict]
 
 ## `discogskit load`
 
@@ -74,7 +74,7 @@ Options:
 - `--overwrite / --no-overwrite`: Overwrite existing tables in the database [default: no-overwrite]
 - `--profile / --no-profile`: Print detailed per-table timing breakdown after load [default: no-profile]
 - `--progress / --no-progress`: Show a progress bar instead of per-chunk output [default: progress]
-- `--strict / --no-strict`: Warn about unhandled XML elements during parsing [default: no-strict]
+- `--strict / --no-strict`: Fail on unhandled XML elements, after listing them all [default: no-strict]
 
 PostgreSQL:
 

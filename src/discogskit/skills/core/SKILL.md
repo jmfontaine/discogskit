@@ -118,7 +118,8 @@ output isn't a terminal, it prints one line per chunk as it's written, then a su
 
 Tuning: `--parse-workers` (default half the CPU count) parses chunks in parallel; `--chunk-mb` sets their size;
 `--write-queue` bounds how far parsing runs ahead of writing, and so memory. `--profile` prints a per-table timing
-breakdown. `--strict` reports XML elements no parser handled, useful after Discogs changes the dump format.
+breakdown. `--strict` lists the XML elements no parser handled, which discogskit would otherwise drop, then fails the
+run: use it to check a new dump after Discogs changes the format.
 
 ## Troubleshooting
 
@@ -134,6 +135,7 @@ Errors print `Error: <message>` and exit 1; Ctrl+C exits 130.
 | `unsupported compression '<codec>' for <format>` | Parquet takes `zstd`, `snappy`, `gzip`, `none`; JSONL `gzip`, `bzip2`, `none` |
 | `--pg-... can only be used with PostgreSQL, not a SQLite DSN` | Drop the `--pg-*` flags for SQLite |
 | `Duplicate <entity> id: <n>` or another value error naming a chunk and line | The dump has a record discogskit can't store as is; nothing is coerced. Report it with the message |
+| `--strict: <n> unhandled XML element paths in <record>` | `--strict` found elements discogskit doesn't parse, listed on the `Strict` lines before it. Rerun without `--strict` to load anyway, dropping them, and report the paths |
 
 After a failed or interrupted `load`, the tables are incomplete: run it again with `--overwrite`. With
 `--pg-write-workers` above 1, each table group commits separately, so a failed load can leave part of a chunk in some
