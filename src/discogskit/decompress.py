@@ -40,11 +40,11 @@ _LOCK_WAIT_SLICE = 0.5
 
 
 class DecompressError(Exception):
-    """Raised when decompression fails (corrupt or unrecognized file)."""
+    """Raised when the .gz can't be decompressed (truncated, corrupt, not gzip)."""
 
     def __init__(self, path: Path) -> None:
         super().__init__(
-            f"failed to decompress {path.name} (corrupt or not a gzip file)"
+            f"failed to decompress {path.name} (truncated, corrupt, or not a gzip file)"
         )
 
 
@@ -153,12 +153,16 @@ def _decompress(
             # Without this, a power loss can persist the rename below before
             # the data, leaving a complete-looking but corrupt .xml.
             os.fsync(fout.fileno())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, OSError):
+        # OSError is the filesystem (disk full, permissions), not the gzip:
+        # surface it unchanged so the errno and path reach the user.
         partial_path.unlink(missing_ok=True)
         raise
-    except (OSError, ValueError):
+    except (RuntimeError, ValueError) as exc:
+        # rapidgzip raises ValueError for corrupt or non-gzip input and a bare
+        # RuntimeError('std::exception') for truncated input.
         partial_path.unlink(missing_ok=True)
-        raise DecompressError(gz_path) from None
+        raise DecompressError(gz_path) from exc
     try:
         os.replace(partial_path, xml_path)
     except OSError:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import gzip
 import io
 import multiprocessing
@@ -88,6 +89,32 @@ class TestPartialFile:
         assert not xml_path.exists()
         assert not (tmp_path / "test.xml.partial").exists()
 
+    def test_disk_full_keeps_os_error_and_removes_partial(self, monkeypatch, tmp_path):
+        """ENOSPC isn't reported as a corrupt gzip, and leaves no .partial."""
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        partial_path = tmp_path / "test.xml.partial"
+
+        class FullDisk(io.BufferedWriter):
+            def write(self, data):
+                raise OSError(
+                    errno.ENOSPC, "No space left on device", str(partial_path)
+                )
+
+        def open_on_full_disk(path, mode):
+            return FullDisk(io.FileIO(path, mode))
+
+        # Shadows the builtin inside the module only.
+        monkeypatch.setattr(decompress, "open", open_on_full_disk, raising=False)
+
+        with pytest.raises(OSError) as excinfo:
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        assert excinfo.value.errno == errno.ENOSPC
+        assert not isinstance(excinfo.value, DecompressError)
+        assert not xml_path.exists()
+        assert not partial_path.exists()
+
     def test_keyboard_interrupt_removes_partial_and_reraises(
         self, monkeypatch, tmp_path
     ):
@@ -155,6 +182,20 @@ class TestPartialFile:
 
         assert xml_path.read_bytes() == _XML
         assert not partial_path.exists()
+
+    def test_truncated_gz_raises_decompress_error(self, tmp_path):
+        gz_path = tmp_path / "test.xml.gz"
+        gz_path.write_bytes(gzip.compress(_XML * 1000)[:-20])
+        xml_path = tmp_path / "test.xml"
+
+        with pytest.raises(
+            DecompressError, match=r"truncated, corrupt, or not a gzip file"
+        ) as excinfo:
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        assert excinfo.value.__cause__ is not None
+        assert not xml_path.exists()
+        assert not (tmp_path / "test.xml.partial").exists()
 
     def test_xml_appears_only_after_decompression(self, monkeypatch, tmp_path):
         xml_path = tmp_path / "test.xml"
