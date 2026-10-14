@@ -5,8 +5,6 @@ The chunk worker that drives ``append_record`` is shared; see ``_worker.py``.
 
 from __future__ import annotations
 
-import warnings
-
 import pyarrow as pa
 from lxml import etree
 
@@ -63,8 +61,7 @@ def append_record(
     """Parse a <master> element and append all data to column accumulators."""
     id_text = record_id(elem)
     if not id_text:
-        warnings.warn("skipping <master> with missing id", stacklevel=2)
-        return
+        raise ValueError("missing or empty id")
     master_id = int(id_text)
 
     data_quality = None

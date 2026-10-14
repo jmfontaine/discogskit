@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from discogskit.entities import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.entities.releases import SCHEMAS
@@ -121,23 +123,21 @@ class TestReleasesParsing:
         for name, table in tables.items():
             assert table.schema == SCHEMAS[name]
 
-    def test_missing_id_skipped(self, tmp_path):
-        """Release without id attribute is skipped with a warning."""
-        xml = '<release status="Accepted"><title>No ID</title></release>\n'
+    @pytest.mark.parametrize("id_attr", ["", ' id=""'])
+    def test_missing_id_fails(self, tmp_path, id_attr):
+        """A release without an id fails with its line instead of vanishing (#94)."""
+        xml = (
+            '<release id="1" status="Accepted"><title>A</title></release>\n'
+            f'<release{id_attr} status="Accepted"><title>No ID</title></release>\n'
+        )
         f = tmp_path / "no_id.xml"
         f.write_text(xml)
 
-        import warnings
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            ipc_dict = extract_chunk_to_ipc(
-                ChunkArgs("releases", str(f), 0, os.path.getsize(f))
-            )
-            tables = ipc_to_tables(ipc_dict, SCHEMAS)
-
-        assert tables["releases"].num_rows == 0
-        assert any("missing id" in str(warning.message) for warning in w)
+        with pytest.raises(
+            ValueError,
+            match=r"^Invalid <release> record in .* at chunk line 2 .*: missing or empty id$",
+        ):
+            extract_chunk_to_ipc(ChunkArgs("releases", str(f), 0, os.path.getsize(f)))
 
     def test_missing_is_null_and_empty_is_empty_string(self, tmp_path):
         """Absent elements/attributes are NULL; present but empty ones are "" (#21)."""

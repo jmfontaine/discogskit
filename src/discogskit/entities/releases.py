@@ -7,8 +7,6 @@ The schema mirrors the XML structure. The chunk worker that drives ``append_reco
 
 from __future__ import annotations
 
-import warnings
-
 import pyarrow as pa
 from lxml import etree
 
@@ -277,8 +275,7 @@ def append_record(
     """Parse a <release> element and append all data to column accumulators."""
     id_text = record_id(elem)
     if not id_text:
-        warnings.warn("skipping <release> with missing id", stacklevel=2)
-        return
+        raise ValueError("missing or empty id")
     rid = int(id_text)
     status = elem.get("status")
 
