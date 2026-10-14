@@ -12,7 +12,7 @@ import typer
 from rich.table import Table
 from rich.text import Text
 
-from discogskit import pipeline
+from discogskit import _skills, pipeline
 from discogskit._console import current, error, print_text, status
 from discogskit.entities import ENTITIES, detect_entity
 from discogskit.writers import Writer, get_file_writer, get_writer
@@ -288,7 +288,11 @@ def convert(
     ] = 256,
     parse_workers: Annotated[
         int,
-        typer.Option(help="Number of parallel parse workers", min=1),
+        typer.Option(
+            help="Number of parallel parse workers",
+            min=1,
+            show_default="half the CPU count, at least 1",
+        ),
     ] = max(1, CPUS // 2),
     write_queue: Annotated[
         int,
@@ -370,7 +374,11 @@ def load(
     ] = 256,
     parse_workers: Annotated[
         int,
-        typer.Option(help="Number of parallel parse workers", min=1),
+        typer.Option(
+            help="Number of parallel parse workers",
+            min=1,
+            show_default="half the CPU count, at least 1",
+        ),
     ] = max(1, CPUS // 2),
     write_queue: Annotated[
         int,
@@ -477,3 +485,6 @@ def load(
         verb="loaded",
         write_queue=write_queue,
     )
+
+
+app.add_typer(_skills.app, name="skills")

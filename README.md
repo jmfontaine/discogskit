@@ -30,6 +30,18 @@ uv tool install discogskit
 uvx discogskit
 ```
 
+### AI coding agent skill
+
+Install the skill so your AI coding agent can find and drive discogskit:
+
+```bash
+npx skills add jmfontaine/discogskit
+```
+
+The installed skill is a thin pointer. The usage guide ships inside the package, so it always matches the installed
+version: `discogskit skills get core` prints it, `discogskit skills get core --full` adds every command and option,
+the table schemas, the DDL `load` runs and example queries, and `discogskit skills path` prints where the files are.
+
 ## Usage
 
 ```text
@@ -48,6 +60,7 @@ uvx discogskit
 ╭─ Commands ───────────────────────────────────────────────────────────────────────────────────╮
 │ convert  Convert Discogs XML dumps into flat files (Parquet or JSONL).                       │
 │ load     Load Discogs XML dumps into a database.                                             │
+│ skills   List or print the bundled agent skills: usage guides matching this version.         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
 ```
@@ -169,7 +182,8 @@ JSONL bzip2 1-9, Parquet gzip 1-9, Parquet zstd -131072 to 22. `snappy` and `non
 │                                                                     [default: 256]           │
 │ --parse-workers                            <int range> [x>=1]       Number of parallel parse │
 │                                                                     workers                  │
-│                                                                     [default: 4]             │
+│                                                                     [default: (half the CPU  │
+│                                                                     count, at least 1)]      │
 │ --write-queue                              <int range> [x>=1]       Chunks parsing may run   │
 │                                                                     ahead of writing: at     │
 │                                                                     most --parse-workers     │
@@ -293,7 +307,8 @@ absolute) or a plain path ending in `.db`, `.sqlite`, or `.sqlite3`. Other `sqli
 │                                                          this size (MB)                      │
 │                                                          [default: 256]                      │
 │ --parse-workers                      <int range> [x>=1]  Number of parallel parse workers    │
-│                                                          [default: 4]                        │
+│                                                          [default: (half the CPU count, at   │
+│                                                          least 1)]                           │
 │ --write-queue                        <int range> [x>=1]  Chunks parsing may run ahead of     │
 │                                                          writing: at most --parse-workers    │
 │                                                          plus this many chunks are parsing   │
