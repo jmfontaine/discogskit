@@ -94,25 +94,19 @@ class TestArtistsParsing:
         ):
             extract_chunk_to_ipc(ChunkArgs("artists", str(f), 0, os.path.getsize(f)))
 
+    @pytest.mark.filterwarnings("error")
     def test_strict_no_warnings_on_known_xml(self, artists_xml_file):
         """Strict mode produces no warnings when all XML elements are handled."""
-        import warnings
-
         size = os.path.getsize(artists_xml_file)
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            ipc_dict = extract_chunk_to_ipc(
-                ChunkArgs("artists", str(artists_xml_file), 0, size, strict=True)
-            )
-            tables = ipc_to_tables(ipc_dict, SCHEMAS)
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("artists", str(artists_xml_file), 0, size, strict=True)
+        )
+        tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         assert tables["artists"].num_rows == 2
-        unhandled = [x for x in w if "unhandled" in str(x.message)]
-        assert unhandled == []
 
     def test_strict_warns_on_unknown_element(self, tmp_path):
         """Strict mode warns about unhandled XML elements."""
-        import warnings
 
         xml = (
             "<artist>\n"
@@ -125,20 +119,18 @@ class TestArtistsParsing:
         f = tmp_path / "unknown.xml"
         f.write_text(xml)
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
+        with pytest.warns(UserWarning, match="unhandled") as record:
             extract_chunk_to_ipc(
                 ChunkArgs("artists", str(f), 0, os.path.getsize(f), strict=True)
             )
 
-        unhandled = [x for x in w if "unhandled" in str(x.message)]
-        assert len(unhandled) == 1
-        assert "brand_new_tag" in str(unhandled[0].message)
+        assert [str(w.message) for w in record] == [
+            "unhandled XML element <brand_new_tag> in <artist>"
+        ]
 
     def test_strict_ignores_comments_and_pis(self, tmp_path):
         """Comments and processing instructions inside a record aren't elements: strict mode reports only the unknown
         element, and the text around a comment is kept whole."""
-        import warnings
 
         xml = (
             "<artist>\n"
@@ -153,21 +145,20 @@ class TestArtistsParsing:
         f = tmp_path / "comments.xml"
         f.write_text(xml)
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
+        with pytest.warns(UserWarning, match="unhandled") as record:
             ipc_dict = extract_chunk_to_ipc(
                 ChunkArgs("artists", str(f), 0, os.path.getsize(f), strict=True)
             )
-            tables = ipc_to_tables(ipc_dict, SCHEMAS)
+        tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
-        unhandled = [x for x in w if "unhandled" in str(x.message)]
-        assert len(unhandled) == 1
-        assert "brand_new_tag" in str(unhandled[0].message)
+        assert [str(w.message) for w in record] == [
+            "unhandled XML element <brand_new_tag> in <artist>"
+        ]
         assert tables["artists"].column("name").to_pylist() == ["Test"]
 
+    @pytest.mark.filterwarnings("error")
     def test_no_warnings_without_strict(self, tmp_path):
         """Without strict mode, unknown elements produce no warnings."""
-        import warnings
 
         xml = (
             "<artist>\n"
@@ -180,9 +171,4 @@ class TestArtistsParsing:
         f = tmp_path / "unknown.xml"
         f.write_text(xml)
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            extract_chunk_to_ipc(ChunkArgs("artists", str(f), 0, os.path.getsize(f)))
-
-        unhandled = [x for x in w if "unhandled" in str(x.message)]
-        assert unhandled == []
+        extract_chunk_to_ipc(ChunkArgs("artists", str(f), 0, os.path.getsize(f)))

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pyarrow as pa
 import pytest
 
+from discogskit.entities import ENTITIES, get
 from discogskit.writers.postgresql import generate_ddl
 
 
@@ -22,17 +23,6 @@ class TestGenerateDDL:
         assert '"name" TEXT' in ddl
         assert '"value" INTEGER' in ddl
 
-    def test_pg_types(self):
-        schema = pa.schema(
-            [
-                pa.field("flag", pa.bool_(), nullable=False),
-                pa.field("big", pa.int64(), nullable=False),
-            ]
-        )
-        ddl = generate_ddl("t", schema).as_string(None)
-        assert "BOOLEAN" in ddl
-        assert "BIGINT" in ddl
-
     def test_list_type_becomes_array(self):
         schema = pa.schema(
             [
@@ -41,6 +31,11 @@ class TestGenerateDDL:
         )
         ddl = generate_ddl("t", schema).as_string(None)
         assert "TEXT[]" in ddl
+
+    def test_logged_table_default(self):
+        schema = pa.schema([pa.field("x", pa.int32(), nullable=True)])
+        ddl = generate_ddl("t", schema).as_string(None)
+        assert "UNLOGGED" not in ddl
 
     def test_not_null_without_default(self):
         """A DEFAULT would hide a missing value, e.g. DEFAULT 0 on a foreign key (#21)."""
@@ -65,24 +60,42 @@ class TestGenerateDDL:
         ddl = generate_ddl("t", schema).as_string(None)
         assert "NOT NULL" not in ddl
 
+    def test_pg_types(self):
+        schema = pa.schema(
+            [
+                pa.field("flag", pa.bool_(), nullable=False),
+                pa.field("big", pa.int64(), nullable=False),
+            ]
+        )
+        ddl = generate_ddl("t", schema).as_string(None)
+        assert "BOOLEAN" in ddl
+        assert "BIGINT" in ddl
+
+    @pytest.mark.parametrize("entity_name", sorted(ENTITIES))
+    def test_real_entity_schemas(self, entity_name):
+        """Every table of every entity: each column quoted (``join`` is a keyword), typed, and NOT NULL
+        exactly where the Arrow field is non-nullable."""
+        pg_types = {pa.bool_(): "BOOLEAN", pa.int32(): "INTEGER", pa.utf8(): "TEXT"}
+        for table_name, schema in get(entity_name).schemas.items():
+            columns = []
+            for field in schema:
+                if isinstance(field.type, pa.ListType):
+                    pg_type = pg_types[field.type.value_type] + "[]"
+                else:
+                    pg_type = pg_types[field.type]
+                not_null = "" if field.nullable else " NOT NULL"
+                columns.append(f'"{field.name}" {pg_type}{not_null}')
+
+            ddl = generate_ddl(table_name, schema).as_string(None)
+
+            assert ddl == (
+                f'CREATE TABLE "{table_name}" (\n    ' + ",\n    ".join(columns) + "\n)"
+            )
+
     def test_unlogged_table(self):
         schema = pa.schema([pa.field("x", pa.int32(), nullable=True)])
         ddl = generate_ddl("t", schema, unlogged=True).as_string(None)
         assert "CREATE UNLOGGED TABLE" in ddl
-
-    def test_logged_table_default(self):
-        schema = pa.schema([pa.field("x", pa.int32(), nullable=True)])
-        ddl = generate_ddl("t", schema).as_string(None)
-        assert "UNLOGGED" not in ddl
-
-    def test_unsupported_type_raises(self):
-        schema = pa.schema(
-            [
-                pa.field("ts", pa.timestamp("us"), nullable=False),
-            ]
-        )
-        with pytest.raises(ValueError, match="Unsupported Arrow type"):
-            generate_ddl("t", schema)
 
     def test_unsupported_list_value_type_raises(self):
         schema = pa.schema(
@@ -91,4 +104,13 @@ class TestGenerateDDL:
             ]
         )
         with pytest.raises(ValueError, match="Unsupported list value type"):
+            generate_ddl("t", schema)
+
+    def test_unsupported_type_raises(self):
+        schema = pa.schema(
+            [
+                pa.field("ts", pa.timestamp("us"), nullable=False),
+            ]
+        )
+        with pytest.raises(ValueError, match="Unsupported Arrow type"):
             generate_ddl("t", schema)
