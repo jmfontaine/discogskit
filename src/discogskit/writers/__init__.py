@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -109,6 +110,42 @@ def get_writer(
         return SQLiteWriter(path, fk=fk, overwrite=overwrite)
 
     raise ValueError(
-        f"Unsupported database DSN: {dsn!r}. "
+        f"Unsupported database DSN: {_redact_dsn(dsn)!r}. "
         f"Expected postgresql://, postgres:// or a SQLite path (.db/.sqlite/.sqlite3)."
     )
+
+
+# A URL's scheme, at the start: "://" inside a keyword/value DSN (e.g. in a password) doesn't make it a URL.
+_URL_SCHEME = r"\s*[A-Za-z][A-Za-z0-9+.-]*://"
+# A URL's userinfo password: from the colon after the user name to the last "@", so an unencoded "@", "/" or "?" in
+# the password is still covered (at worst, more than the password is hidden).
+_URL_PASSWORD = re.compile(rf"^({_URL_SCHEME}[^:@/?#]*:).*@", re.DOTALL)
+# A URL's query string, hidden whole: a password parameter can be spelled many ways (e.g. ``%70assword``).
+_URL_QUERY = re.compile(r"\?.*", re.DOTALL)
+# One libpq keyword/value pair, lexed as libpq does: the keyword, "=", then a single-quoted value or an unquoted one up
+# to the first unescaped whitespace, with backslash escapes in both.
+_KEYWORD_PAIR = re.compile(
+    r"(\s*([^=\s]+)\s*=\s*)('(?:[^'\\]|\\.)*'|(?!')(?:[^\s\\]|\\.)*)", re.DOTALL
+)
+
+
+def _redact_dsn(dsn: str) -> str:
+    """``dsn`` with its password, and a URL's whole query string, replaced by ``***``, for error messages."""
+    if re.match(_URL_SCHEME, dsn):
+        return _URL_QUERY.sub(
+            "?***", _URL_PASSWORD.sub(r"\1***@", dsn, count=1), count=1
+        )
+    if "=" not in dsn:
+        # A path: it can't hold a keyword/value password.
+        return dsn
+    parts = []
+    pos = 0
+    while dsn[pos:].strip():
+        pair = _KEYWORD_PAIR.match(dsn, pos)
+        if pair is None:
+            # Not valid keyword/value syntax, so there's no telling which part is a password.
+            return "***"
+        password = pair.group(2).lower() == "password"
+        parts.append(pair.group(1) + ("***" if password else pair.group(3)))
+        pos = pair.end()
+    return "".join(parts) + dsn[pos:]

@@ -102,3 +102,60 @@ class TestGetWriter:
     def test_unknown_dsn_raises(self):
         with pytest.raises(ValueError, match="Unsupported database DSN"):
             get_writer("unknown://something")
+
+    @pytest.mark.parametrize(
+        "dsn",
+        [
+            "postgresql+psycopg://user:s3cr3t@localhost/discogs",
+            # Unencoded "@", "/" and "?" in the password: everything up to the last "@" is userinfo.
+            "mysql://user:s3/cr@3t@localhost/discogs",
+            "mysql://user:s3?cr3t@localhost/discogs?sslmode=require",
+            "postgresql+psycopg://user@localhost/discogs?password=s3cr3t&sslmode=require",
+            # A percent-encoded parameter name, which libpq decodes.
+            "postgresql+psycopg://user@localhost/discogs?%70assword=s3cr3t",
+            "host=localhost password=s3cr3t dbname=discogs",
+            "host=localhost password = s3&cr3t dbname=discogs",
+            "host=localhost password=s3\\ cr3t dbname=discogs",
+            "host=localhost password='s3 cr3t' dbname=discogs",
+            "host=localhost password='s3\\' cr3t' dbname=discogs",
+            # Unterminated quote: not valid keyword/value syntax, so the whole DSN is hidden.
+            "host=localhost password='s3 cr3t",
+            "host=localhost password='s3 x=cr3t",
+            # "://" in a keyword/value password doesn't make the DSN a URL.
+            "host=localhost password='https://s3 cr3t' dbname=discogs",
+            "host=localhost password=http://s3cr3t dbname=discogs",
+            # "password=" inside another keyword's value isn't the password keyword.
+            "application_name='password=' password='s3 cr3t' dbname=discogs",
+        ],
+    )
+    def test_unsupported_dsn_error_hides_the_password(self, dsn):
+        with pytest.raises(ValueError, match="Unsupported database DSN") as excinfo:
+            get_writer(dsn)
+        message = str(excinfo.value)
+        assert "s3" not in message
+        assert "cr3t" not in message
+        assert "***" in message
+
+    @pytest.mark.parametrize(
+        "dsn, shown",
+        [
+            (
+                "postgresql+psycopg://user:s3cr3t@localhost:5432/discogs",
+                "postgresql+psycopg://user:***@localhost:5432/discogs",
+            ),
+            (
+                "postgresql+psycopg://user@localhost/discogs?sslmode=require",
+                "postgresql+psycopg://user@localhost/discogs?***",
+            ),
+            (
+                "application_name='password=' password='s3 cr3t' dbname=discogs",
+                "application_name='password=' password=*** dbname=discogs",
+            ),
+            ("host=localhost password='s3 cr3t", "***"),
+            ("output/discogs.txt", "output/discogs.txt"),
+        ],
+    )
+    def test_unsupported_dsn_error_keeps_the_rest_of_the_dsn(self, dsn, shown):
+        with pytest.raises(ValueError) as excinfo:
+            get_writer(dsn)
+        assert f"Unsupported database DSN: {shown!r}." in str(excinfo.value)
