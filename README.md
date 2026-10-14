@@ -202,6 +202,15 @@ passed). Without `--overwrite`, the load stops if any of its tables already exis
 existing tables are dropped and recreated, all in one transaction; if your own views or foreign keys depend on them,
 the load stops and lists those objects instead of dropping them.
 
+In SQLite, the tables are likewise dropped and recreated in one transaction: if a drop fails (e.g. with `--fk`, a
+table of your own references `artists` and has rows), the load stops and every table stays as it was. During the
+load, the file is in WAL journal mode with `synchronous=OFF`, for speed, so an OS crash or power loss mid-load can
+corrupt it. When the load finishes, discogskit sets `synchronous=FULL`, checkpoints the WAL into the database file,
+and switches the file back to the journal mode it had before (rollback-journal `delete` for a new file); a failed
+load tries the same before it exits. The finished database is then durable, and opens without `-wal`/`-shm` files,
+even from a read-only directory. List columns (e.g. `namevariations`, `genres`) are stored as compact JSON text with
+non-ASCII characters as-is, e.g. `["Björk","ビョーク"]`, so `LIKE` matches them; `json_each()` reads them as arrays.
+
 After a failed or interrupted `load` (crash, Ctrl+C, lost connection), re-run it with `--overwrite`: the tables
 aren't consistent until a load finishes. Chunks commit as they go, so earlier chunks stay in the tables after a
 failure. With PostgreSQL and `--pg-write-workers` above its default of 1, each table group commits on its own
