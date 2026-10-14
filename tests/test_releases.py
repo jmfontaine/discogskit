@@ -215,7 +215,25 @@ class TestReleasesParsing:
         with pytest.raises(
             ValueError,
             match=r"^Invalid <release> record in .* at chunk line 1 \(chunk bytes \d+-\d+, id='7'\):"
-            r" <sub_tracks> nested in sub-track '1a' of track '1'$",
+            r" <sub_tracks> nested in sub-track '1a' of track '1' at chunk line 6$",
+        ):
+            extract_chunk_to_ipc(ChunkArgs("releases", str(f), 0, os.path.getsize(f)))
+
+    def test_nested_sub_tracks_line_past_libxml2_limit(self, tmp_path):
+        """The nested <sub_tracks> line is its own past line 65535, where lxml reports its parent's line 1 (#96)."""
+        xml = (
+            '<release id="7" status="Accepted"><tracklist><track><position>1</position>'
+            "<sub_tracks><track><position>1a</position><title>"
+            + "\n" * 70_000
+            + "</title><sub_tracks/></track></sub_tracks></track></tracklist></release>\n"
+        )
+        f = tmp_path / "nested_sub_tracks.xml"
+        f.write_text(xml)
+
+        with pytest.raises(
+            ValueError,
+            match=r"^Invalid <release> record in .* at chunk line 1 \(chunk bytes \d+-\d+, id='7'\):"
+            r" <sub_tracks> nested in sub-track '1a' of track '1' at chunk line 70001$",
         ):
             extract_chunk_to_ipc(ChunkArgs("releases", str(f), 0, os.path.getsize(f)))
 

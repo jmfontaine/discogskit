@@ -95,8 +95,11 @@ def _cpu_stat(cgroup: Path) -> dict[str, int]:
     }
 
 
-def measure(command: list[str], cgroup: Path, log: Path) -> Run:
-    """Run ``command`` in a fresh ``cgroup``, with its output in ``log``; raise BenchmarkError if it fails."""
+def measure(command: list[str], cgroup: Path, log: Path, name: str) -> Run:
+    """Run ``command`` in a fresh ``cgroup``, with its output in ``log``; raise BenchmarkError if it fails.
+
+    The error names the run as ``name``, not ``command``, which can hold a DSN with a password.
+    """
     cgroup.mkdir()
     try:
         with log.open("wb") as output:
@@ -109,9 +112,7 @@ def measure(command: list[str], cgroup: Path, log: Path) -> Run:
             wall = time.perf_counter() - start
         if returncode:
             tail = "\n".join(log.read_text(errors="replace").splitlines()[-40:])
-            raise BenchmarkError(
-                f"{' '.join(command)} exited with {returncode}:\n{tail}"
-            )
+            raise BenchmarkError(f"{name} exited with {returncode}:\n{tail}")
         cpu = _cpu_stat(cgroup)
         return Run(
             cpu_system_seconds=cpu["system_usec"] / 1e6,
@@ -313,20 +314,20 @@ def main(
         logs = output / "logs"
         logs.mkdir(parents=True, exist_ok=True)
         runs: dict[tuple[str, str], list[Run]] = {}
-        commands: dict[tuple[str, str], list[str]] = {}
         # Repeats are the outer loop, so drift during the job spreads over every configuration instead of
         # landing on whichever ran last.
         for repeat in range(1, repeats + 1):
             for file in metadata["files"]:
                 for target in names:
                     key = (file["entity"], target)
-                    commands[key] = _command(target, subset / file["file"], work, dsn)
+                    name = f"{file['entity']} -> {target}"
                     _reset(target, work, dsn)
-                    typer.echo(f"Run {repeat}/{repeats}: {file['entity']} -> {target}")
+                    typer.echo(f"Run {repeat}/{repeats}: {name}")
                     run = measure(
-                        commands[key],
+                        _command(target, subset / file["file"], work, dsn),
                         cgroup / "run",
                         logs / f"{file['entity']}-{target}-{repeat}.log",
+                        name,
                     )
                     typer.echo(
                         f"  {_seconds(run.wall_seconds)}, memory.peak {_gib(run.memory_peak_bytes)}"
@@ -338,7 +339,6 @@ def main(
             "repeats": repeats,
             "results": [
                 {
-                    "command": commands[key],
                     "entity": key[0],
                     "runs": [asdict(run) for run in key_runs],
                     "stats": {
