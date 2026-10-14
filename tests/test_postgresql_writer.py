@@ -9,7 +9,7 @@ import signal
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlsplit
 
@@ -569,6 +569,71 @@ class TestWriteWorkerCap:
         assert adbc_connect.call_count == 2
 
 
+class TestCancelRequests:
+    """cancel() never blocks its caller, and close() never frees a connection a cancel request still uses (#110)."""
+
+    @staticmethod
+    def _writer(monkeypatch, *conns):
+        import adbc_driver_postgresql.dbapi as adbc_pg
+        import psycopg
+
+        from discogskit.writers import postgresql
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        ddl_conn = MagicMock()
+        ddl_conn.execute.return_value.fetchone.return_value = ("public",)
+        monkeypatch.setattr(psycopg, "connect", MagicMock(return_value=ddl_conn))
+        monkeypatch.setattr(adbc_pg, "connect", MagicMock(side_effect=conns))
+        monkeypatch.setattr(postgresql, "_CLOSE_TIMEOUT", 0.2)
+        writer = PostgreSQLWriter(
+            "postgresql://unused", overwrite=True, write_workers=len(conns)
+        )
+        writer.setup(get("artists"))
+        return writer
+
+    @staticmethod
+    def _wait_until(condition):
+        deadline = time.monotonic() + 5
+        while not condition():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+    def test_every_write_connection_is_cancelled_then_closed(self, monkeypatch):
+        conns = MagicMock(), MagicMock()
+        writer = self._writer(monkeypatch, *conns)
+        try:
+            writer.cancel()
+            self._wait_until(lambda: all(c.adbc_cancel.called for c in conns))
+        finally:
+            writer.close()
+        for conn in conns:
+            conn.close.assert_called_once()
+
+    def test_unanswered_cancel_request_blocks_neither_cancel_nor_close(
+        self, monkeypatch
+    ):
+        """A server that never answers a cancel request mustn't hang the interrupt.
+
+        close() leaves the write connections open rather than free the cancel handle the request still uses.
+        """
+        release = threading.Event()
+        conn = MagicMock()
+        conn.adbc_cancel = MagicMock(side_effect=lambda: release.wait(10))
+        writer = self._writer(monkeypatch, conn)
+        try:
+            t0 = time.monotonic()
+            writer.cancel()
+            writer.cancel()
+            elapsed = time.monotonic() - t0
+            self._wait_until(lambda: conn.adbc_cancel.called)
+            writer.close()
+        finally:
+            release.set()
+
+        assert elapsed < 1
+        conn.close.assert_not_called()
+
+
 @contextmanager
 def _locked(dsn, tables, *, hold):
     """Hold ACCESS EXCLUSIVE locks on *tables* from another session for up to *hold* seconds."""
@@ -794,6 +859,124 @@ class TestIndexAbort:
         assert sent.is_set()
         assert elapsed < self._HOLD / 2
         assert self._indexed_tables(dsn) == {root}
+
+
+@pytest.mark.integration
+class TestInterruptCancelsCopy:
+    """Ctrl+C cancels a COPY the server blocks, instead of waiting for it (#110).
+
+    The tables are locked from another session once ``setup()`` has created
+    them, so the first COPY waits; the lock lifts after ``_HOLD`` seconds, so a
+    run that waits for the COPY still ends, just late.
+    """
+
+    _HOLD = 15
+
+    @pytest.fixture()
+    def dsn(self, pg_dsn):
+        import psycopg
+        from psycopg import sql
+
+        schema = f"copy_{uuid.uuid4().hex[:8]}"
+        with psycopg.connect(pg_dsn, autocommit=True) as conn:
+            conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        yield f"{pg_dsn}?options=-csearch_path%3D{schema}"
+        with psycopg.connect(pg_dsn, autocommit=True) as conn:
+            conn.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+            )
+
+    @staticmethod
+    def _backends(conn, app_name, *, copy_waiting_on_lock=False):
+        query = (
+            "SELECT COUNT(*) FROM pg_stat_activity WHERE application_name = %s "
+            "AND query LIKE 'COPY%%' AND wait_event_type = 'Lock'"
+            if copy_waiting_on_lock
+            else "SELECT COUNT(*) FROM pg_stat_activity WHERE application_name = %s"
+        )
+        row = conn.execute(query, (app_name,)).fetchone()
+        assert row is not None
+        return row[0]
+
+    @pytest.mark.parametrize("write_workers", [1, 2])
+    def test_interrupt_cancels_blocked_copy(
+        self, dsn, tmp_path, capsys, monkeypatch, write_workers
+    ):
+        import psycopg
+
+        from discogskit import pipeline
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        gz = tmp_path / "discogs_20260301_artists.xml.gz"
+        with gzip.open(gz, "wb") as f:
+            f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
+            f.write(ARTISTS_XML.encode())
+            f.write(b"</artists>")
+        config = pipeline.PipelineConfig(
+            chunk_mb=1,
+            entity="artists",
+            gz_path=gz,
+            keep_xml=False,
+            parse_workers=1,
+            profile=False,
+            progress=False,
+            strict=False,
+            write_queue=1,
+        )
+        main = threading.main_thread().ident
+        assert main is not None
+        sent = threading.Event()
+        app_name = f"discogskit_{uuid.uuid4().hex[:8]}"
+
+        def interrupt_once_a_copy_waits():
+            deadline = time.monotonic() + self._HOLD
+            with psycopg.connect(dsn, autocommit=True) as conn:
+                while time.monotonic() < deadline:
+                    if self._backends(conn, app_name, copy_waiting_on_lock=True):
+                        sent.set()
+                        signal.pthread_kill(main, signal.SIGINT)
+                        return
+                    time.sleep(0.05)
+
+        interrupter = threading.Thread(target=interrupt_once_a_copy_waits)
+        real_setup = PostgreSQLWriter.setup
+        stack = ExitStack()
+
+        def setup(writer, entity):
+            real_setup(writer, entity)
+            stack.enter_context(_locked(dsn, entity.table_order, hold=self._HOLD))
+            interrupter.start()
+
+        monkeypatch.setattr(PostgreSQLWriter, "setup", setup)
+        writer = PostgreSQLWriter(
+            f"{dsn}&application_name={app_name}",
+            overwrite=True,
+            write_workers=write_workers,
+        )
+        try:
+            with stack:
+                t0 = time.monotonic()
+                try:
+                    with pytest.raises(KeyboardInterrupt):
+                        pipeline.run(config, writer)
+                finally:
+                    elapsed = time.monotonic() - t0
+                    if interrupter.is_alive():
+                        interrupter.join()
+        finally:
+            writer.close()
+
+        # A closed connection's backend can take a moment to leave pg_stat_activity.
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            deadline = time.monotonic() + 5
+            while (left := self._backends(conn, app_name)) and (
+                time.monotonic() < deadline
+            ):
+                time.sleep(0.05)
+        assert left == 0
+        assert sent.is_set()
+        assert elapsed < self._HOLD / 2
+        assert "Interrupted" in capsys.readouterr().out
 
 
 @pytest.mark.integration

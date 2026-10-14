@@ -59,6 +59,9 @@ class JSONLWriter:
         self._files: dict[str, IO] = {}
         self._staged: StagedFiles | None = None
 
+    def cancel(self) -> None:
+        """Do nothing: a local file write can't stall the way a database server can."""
+
     def check(self, entity: EntityDef) -> None:
         """Raise ``OutputExistsError`` if ``entity``'s directory holds JSONL files and overwrite is off."""
         entity_dir = self._output_dir / entity.name

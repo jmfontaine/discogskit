@@ -59,13 +59,16 @@ Key design decisions
   as its future completes. Writes queued behind a failed one are skipped.
   Any failure (writer, parser, dead worker, Ctrl+C) cancels queued chunks
   and writes, then waits for the chunks already being parsed and the
-  in-flight write, so the writer is idle before the caller closes it.
+  in-flight write, so the writer is idle before the caller closes it. On
+  Ctrl+C, the writer's ``cancel()`` first cancels the in-flight write, which
+  may otherwise wait forever on a stalled database server.
 """
 
 from __future__ import annotations
 
 import multiprocessing
 import signal
+import threading
 import time
 from collections import deque
 from concurrent.futures import (
@@ -75,7 +78,7 @@ from concurrent.futures import (
     ThreadPoolExecutor,
     wait,
 )
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -311,6 +314,50 @@ class _ChunkWriter:
             )
 
 
+# Seconds between cancel requests while an interrupted write stops. The server ignores a cancel that reaches a
+# connection before its statement starts (e.g. while the chunk is still being deserialized, or between two tables), so
+# the request repeats until the write has stopped.
+_CANCEL_INTERVAL = 0.5
+
+
+def _cancel_until_done(writer: Writer, writer_done: threading.Event) -> None:
+    """Call ``writer.cancel()`` every ``_CANCEL_INTERVAL`` seconds until ``writer_done`` is set.
+
+    ``writer_done`` is set once the writer thread has exited, which its executor, already shut down, lets it do once
+    its current write ends. Waiting on the thread rather than on the write futures also covers a Ctrl+C that lands
+    after a write was handed to the thread but before its future was recorded.
+    """
+    while True:
+        # A second Ctrl+C mustn't cut this short: the caller would close the
+        # writer while a write still runs on it.
+        try:
+            # Best effort: the interrupt is what gets reported, not a failed cancel.
+            with suppress(Exception):
+                writer.cancel()
+            if writer_done.wait(_CANCEL_INTERVAL):
+                return
+        except KeyboardInterrupt:
+            continue
+
+
+def _watch(thread: threading.Thread) -> threading.Event:
+    """An Event set once ``thread`` has exited.
+
+    The join runs on a thread of its own: before Python 3.13, a Ctrl+C that interrupts ``join()`` on the main thread
+    marks the thread as stopped while it still runs.
+    """
+    done = threading.Event()
+
+    def join_then_set() -> None:
+        thread.join()
+        done.set()
+
+    threading.Thread(
+        daemon=True, name="discogskit-writer-watch", target=join_then_set
+    ).start()
+    return done
+
+
 def _parse_and_write(
     chunks: list[ChunkArgs],
     chunk_writer: _ChunkWriter,
@@ -343,12 +390,15 @@ def _parse_and_write(
         max_workers=1, thread_name_prefix="discogskit-writer"
     )
     parse_executor: ProcessPoolExecutor | None = None
+    writer_done: threading.Event | None = None
     try:
         # Start the writer thread before the first real write. The executor
         # tracks its thread only once submit() has started it, and that write
         # can begin first: a Ctrl+C landing in between would leave it running
-        # where shutdown() can't wait for it.
-        write_executor.submit(int).result()
+        # where shutdown() can't wait for it. One worker, so this is the thread
+        # every write runs on; a Ctrl+C before it's watched comes before any
+        # write, so there's nothing to cancel.
+        writer_done = _watch(write_executor.submit(threading.current_thread).result())
         # Workers ignore SIGINT so they don't dump tracebacks on Ctrl+C; the
         # parent handles the interrupt and stops them.
         parse_executor = ProcessPoolExecutor(
@@ -399,13 +449,18 @@ def _parse_and_write(
         if progress_bar is not None:
             progress_bar.stop()
         if isinstance(exc, KeyboardInterrupt):
-            # Neither the in-flight write nor chunks being parsed can be
-            # interrupted; say why we pause.
+            # Chunks being parsed can't be interrupted; say why we pause.
             console.print(
                 "\n  [yellow]Interrupted — waiting for in-flight chunks to finish …[/]"
             )
         # Drop queued writes now, so none starts while the workers stop.
         write_executor.shutdown(cancel_futures=True, wait=False)
+        if isinstance(exc, KeyboardInterrupt) and writer_done is not None:
+            # Cancel the in-flight write, which may otherwise wait forever on a
+            # stalled server: ADBC's own Ctrl+C handling only covers statements
+            # run on the main thread. After dropping the queued writes, so the
+            # thread exits once that write ends.
+            _cancel_until_done(chunk_writer.writer, writer_done)
         if parse_executor is not None:
             # Drop queued chunks and wait for those being parsed (about one per
             # worker). Not terminate_workers() (3.14+): a worker killed while

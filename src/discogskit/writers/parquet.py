@@ -40,6 +40,9 @@ class ParquetWriter:
         self._staged: StagedFiles | None = None
         self._writers: dict[str, pq.ParquetWriter] = {}
 
+    def cancel(self) -> None:
+        """Do nothing: a local file write can't stall the way a database server can."""
+
     def check(self, entity: EntityDef) -> None:
         """Raise ``OutputExistsError`` if ``entity``'s directory holds Parquet files and overwrite is off."""
         entity_dir = self._output_dir / entity.name
