@@ -8,6 +8,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+from importlib.metadata import version
 from pathlib import Path
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
@@ -135,6 +136,7 @@ _WRITER_CLOSE_FAILURE_IDS = [
 class TestNoTracebacks:
     """Every unhandled exception from the pipeline must produce a clean error message."""
 
+    @pytest.mark.parametrize("command", ["convert", "load"])
     @pytest.mark.parametrize(
         "exc",
         [
@@ -144,48 +146,22 @@ class TestNoTracebacks:
         ],
         ids=["RuntimeError", "TypeError", "ValueError"],
     )
-    def test_convert_unexpected_exception(self, tmp_path: Path, exc: Exception) -> None:
-        gz = _make_gz(tmp_path)
-        with patch("discogskit.cli.pipeline.run", side_effect=exc):
-            result = runner.invoke(app, ["convert", str(gz), "-f", "parquet"])
-        assert result.exit_code != 0
-        assert "Traceback" not in result.output
-
-    @pytest.mark.parametrize(
-        "exc",
-        [
-            RuntimeError("something broke"),
-            TypeError("bad type"),
-            ValueError("bad value"),
-        ],
-        ids=["RuntimeError", "TypeError", "ValueError"],
-    )
-    def test_load_unexpected_exception(self, tmp_path: Path, exc: Exception) -> None:
+    def test_unexpected_exception(
+        self, tmp_path: Path, command: str, exc: Exception
+    ) -> None:
         gz = _make_gz(tmp_path)
         with (
             patch("discogskit.cli.pipeline.run", side_effect=exc),
             patch("discogskit.cli.get_writer"),
         ):
-            result = runner.invoke(app, ["load", str(gz)])
-        assert result.exit_code != 0
-        assert "Traceback" not in result.output
-
-    def test_convert_shows_error_message(self, tmp_path: Path) -> None:
-        gz = _make_gz(tmp_path)
-        with patch(
-            "discogskit.cli.pipeline.run", side_effect=RuntimeError("disk full")
-        ):
-            result = runner.invoke(app, ["convert", str(gz), "-f", "parquet"])
-        assert "disk full" in result.output
-
-    def test_load_shows_error_message(self, tmp_path: Path) -> None:
-        gz = _make_gz(tmp_path)
-        with (
-            patch("discogskit.cli.pipeline.run", side_effect=RuntimeError("disk full")),
-            patch("discogskit.cli.get_writer"),
-        ):
-            result = runner.invoke(app, ["load", str(gz)])
-        assert "disk full" in result.output
+            result = runner.invoke(app, [command, str(gz)])
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        # CliRunner turns an escaped exception into result.exception with empty output, so
+        # SystemExit (from typer.Exit) is what proves the handler caught it.
+        assert type(result.exception) is SystemExit, repr(result.exception)
+        assert f"Error: {exc}" in output
+        assert "Traceback" not in output
 
 
 class TestRecordErrorOutput:
@@ -526,6 +502,67 @@ class TestLiteralText:
         assert f"  {'Source':<14s} {gz}" in lines
 
 
+class TestPreflight:
+    @pytest.mark.parametrize(
+        "name, kind, extra, message",
+        [
+            ("", "dir", [], "no .xml.gz files found in {p}"),
+            (_ENTITY_FILE, "missing", [], "file not found: {p}"),
+            (
+                "discogs_20260301_unknown.xml.gz",
+                "file",
+                [],
+                (
+                    "Cannot detect entity from 'discogs_20260301_unknown.xml.gz'. Expected format: "
+                    "discogs_YYYYMMDD_ENTITY.xml.gz (known entities: artists, labels, masters, releases)"
+                ),
+            ),
+            (
+                _ENTITY_FILE,
+                "file",
+                ["--pg-create-schema"],
+                "--pg-create-schema requires --pg-schema.",
+            ),
+        ],
+        ids=[
+            "empty-dir",
+            "missing-file",
+            "unknown-entity",
+            "create-schema-without-schema",
+        ],
+    )
+    def test_load_rejects_bad_input_before_opening_the_database(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        name: str,
+        kind: str,
+        extra: list[str],
+        message: str,
+    ) -> None:
+        """Bad input fails with exit 1 before the writer is built, so no SQLite file is left behind."""
+        inputs = tmp_path / "in"
+        inputs.mkdir()
+        p = inputs / name
+        if kind == "file":
+            p.write_bytes(b"not a real gz")
+        db = tmp_path / "out.db"
+        _widen_console(monkeypatch)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = runner.invoke(app, ["load", str(p), "--dsn", str(db), *extra])
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        assert type(result.exception) is SystemExit, repr(result.exception)
+        assert f"Error: {message.format(p=p)}\n" in output
+        run.assert_not_called()
+        assert not db.exists()
+
+    def test_version(self) -> None:
+        result = runner.invoke(app, ["--version"])
+        assert result.exit_code == 0, result.output
+        assert _unstyle(result.output) == f"discogskit {version('discogskit')}\n"
+
+
 class TestFormatAndCompressionEnums:
     def test_compression_default_for_jsonl_is_none(self, tmp_path: Path) -> None:
         gz = _make_gz(tmp_path)
@@ -660,8 +697,12 @@ class TestOptionMinimums:
 
 
 class TestFkOption:
-    def test_fk_enforced_in_sqlite(self, tmp_path: Path) -> None:
-        """--fk (renamed from --pg-fk, #38) enforces foreign keys in SQLite too."""
+    def test_fk_declared_in_sqlite(self, tmp_path: Path) -> None:
+        """--fk (renamed from --pg-fk, #38) reaches SQLite: the child tables declare their keys.
+
+        Enforcement is per connection, so it can't be checked once the CLI has closed the database;
+        ``test_sqlite_writer.py``'s ``test_fk_rejects_orphan_child_row`` covers it.
+        """
         gz = tmp_path / "discogs_20260301_artists.xml.gz"
         with gzip.open(gz, "wb") as f:
             f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
