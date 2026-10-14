@@ -82,7 +82,7 @@ PostgreSQL:
 - `--pg-index-workers <int range>`: Number of parallel index creation workers [default: 2; x>=1]
 - `--pg-schema <str>`: Schema to create tables in (must exist unless --pg-create-schema)
 - `--pg-unlogged / --no-pg-unlogged`: Skip WAL for faster writes (tables stay unlogged; data lost on crash) [default: no-pg-unlogged]
-- `--pg-write-workers <int range>`: Number of parallel database write workers [default: 1; x>=1]
+- `--pg-write-workers <int range>`: Number of parallel database write workers. Above 1, each table group commits separately, so a failed load can leave part of a chunk in some tables: re-run the whole load with --overwrite [default: 1; x>=1]
 
 ## `discogskit skills`
 

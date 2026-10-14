@@ -248,7 +248,10 @@ dropped, so a load that can't open them (for example, when the server reaches `m
 tables as they were.
 
 `--pg-write-workers` splits each entity's tables into groups, one per worker, and writes each group on its own
-connection. An entity with fewer tables than workers gets one worker per table.
+connection. An entity with fewer tables than workers gets one worker per table. With more than one worker, each group
+commits separately, so a failed load can leave part of a chunk in some tables: those of the groups that committed, but
+not the others. When one group fails, the load waits for the other groups to finish before it reports the error.
+After any failure, re-run the whole load with `--overwrite`.
 
 In SQLite, the tables are likewise dropped and recreated in one transaction: if a drop fails (e.g. with `--fk`, a
 table of your own references `artists` and has rows), the load stops and every table stays as it was. During the
@@ -263,11 +266,9 @@ compact JSON text with non-ASCII characters as-is, e.g. `["Björk","ビョーク
 
 After a failed or interrupted `load` (crash, Ctrl+C, lost connection), re-run it with `--overwrite`: the tables
 aren't consistent until a load finishes. Chunks commit as they go, so earlier chunks stay in the tables after a
-failure. With PostgreSQL and `--pg-write-workers` above its default of 1, each table group commits on its own
-connection, so the chunk that was in progress when the failure happened can itself end up partially written — some
-of its tables committed, others not. When one group fails, the load waits for the other groups to finish before it
-reports the error. With `--pg-write-workers 1` (the default) and with SQLite, a chunk commits in a single transaction
-on one connection, so it's never partially written, but earlier, already-committed chunks are still not rolled back.
+failure. With `--pg-write-workers 1` (the default) and with SQLite, a chunk commits in a single transaction on one
+connection, so it's never partially written, but earlier, already-committed chunks are still not rolled back. With
+`--pg-write-workers` above 1, the chunk that was in progress can itself end up partially written, as described above.
 
 On Ctrl+C, a PostgreSQL load cancels the write in progress on the server instead of waiting for it, so it stops
 promptly even when that write waits on a lock held by another session. The cancelled transaction commits nothing,
@@ -351,7 +352,13 @@ absolute) or a plain path ending in `.db`, `.sqlite`, or `.sqlite3`. Other `sqli
 │                                                                    crash)                    │
 │                                                                    [default: no-pg-unlogged] │
 │ --pg-write-workers                             <int range> [x>=1]  Number of parallel        │
-│                                                                    database write workers    │
+│                                                                    database write workers.   │
+│                                                                    Above 1, each table group │
+│                                                                    commits separately, so a  │
+│                                                                    failed load can leave     │
+│                                                                    part of a chunk in some   │
+│                                                                    tables: re-run the whole  │
+│                                                                    load with --overwrite     │
 │                                                                    [default: 1]              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 

@@ -445,7 +445,7 @@ def load(
     pg_write_workers: Annotated[
         int,
         typer.Option(
-            help="Number of parallel database write workers",
+            help="Number of parallel database write workers. Above 1, each table group commits separately, so a failed load can leave part of a chunk in some tables: re-run the whole load with --overwrite",
             min=1,
             rich_help_panel="PostgreSQL",
         ),

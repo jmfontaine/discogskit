@@ -135,7 +135,9 @@ Errors print `Error: <message>` and exit 1; Ctrl+C exits 130.
 | `--pg-... can only be used with PostgreSQL, not a SQLite DSN` | Drop the `--pg-*` flags for SQLite |
 | `Duplicate <entity> id: <n>` or another value error naming a chunk and line | The dump has a record discogskit can't store as is; nothing is coerced. Report it with the message |
 
-After a failed or interrupted `load`, the tables are incomplete: run it again with `--overwrite`.
+After a failed or interrupted `load`, the tables are incomplete: run it again with `--overwrite`. With
+`--pg-write-workers` above 1, each table group commits separately, so a failed load can leave part of a chunk in some
+tables: re-run the whole load with `--overwrite`.
 
 `convert` writes into an `<entity>.partial-*` directory and moves the files into place only once all are complete,
 so a run that fails before that leaves earlier output untouched. If the move itself fails, files already moved
