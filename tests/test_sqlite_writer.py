@@ -19,6 +19,7 @@ from tests.conftest import (
     empty_ipc,
     ipc_to_record_batches,
     ipc_to_tables,
+    needs_permissions,
 )
 
 
@@ -259,3 +260,118 @@ class TestSQLiteWriter:
             writer2.finalize(entity)
         finally:
             writer2.close()
+
+    @staticmethod
+    def _load(db_path, entity, ipc_dict, **kwargs):
+        writer = SQLiteWriter(db_path, **kwargs)
+        try:
+            writer.setup(entity)
+            writer.write_chunk(ipc_to_record_batches(ipc_dict))
+            writer.finalize(entity)
+        finally:
+            writer.close()
+
+    # Only WAL persists in the file; any other mode reads back as "delete" on a new connection.
+    @pytest.mark.parametrize("journal_mode", ["delete", "wal"])
+    def test_load_restores_journal_mode(self, tmp_path, entity, ipc_dict, journal_mode):
+        """The bulk load's WAL mode is a persistent file property, so the load restores the file's own."""
+        db_path = tmp_path / "test.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(f"PRAGMA journal_mode={journal_mode}")
+        conn.close()
+
+        self._load(str(db_path), entity, ipc_dict)
+
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == journal_mode
+        conn.close()
+
+    def test_failed_load_restores_journal_mode(self, tmp_path, entity, ipc_dict):
+        """A load that stops before finalize() doesn't leave WAL behind, which a rerun would then keep."""
+        db_path = tmp_path / "test.db"
+        writer = SQLiteWriter(str(db_path))
+        try:
+            writer.setup(entity)
+            writer.write_chunk(ipc_to_record_batches(ipc_dict))
+        finally:
+            writer.close()
+
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        assert conn.execute("SELECT COUNT(*) FROM artists").fetchone()[0] == 2
+        conn.close()
+
+    @needs_permissions
+    def test_loaded_database_opens_from_read_only_dir(self, tmp_path, entity, ipc_dict):
+        """A new file ends in rollback-journal mode, with no -wal/-shm files, so it opens read-only."""
+        out = tmp_path / "out"
+        out.mkdir()
+        db_path = out / "test.db"
+        self._load(str(db_path), entity, ipc_dict)
+
+        assert [p.name for p in out.iterdir()] == ["test.db"]
+        out.chmod(0o500)
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            try:
+                assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+                assert conn.execute("SELECT COUNT(*) FROM artists").fetchone()[0] == 2
+            finally:
+                conn.close()
+        finally:
+            out.chmod(0o700)
+
+    def test_failing_drop_keeps_every_table(self, tmp_path, entity, ipc_dict):
+        """With --fk, a user table referencing artists blocks the drop; setup() rolls back every drop."""
+        db_path = str(tmp_path / "test.db")
+        self._load(db_path, entity, ipc_dict, fk=True)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE my_notes (artist_id INTEGER REFERENCES artists(id), note TEXT)"
+        )
+        conn.execute("INSERT INTO my_notes VALUES (1, 'keep me')")
+        conn.commit()
+        before = {
+            t: conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+            for t in [*entity.table_order, "my_notes"]
+        }
+        conn.close()
+
+        writer = SQLiteWriter(db_path, fk=True, overwrite=True)
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+                writer.setup(entity)
+        finally:
+            writer.close()
+
+        conn = sqlite3.connect(db_path)
+        after = {
+            t: conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0] for t in before
+        }
+        conn.close()
+        assert after == before
+
+    def test_lists_are_stored_as_unescaped_compact_json(self, tmp_path, entity):
+        xml = (
+            "<artist><id>1</id><name>Björk</name><data_quality>Correct</data_quality>"
+            "<namevariations><name>Björk</name><name>ビョーク</name></namevariations></artist>\n"
+        )
+        f = tmp_path / "artists.xml"
+        f.write_text(xml, encoding="utf-8")
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("artists", str(f), 0, os.path.getsize(f))
+        )
+        db_path = str(tmp_path / "test.db")
+        self._load(db_path, entity, ipc_dict)
+
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("SELECT namevariations FROM artists").fetchone()[0] == (
+            '["Björk","ビョーク"]'
+        )
+        assert conn.execute(
+            "SELECT id FROM artists WHERE namevariations LIKE '%ö%'"
+        ).fetchall() == [(1,)]
+        assert conn.execute(
+            "SELECT value FROM artists, json_each(namevariations)"
+        ).fetchall() == [("Björk",), ("ビョーク",)]
+        conn.close()
