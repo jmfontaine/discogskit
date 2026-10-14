@@ -14,7 +14,9 @@ the end of each chunk. This is faster than appending to Arrow arrays incremental
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable
 from io import BytesIO
+from typing import TypeVar
 from xml.parsers import expat
 
 import pyarrow as pa
@@ -23,46 +25,25 @@ from pyarrow import ipc
 
 from discogskit.entities import ChunkArgs, Cols, get
 
+_T = TypeVar("_T")
 
-class _Located(Exception):
-    """Stops the expat scan in ``_first_namespaced_child_line`` once it has the line."""
+
+class _ScanResult(Exception):
+    """Carries a visitor's result out of ``_scan_lines``."""
 
 
 def _first_namespaced_child_line(xml_data: bytes) -> int | None:
     """Line where the container's first namespaced direct child starts, or None if expat finds none or rejects the chunk.
 
-    lxml's ``sourceline`` gives the line where an element's start tag ends, and past line 65535 only an estimate, since
-    libxml2 stores element lines in 16 bits; a chunk can run to millions of lines. Expat reports the line where the start
-    tag begins and counts lines in full, but accepts fewer names than libxml2 (e.g. U+0370), so it can fail on a chunk
-    lxml parsed. This re-reads the chunk, so it's for the failure path only.
+    lxml's ``sourceline`` gives the line where an element's start tag ends, and past line 65535 only an estimate; see
+    ``_scan_lines``.
     """
-    parser = expat.ParserCreate(namespace_separator=" ")
-    depth = 0
 
-    def end(_name: str) -> None:
-        nonlocal depth
-        depth -= 1
+    def on_start(name: str, line: int, ancestors: list[str]) -> int | None:
+        # Only the container is open above a direct child; a namespaced name contains the separator.
+        return line if len(ancestors) == 1 and " " in name else None
 
-    def start(name: str, _attrs: object) -> None:
-        nonlocal depth
-        depth += 1
-        # With a separator, expat names a namespaced element "<uri> <local name>".
-        if depth == 2 and " " in name:
-            raise _Located(parser.CurrentLineNumber)
-
-    parser.EndElementHandler = end
-    parser.StartElementHandler = start
-    try:
-        parser.Parse(xml_data, True)
-    except _Located as located:
-        return located.args[0]
-    except expat.ExpatError:
-        return None
-    return None
-
-
-class _RecordFound(Exception):
-    """Stops the expat scan in ``_record_line`` once it reaches the record."""
+    return _scan_lines(xml_data, on_start)
 
 
 def _record_line(
@@ -70,45 +51,82 @@ def _record_line(
 ) -> str:
     """Return the chunk line where ``record``, the ``ordinal``-th record (0-based) the worker parsed, starts.
 
-    lxml's ``sourceline`` isn't enough: libxml2 stores element lines in 16 bits, and past line 65535 it reports what a
-    bounded search inside the element finds, or 65535, e.g. for a compact record whose first text is nested deep.
-    expat counts lines exactly. Only the error path calls this, so the second parse costs nothing on valid data.
+    lxml's ``sourceline`` isn't enough: past line 65535 it reports what a bounded search inside the element finds, or
+    65535, e.g. for a compact record whose first text is nested deep; see ``_scan_lines``.
     """
     root_tag = record.tag
-    # Namespaced names carry their URI ("urn:x artist"), so they never equal a bare tag, just as lxml's never do.
-    parser = expat.ParserCreate(namespace_separator=" ")
-    # (name, start line) of each open element.
-    open_elements: list[tuple[str, int]] = []
+    # Start line of each open record.
+    record_lines: list[int] = []
     seen = 0
 
-    def end(name: str) -> None:
-        nonlocal seen
-        _, line = open_elements.pop()
-        # The worker's selection, in its order: end events of record tags whose parent is the container tag.
-        if name == root_tag and open_elements and open_elements[-1][0] == container:
-            if seen == ordinal:
-                raise _RecordFound(line)
-            seen += 1
+    def is_record(name: str, ancestors: list[str]) -> bool:
+        # The worker's selection: record tags whose parent is the container tag.
+        return name == root_tag and bool(ancestors) and ancestors[-1] == container
 
-    def start(name: str, _attrs: dict[str, str]) -> None:
-        open_elements.append((name, parser.CurrentLineNumber))
+    def on_end(name: str, ancestors: list[str]) -> int | None:
+        nonlocal seen
+        if not is_record(name, ancestors):
+            return None
+        line = record_lines.pop()
+        # The worker handles records in end-event order.
+        if seen == ordinal:
+            return line
+        seen += 1
+        return None
+
+    def on_start(name: str, line: int, ancestors: list[str]) -> None:
+        if is_record(name, ancestors):
+            record_lines.append(line)
+
+    found = _scan_lines(xml_data, on_start, on_end)
+    if found is not None:
+        return str(found)
+    # expat rejected the chunk (or missed the record). From line 65535 on, lxml can report another node's line, even a
+    # smaller one. Its line is the record's own only when the chunk can't reach that line; counting CRs too keeps the
+    # bound safe whatever the line breaks. It's where the start tag ends rather than where it starts.
+    line = record.sourceline
+    if line is not None and xml_data.count(b"\n") + xml_data.count(b"\r") < 65534:
+        return str(line)
+    return "unknown"
+
+
+def _scan_lines(
+    xml_data: bytes,
+    on_start: Callable[[str, int, list[str]], _T | None],
+    on_end: Callable[[str, list[str]], _T | None] | None = None,
+) -> _T | None:
+    """Re-read the chunk with expat, which counts lines exactly, until a visitor returns a value; return that value.
+
+    lxml's ``sourceline`` can't be used for this: libxml2 stores element lines in 16 bits, so past line 65535 it only
+    estimates, and a chunk can run to millions of lines. ``on_start`` gets each element's name, the line where its
+    start tag begins and the names of its open ancestors; ``on_end`` gets the name and the ancestors. Names of
+    namespaced elements are "<uri> <local name>", so they never equal a bare tag, just as lxml's never do.
+
+    Returns None when no visitor returns a value, or when expat rejects the chunk: it accepts fewer names than libxml2
+    (e.g. U+0370), so it can fail on a chunk lxml parsed. This re-reads the whole chunk, so it's for failure paths only.
+    """
+    parser = expat.ParserCreate(namespace_separator=" ")
+    ancestors: list[str] = []
+
+    def end(name: str) -> None:
+        ancestors.pop()
+        if on_end is not None and (result := on_end(name, ancestors)) is not None:
+            raise _ScanResult(result)
+
+    def start(name: str, _attrs: object) -> None:
+        if (result := on_start(name, parser.CurrentLineNumber, ancestors)) is not None:
+            raise _ScanResult(result)
+        ancestors.append(name)
 
     parser.EndElementHandler = end
     parser.StartElementHandler = start
     try:
         parser.Parse(xml_data, True)
-    except _RecordFound as found:
-        return str(found.args[0])
-    # expat rejects some names lxml accepts, e.g. with characters beyond U+FFFF.
+    except _ScanResult as found:
+        return found.args[0]
     except expat.ExpatError:
-        pass
-    # From line 65535 on, lxml can report another node's line, even a smaller one. Its line is the record's own only
-    # when the chunk can't reach that line; counting CRs too keeps the bound safe whatever the line breaks. It's where
-    # the start tag ends rather than where it starts.
-    line = record.sourceline
-    if line is not None and xml_data.count(b"\n") + xml_data.count(b"\r") < 65534:
-        return str(line)
-    return "unknown"
+        return None
+    return None
 
 
 def _serialize_batch(batch: pa.RecordBatch, schema: pa.Schema) -> bytes:
