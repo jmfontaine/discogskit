@@ -202,7 +202,11 @@ def _print_result(
         tbl.add_column("Table", style="cyan")
         tbl.add_column("Time", justify="right")
         tbl.add_column("%", justify="right", style="dim")
-        for key in entity_def.table_order + ["_commit"]:
+        # File writers have no commit step and record no "_commit" timing; only show it when present.
+        keys = entity_def.table_order + (
+            ["_commit"] if "_commit" in table_timings else []
+        )
+        for key in keys:
             t = table_timings.get(key, 0.0)
             pct = t / flush_total * 100 if flush_total else 0
             label = "commit" if key == "_commit" else key
