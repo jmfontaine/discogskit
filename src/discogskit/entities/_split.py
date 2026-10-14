@@ -275,13 +275,17 @@ def find_split_points(
         )
     tag_bytes = tag.encode()
     container_bytes = container.encode()
-    with open(file_path, "rb") as f:
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        try:
-            splits, data_end = _scan_records(
-                mm, tag_bytes, container_bytes, target_chunk_bytes
-            )
-            _check_trailing_content(mm, data_end, tag_bytes, container_bytes)
-            return splits
-        finally:
-            mm.close()
+    try:
+        with open(file_path, "rb") as f:
+            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            try:
+                splits, data_end = _scan_records(
+                    mm, tag_bytes, container_bytes, target_chunk_bytes
+                )
+                _check_trailing_content(mm, data_end, tag_bytes, container_bytes)
+                return splits
+            finally:
+                mm.close()
+    except ValueError as exc:
+        # Callers pass only a path, and mmap's own errors (an empty file) don't name it.
+        raise ValueError(f"{file_path}: {exc}") from exc
