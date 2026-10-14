@@ -10,6 +10,15 @@ An existing ``.xml`` is reused as a cache, so it must only ever hold complete
 output: decompression writes ``<name>.xml.partial`` and renames it into place
 once every byte is on disk.
 
+rapidgzip runs in a child process, which writes ``.partial`` and reports
+success or the exception that stopped it.  On some truncated input rapidgzip
+aborts the process or hangs, in native code: the parent raises
+``DecompressError`` when the child dies without a report or goes
+``_STALL_TIMEOUT`` without reading a chunk, as it does for rapidgzip's
+exceptions.  The parent kills the child on every way out, Ctrl+C included.
+If the parent dies, the child stops before it starts writing or after its
+next chunk, so not while rapidgzip hangs.
+
 Only an XML discogskit wrote is reused or deleted.  Before that rename,
 decompression writes a ``<name>.xml.discogskit`` marker recording the source
 ``.gz`` (resolved path, size, mtime).  An XML whose marker matches the ``.gz``
@@ -38,11 +47,16 @@ from __future__ import annotations
 import bisect
 import enum
 import json
+import multiprocessing
 import os
+import signal
 import struct
+import threading
 import time
 import zlib
 from collections.abc import Callable
+from multiprocessing.connection import Connection
+from multiprocessing.process import BaseProcess
 from pathlib import Path
 
 import rapidgzip
@@ -53,6 +67,21 @@ from discogskit._console import status
 # A blocking acquire waits inside SQLite, where Ctrl+C isn't handled until it
 # returns, so wait in slices this long.
 _LOCK_WAIT_SLICE = 0.5
+
+# How often the parent checks on the decompression child.
+_POLL_INTERVAL = 0.5
+
+# How long the decompression child may go without reading a chunk before it
+# counts as hung, as rapidgzip does on some truncated input.  Progress, not
+# total time: a healthy run reads a 4 MiB chunk many times a second, while a
+# full dump takes minutes.
+_STALL_TIMEOUT = 60.0
+
+# How long the decompression child may take to start running.  Starting it
+# imports discogskit and, with spawn, the calling script again: one that calls
+# discogskit outside an ``if __name__ == "__main__":`` guard waits there
+# forever for the lock this run holds.
+_START_TIMEOUT = 60.0
 
 
 class DecompressError(Exception):
@@ -252,50 +281,20 @@ def _decompress(
     source = _source_identity(gz_path)
     t0 = time.perf_counter()
     try:
-        gz_bits = gz_path.stat().st_size * 8
-        with (
-            rapidgzip.open(str(gz_path), parallelization=workers) as fin,
-            open(partial_path, "wb") as fout,
-        ):
-            checkpoints = [(0, 0)]
-            while True:
-                chunk = fin.read(4 * 1024 * 1024)
-                if not chunk:
-                    break
-                fout.write(chunk)
-                offset, crc = checkpoints[-1]
-                checkpoints.append((offset + len(chunk), zlib.crc32(chunk, crc)))
-            # rapidgzip's ISA-L decoder, built into its Linux wheels but not its
-            # macOS ones, takes a deflate stream that runs out of input for its
-            # end: reads stop early with no error.  A complete .gz is decoded to
-            # its last byte (trailing bytes are already an error), so stopping
-            # anywhere else is truncation.
-            consumed_bits = fin.tell_compressed()
-            if consumed_bits != gz_bits:
-                raise ValueError(
-                    f"decompression ended at byte {consumed_bits // 8:,}"
-                    f" of {gz_bits // 8:,}"
-                )
-            fout.flush()
-            # It can also stop at the end of the file right after a later gzip
-            # member's header, without decoding that member.  A complete .gz
-            # ends with its last member's footer, which has to match the end of
-            # the output.
-            _check_last_member(gz_path, partial_path, checkpoints)
-            # Without this, a power loss can persist the rename below before
-            # the data, leaving a complete-looking but corrupt .xml.
-            os.fsync(fout.fileno())
-    except (KeyboardInterrupt, OSError):
-        # OSError is the filesystem (disk full, permissions), not the gzip:
-        # surface it unchanged so the errno and path reach the user.
+        _run_decompress_child(gz_path, partial_path, workers)
+        # Without this, a power loss can persist the rename below before the
+        # data, leaving a complete-looking but corrupt .xml.  It covers the
+        # child's writes: they're this file's, whichever process syncs it.
+        # Read-only, as a umask may have left the file: POSIX fsync doesn't
+        # need write access, though Windows' does.
+        with open(partial_path, "r+b" if os.name == "nt" else "rb") as written:
+            os.fsync(written.fileno())
+    except BaseException:
+        # Including OSError, the filesystem (disk full, permissions) rather
+        # than the gzip, which surfaces unchanged so the errno and path reach
+        # the user.  The child is gone by now, so nothing writes this again.
         partial_path.unlink(missing_ok=True)
         raise
-    except (RuntimeError, ValueError) as exc:
-        # rapidgzip raises ValueError for corrupt or non-gzip input and a bare
-        # RuntimeError('std::exception') for truncated input; the check above
-        # raises ValueError for truncation rapidgzip doesn't report.
-        partial_path.unlink(missing_ok=True)
-        raise DecompressError(gz_path) from exc
     try:
         with open(marker_path, "wb") as marker:
             marker.write(source)
@@ -315,6 +314,178 @@ def _decompress(
     elapsed = time.perf_counter() - t0
     size_mb = xml_path.stat().st_size / 1024 / 1024
     status("Decompress", f"{size_mb:,.1f} MB", f"[{elapsed:.2f}s]")
+
+
+def _run_decompress_child(gz_path: Path, partial_path: Path, workers: int) -> None:
+    """Run ``_decompress_child`` in a new process; raise what it reports.
+
+    On some truncated input, rapidgzip aborts the process or hangs, in native
+    code Python can't catch or interrupt.  In a child, an abort is the child
+    dying without a report, and a hang is the child going ``_STALL_TIMEOUT``
+    without reading a chunk: both raise ``DecompressError``, the child having
+    been killed, as on every other way out of here.
+    """
+    # Spawn, like the parse workers: forking a process that runs threads (the
+    # writer, a library caller's) can copy a lock another thread holds.
+    ctx = multiprocessing.get_context("spawn")
+    receiver, sender = ctx.Pipe(duplex=False)
+    child = ctx.Process(
+        args=(gz_path, partial_path, sender, workers),
+        name="discogskit-decompress",
+        target=_decompress_child,
+    )
+    try:
+        _start_holding_ctrl_c(child)
+        # With the child holding the only sending end, its death is EOF here.
+        sender.close()
+        running = False
+        heard_at = time.monotonic()
+        while True:
+            if not receiver.poll(_POLL_INTERVAL):
+                silent = time.monotonic() - heard_at
+                if not running and silent >= _START_TIMEOUT:
+                    raise RuntimeError(
+                        f"the decompression process didn't start within"
+                        f" {_START_TIMEOUT:g}s; a script that runs discogskit"
+                        ' must do so under `if __name__ == "__main__":`'
+                    )
+                if running and silent >= _STALL_TIMEOUT:
+                    raise DecompressError(gz_path) from TimeoutError(
+                        f"decompression made no progress for {_STALL_TIMEOUT:g}s"
+                    )
+                continue
+            try:
+                message = receiver.recv()
+            except EOFError:
+                child.join()
+                raise DecompressError(gz_path) from ChildProcessError(
+                    f"the decompression process {_describe_exit(child.exitcode)}"
+                )
+            if isinstance(message, int):  # progress
+                running = True
+                heard_at = time.monotonic()
+                continue
+            error = message
+            break
+        # It has closed rapidgzip and the output, so it's only exiting.
+        child.join(_STALL_TIMEOUT)
+    finally:
+        receiver.close()
+        sender.close()
+        if child.pid is not None:  # started
+            child.kill()
+            child.join()
+    if isinstance(error, (RuntimeError, ValueError)):
+        # rapidgzip raises ValueError for corrupt or non-gzip input and a bare
+        # RuntimeError('std::exception') for truncated input; the child's own
+        # checks raise ValueError for truncation rapidgzip doesn't report.
+        raise DecompressError(gz_path) from error
+    if error is not None:
+        raise error
+
+
+def _describe_exit(exitcode: int | None) -> str:
+    """How a process that ended with ``exitcode`` ended, for an error message."""
+    if exitcode is not None and exitcode < 0:
+        try:
+            return f"was killed by {signal.Signals(-exitcode).name}"
+        except ValueError:  # a signal Python has no name for
+            return f"was killed by signal {-exitcode}"
+    return f"exited with status {exitcode}"
+
+
+def _start_holding_ctrl_c(child: BaseProcess) -> None:
+    """Start ``child``, holding back Ctrl+C until ``child`` records its pid.
+
+    ``start()`` launches the process before it records it, so an interrupt in
+    between would leave a running child that ``child.kill()`` can't reach.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        child.start()  # Python delivers Ctrl+C to the main thread only.
+        return
+    pending = False
+
+    def hold(signum: int, frame: object) -> None:
+        nonlocal pending
+        pending = True
+
+    previous = signal.signal(signal.SIGINT, hold)
+    try:
+        child.start()
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        if pending:  # Delivered again, to whatever handles it normally.
+            signal.raise_signal(signal.SIGINT)
+
+
+def _decompress_child(
+    gz_path: Path,
+    partial_path: Path,
+    result: Connection,
+    workers: int,
+) -> None:
+    """Decompress ``gz_path`` into ``partial_path``, in the process
+    ``_run_decompress_child`` starts.
+
+    Sends on ``result``, for the parent's watchdog, the number of bytes
+    written so far (an ``int``) once running and after each chunk; then
+    ``None`` once ``partial_path`` holds the complete output, or the exception
+    that stopped it.  Stops before writing anything or after a chunk, sending
+    nothing more, if the parent has died.
+    """
+    # The parent handles Ctrl+C, the terminal's for both processes, and kills
+    # this one; here it would only print a traceback.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # A parent that died (killed, say) can't kill this process, and after it
+    # the lock and the .partial path belong to other runs.  This is the
+    # process that started this one even if it died before this line ran, by
+    # when os.getppid() would name whichever process adopted this one.
+    parent = multiprocessing.parent_process()
+
+    def orphaned() -> bool:
+        return parent is not None and not parent.is_alive()
+
+    if orphaned():
+        return
+    result.send(0)
+    try:
+        gz_bits = gz_path.stat().st_size * 8
+        with (
+            rapidgzip.open(str(gz_path), parallelization=workers) as fin,
+            open(partial_path, "wb") as fout,
+        ):
+            checkpoints = [(0, 0)]
+            while True:
+                chunk = fin.read(4 * 1024 * 1024)
+                if not chunk:
+                    break
+                fout.write(chunk)
+                offset, crc = checkpoints[-1]
+                checkpoints.append((offset + len(chunk), zlib.crc32(chunk, crc)))
+                if orphaned():
+                    return
+                result.send(offset + len(chunk))
+            # rapidgzip's ISA-L decoder, built into its Linux wheels but not its
+            # macOS ones, takes a deflate stream that runs out of input for its
+            # end: reads stop early with no error.  A complete .gz is decoded to
+            # its last byte (trailing bytes are already an error), so stopping
+            # anywhere else is truncation.
+            consumed_bits = fin.tell_compressed()
+            if consumed_bits != gz_bits:
+                raise ValueError(
+                    f"decompression ended at byte {consumed_bits // 8:,}"
+                    f" of {gz_bits // 8:,}"
+                )
+            fout.flush()
+            # It can also stop at the end of the file right after a later gzip
+            # member's header, without decoding that member.  A complete .gz
+            # ends with its last member's footer, which has to match the end of
+            # the output.
+            _check_last_member(gz_path, partial_path, checkpoints)
+    except Exception as exc:  # noqa: BLE001 - the parent sorts them out
+        result.send(exc)
+    else:
+        result.send(None)
 
 
 # The CRC-32 polynomial, bit-reflected as gzip and zlib use it.
