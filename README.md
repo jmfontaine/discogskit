@@ -59,6 +59,15 @@ Runs on the same dump can overlap, e.g. a `convert` and a `load`: one decompress
 read the same `.xml`. A run that finishes while another still reads it leaves it in place for that run. They coordinate
 through a `<name>.xml.lock` file, which stays next to the dump; delete it only while no run is using that dump.
 
+discogskit only reuses or deletes a `.xml` it decompressed itself. Next to each one it writes a `<name>.xml.discogskit`
+marker recording the `.xml.gz` it came from (path, size and modification time), and removes the marker along with the
+`.xml`. A `.xml` is reused only when its marker matches the `.xml.gz` named on the command line; otherwise, such as a
+`--keep-xml` copy from an older dump of the same name, or an empty `.xml`, it is decompressed again. Size and
+modification time are a freshness check, not a content check: a different `.xml.gz` with the same path, size and
+modification time would not be noticed. A `.xml` without a marker, such as one made with `gunzip -k`, is never read,
+replaced or deleted: the run stops with `<name>.xml exists but wasn't written by discogskit; move or delete it`. The
+same applies to a `--keep-xml` copy left by an older discogskit version, which wrote no marker.
+
 In every output format, a value missing from the XML is `NULL` (`null` in JSONL), while a text value that is present but
 empty is an empty string: `<country/>` gives `""`, no `<country>` element gives `NULL`. List columns follow the same
 rule: no `<genres>` element gives `NULL`, and an empty `<genre/>` stays in the list as `""`. Only each record's own

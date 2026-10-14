@@ -32,7 +32,7 @@ just deps-unused        # Find unused/undeclared deps
 
 The core is a multi-process pipeline in `src/discogskit/pipeline.py`:
 
-1. **Decompress** — `rapidgzip` parallel decompression of .xml.gz; a `filelock.ReadWriteLock` on `<name>.xml.lock` lets concurrent runs share the XML (write lock to decompress/delete, read lock to read)
+1. **Decompress** — `rapidgzip` parallel decompression of .xml.gz; a `filelock.ReadWriteLock` on `<name>.xml.lock` lets concurrent runs share the XML (write lock to decompress/delete, read lock to read), and a `<name>.xml.discogskit` marker recording the source .gz marks the XML as discogskit's own, the only kind it reuses or deletes
 2. **Split** — Memory-mapped scanning for XML element boundaries, producing byte-range chunks (`entities/_split.py`)
 3. **Parse** — `multiprocessing.Pool` workers run the shared `entities/_worker.py` worker on each chunk with lxml and emit Arrow IPC buffers
 4. **Write** — Single writer thread (one-worker `ThreadPoolExecutor`) deserializes IPC and writes to target format; a bounded backlog of pending write futures gives backpressure and re-raises writer errors immediately

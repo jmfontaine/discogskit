@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from functools import partial
 
 import pytest
@@ -110,6 +111,19 @@ class TestSplitFinder:
         f.write_bytes(b"<?xml version='1.0'?>\n<items>\n<item>data")
 
         with pytest.raises(ValueError, match="unclosed"):
+            find_splits(str(f), 1024)
+
+    @pytest.mark.parametrize(
+        "content",
+        [b"", b"<?xml version='1.0'?>\n<items>\n<item>data"],
+        ids=["empty", "unclosed"],
+    )
+    def test_errors_name_the_file(self, tmp_path, find_splits, content):
+        """The pipeline passes only a path, so errors must say which file failed."""
+        f = tmp_path / "bad.xml"
+        f.write_bytes(content)
+
+        with pytest.raises(ValueError, match=f"^{re.escape(str(f))}: "):
             find_splits(str(f), 1024)
 
     # 0 and -1 terminate even without the check (with wrong splits), so a

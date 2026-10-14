@@ -6,21 +6,40 @@ import errno
 import gzip
 import io
 import multiprocessing
+import os
 import time
 
 import pytest
 from filelock import ReadWriteLock, Timeout
 
 from discogskit import decompress
-from discogskit.decompress import DecompressError, ensure_xml
+from discogskit.decompress import DecompressError, ForeignXmlError, ensure_xml
 
 _XML = b"<?xml version='1.0'?>\n<root>hello</root>"
 
 
-def _write_gz(path):
+def _write_gz(path, content=_XML):
     with gzip.open(path, "wb") as f:
-        f.write(_XML)
+        f.write(content)
     return path
+
+
+def _leave_cached_xml(gz_path, xml_path):
+    """Decompress like a ``--keep-xml`` run, leaving discogskit's own XML behind."""
+    ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
+
+
+def _record_opens(monkeypatch):
+    """Spy on ``rapidgzip.open``: returns the list of paths it decompresses."""
+    opened = []
+    real_open = decompress.rapidgzip.open
+
+    def recording_open(path, parallelization):
+        opened.append(path)
+        return real_open(path, parallelization=parallelization)
+
+    monkeypatch.setattr(decompress.rapidgzip, "open", recording_open)
+    return opened
 
 
 class _GatedReader(io.BytesIO):
@@ -162,7 +181,7 @@ class TestPartialFile:
     def test_stale_partial_removed_when_xml_cached(self, tmp_path):
         gz_path = _write_gz(tmp_path / "test.xml.gz")
         xml_path = tmp_path / "test.xml"
-        xml_path.write_bytes(_XML)
+        _leave_cached_xml(gz_path, xml_path)
         partial_path = tmp_path / "test.xml.partial"
         partial_path.write_bytes(b"<?xml version='1.0'?>\n<ro")
 
@@ -198,6 +217,7 @@ class TestPartialFile:
         assert not (tmp_path / "test.xml.partial").exists()
 
     def test_xml_appears_only_after_decompression(self, monkeypatch, tmp_path):
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
         xml_path = tmp_path / "test.xml"
         xml_seen_during_reads: list[bool] = []
 
@@ -212,12 +232,106 @@ class TestPartialFile:
             lambda path, parallelization: RecordingReader(_XML),
         )
 
-        ensure_xml(tmp_path / "test.xml.gz", xml_path, workers=1).release(
-            remove_xml=False
-        )
+        ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
 
         assert len(xml_seen_during_reads) > 1
         assert not any(xml_seen_during_reads)
+        assert xml_path.read_bytes() == _XML
+
+
+class TestCachedXml:
+    """Only an XML discogskit decompressed from this very .gz is reused or deleted."""
+
+    @pytest.mark.parametrize("change", ["content", "mtime"])
+    def test_cache_from_other_gz_decompressed_again(
+        self, monkeypatch, tmp_path, change
+    ):
+        """A ``--keep-xml`` cache from an older dump of the same name isn't reused."""
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        _leave_cached_xml(gz_path, xml_path)
+        newer = _XML.replace(b"hello", b"newer dump")
+        if change == "content":
+            _write_gz(gz_path, newer)
+        else:
+            stat = gz_path.stat()
+            os.utime(gz_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))
+        opened = _record_opens(monkeypatch)
+
+        ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
+
+        assert opened == [str(gz_path)]
+        assert xml_path.read_bytes() == (newer if change == "content" else _XML)
+
+    def test_empty_cached_xml_recovered(self, tmp_path):
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        _leave_cached_xml(gz_path, xml_path)
+        xml_path.write_bytes(b"")
+
+        ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
+
+        assert xml_path.read_bytes() == _XML
+
+    def test_foreign_xml_rejected_and_untouched(self, monkeypatch, tmp_path):
+        """An XML a user made (``gunzip -k``, trimmed copy) is never converted or deleted."""
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        xml_path.write_bytes(b"the user's own file")
+        opened = _record_opens(monkeypatch)
+
+        for _ in range(2):  # the failed attempt doesn't adopt the file either
+            with pytest.raises(
+                ForeignXmlError,
+                match=r"^test\.xml exists but wasn't written by discogskit; "
+                r"move or delete it$",
+            ):
+                ensure_xml(gz_path, xml_path, workers=1)
+
+        assert opened == []
+        assert xml_path.read_bytes() == b"the user's own file"
+
+    def test_gz_of_empty_xml_decompressed_once(self, monkeypatch, tmp_path):
+        """An empty result straight from the .gz is returned, not decompressed forever."""
+        gz_path = _write_gz(tmp_path / "test.xml.gz", b"")
+        xml_path = tmp_path / "test.xml"
+        opened = _record_opens(monkeypatch)
+
+        ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
+
+        assert opened == [str(gz_path)]
+        assert xml_path.read_bytes() == b""
+
+    def test_interrupt_after_rename_keeps_marker(self, monkeypatch, tmp_path):
+        """Ctrl+C landing just after the XML is published leaves it reusable."""
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        real_replace = os.replace
+
+        def replace_then_interrupt(src, dst):
+            real_replace(src, dst)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(decompress.os, "replace", replace_then_interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            ensure_xml(gz_path, xml_path, workers=1)
+        monkeypatch.undo()
+        opened = _record_opens(monkeypatch)
+
+        ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
+
+        assert opened == []
+        assert xml_path.read_bytes() == _XML
+
+    def test_own_leftover_reused(self, monkeypatch, tmp_path):
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        _leave_cached_xml(gz_path, xml_path)
+        opened = _record_opens(monkeypatch)
+
+        ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
+
+        assert opened == []
         assert xml_path.read_bytes() == _XML
 
 
@@ -225,6 +339,7 @@ class TestConcurrentRuns:
     def test_run_starting_mid_decompression_gets_complete_xml(self, tmp_path):
         """Separate processes: CLI runs share nothing in memory, so neither may a test."""
         ctx = multiprocessing.get_context("spawn")
+        _write_gz(tmp_path / "test.xml.gz")
         xml_path = tmp_path / "test.xml"
         results = ctx.Queue()
         first_blocked, first_go, first_started = ctx.Event(), ctx.Event(), ctx.Event()
@@ -284,7 +399,10 @@ class TestConcurrentRuns:
         assert xml_path.read_bytes() == _XML
 
         first.release(remove_xml=True)
-        assert not xml_path.exists()
+        assert sorted(p.name for p in tmp_path.iterdir()) == [
+            "test.xml.gz",
+            "test.xml.lock",
+        ]
 
 
 @pytest.mark.integration
@@ -301,15 +419,3 @@ class TestDecompress:
 
         assert xml_path.exists()
         assert xml_path.read_bytes() == xml_content
-
-    def test_cached_xml_skipped(self, tmp_path):
-        """ensure_xml skips decompression if .xml already exists."""
-        gz_path = tmp_path / "test.xml.gz"
-        gz_path.write_bytes(b"not a real gz")
-
-        xml_path = tmp_path / "test.xml"
-        xml_path.write_bytes(b"already here")
-
-        ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
-
-        assert xml_path.read_bytes() == b"already here"

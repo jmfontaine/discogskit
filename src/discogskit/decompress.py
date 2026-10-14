@@ -10,6 +10,17 @@ An existing ``.xml`` is reused as a cache, so it must only ever hold complete
 output: decompression writes ``<name>.xml.partial`` and renames it into place
 once every byte is on disk.
 
+Only an XML discogskit wrote is reused or deleted.  Before that rename,
+decompression writes a ``<name>.xml.discogskit`` marker recording the source
+``.gz`` (resolved path, size, mtime).  An XML whose marker matches the ``.gz``
+is reused; one whose marker doesn't (an older dump of the same name) or that
+is empty is decompressed again; one with no marker is someone else's file, so
+the run fails without touching it.  Size and mtime are a freshness check, not
+proof the content matches: a ``.gz`` replaced by one of the same size and
+mtime isn't noticed.  The marker goes in before the XML and out after it, so
+a crash in between leaves a marker without an XML (decompressed again), never
+an XML without its marker.
+
 Runs on the same dump (say a ``convert`` and a ``load``) coordinate through a
 ``filelock.ReadWriteLock`` on ``<name>.xml.lock``:
 
@@ -24,6 +35,8 @@ waiting on the old file and a new run on a fresh one both hold "the" lock.
 
 from __future__ import annotations
 
+import enum
+import json
 import os
 import time
 from collections.abc import Callable
@@ -48,18 +61,29 @@ class DecompressError(Exception):
         )
 
 
+class ForeignXmlError(Exception):
+    """Raised when the dump's ``.xml`` exists but discogskit didn't write it."""
+
+    def __init__(self, xml_path: Path) -> None:
+        super().__init__(
+            f"{xml_path.name} exists but wasn't written by discogskit; "
+            "move or delete it"
+        )
+
+
 class XmlLease:
     """A run's read lock on a complete decompressed XML, from ``ensure_xml``."""
 
-    def __init__(self, lock: ReadWriteLock, xml_path: Path) -> None:
+    def __init__(self, lock: ReadWriteLock, marker_path: Path, xml_path: Path) -> None:
         self._lock: ReadWriteLock | None = lock
+        self._marker_path = marker_path
         self._xml_path = xml_path
 
     def release(self, *, remove_xml: bool) -> None:
         """Stop using the XML.  Calls after the first do nothing.
 
         With ``remove_xml``, deletes the XML unless another run still reads it,
-        in which case that run decides.
+        in which case that run decides, or discogskit didn't write it.
         """
         lock = self._lock
         if lock is None:
@@ -76,9 +100,70 @@ class XmlLease:
             except Timeout:
                 status("Cleanup", f"kept {self._xml_path.name}, in use by another run")
                 return
+            if not self._marker_path.exists():
+                status(
+                    "Cleanup",
+                    f"kept {self._xml_path.name}, not written by discogskit",
+                )
+                return
+            # XML first, its removal on disk before the marker's: a crash in
+            # between must not leave the XML without its marker.
             self._xml_path.unlink(missing_ok=True)
+            _sync_dir(self._xml_path.parent)
+            self._marker_path.unlink(missing_ok=True)
         finally:
             lock.close()
+
+
+class _Cache(enum.Enum):
+    """What ``ensure_xml`` finds at the XML's path."""
+
+    ABSENT = enum.auto()
+    EMPTY = enum.auto()  # discogskit's, for this .gz, but 0 bytes
+    FOREIGN = enum.auto()  # no marker: not discogskit's
+    FRESH = enum.auto()  # discogskit's, for this .gz
+    STALE = enum.auto()  # discogskit's, for another .gz (or an unreadable marker)
+
+
+def _source_identity(gz_path: Path) -> bytes:
+    """The marker content for ``gz_path``: its resolved path, mtime and size."""
+    stat = gz_path.stat()
+    identity = {
+        "gz_path": str(gz_path.resolve()),
+        "mtime_ns": stat.st_mtime_ns,
+        "size": stat.st_size,
+    }
+    return json.dumps(identity, sort_keys=True).encode()
+
+
+def _sync_dir(directory: Path) -> None:
+    """Put the directory's entries on disk.
+
+    ``fsync`` on a file covers only its data; this makes earlier creates,
+    renames and deletes in ``directory`` survive a power loss before later ones.
+    """
+    if os.name == "nt":  # Windows can't open a directory to fsync it.
+        return
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _cache_state(gz_path: Path, marker_path: Path, xml_path: Path) -> _Cache:
+    """Classify the XML at ``xml_path``; call with the read or write lock held."""
+    try:
+        xml_size = xml_path.stat().st_size
+    except FileNotFoundError:
+        return _Cache.ABSENT
+    try:
+        recorded = marker_path.read_bytes()
+    except FileNotFoundError:
+        return _Cache.FOREIGN
+    if recorded != _source_identity(gz_path):
+        return _Cache.STALE
+    return _Cache.FRESH if xml_size else _Cache.EMPTY
 
 
 def _acquire(acquire: Callable[..., object], xml_name: str) -> None:
@@ -97,31 +182,43 @@ def _acquire(acquire: Callable[..., object], xml_name: str) -> None:
 
 
 def ensure_xml(gz_path: Path, xml_path: Path, workers: int) -> XmlLease:
-    """Decompress .gz to .xml with rapidgzip (parallel) unless the .xml exists.
+    """Decompress .gz to .xml with rapidgzip (parallel) unless discogskit's own
+    .xml for this .gz is already there.
 
     Returns once the .xml is complete, holding a read lock until ``release()``.
+    Raises ``ForeignXmlError``, without touching the file, if the .xml exists
+    but discogskit didn't write it.
     """
     lock = ReadWriteLock(
         xml_path.with_name(xml_path.name + ".lock"), is_singleton=False
     )
+    marker_path = xml_path.with_name(xml_path.name + ".discogskit")
     partial_path = xml_path.with_name(xml_path.name + ".partial")
     decompressed = False
+
+    def usable(state: _Cache) -> bool:
+        if state is _Cache.FOREIGN:
+            raise ForeignXmlError(xml_path)
+        # A .gz holding an empty XML decompresses to an empty XML every time:
+        # once is enough, and the splitter reports it.
+        return state is _Cache.FRESH or (decompressed and state is _Cache.EMPTY)
+
     try:
         while True:
             _acquire(lock.acquire_read, xml_path.name)
             # Nobody holds the write lock, so nobody is writing this.
             partial_path.unlink(missing_ok=True)
-            if xml_path.exists():
+            if usable(_cache_state(gz_path, marker_path, xml_path)):
                 if not decompressed:
                     status("Decompress", f"cached {xml_path.name}")
-                return XmlLease(lock, xml_path)
+                return XmlLease(lock, marker_path, xml_path)
             lock.release()
 
             _acquire(lock.acquire_write, xml_path.name)
             try:
                 # Another run may have decompressed it while we waited.
-                if not xml_path.exists():
-                    _decompress(gz_path, partial_path, xml_path, workers)
+                if not usable(_cache_state(gz_path, marker_path, xml_path)):
+                    _decompress(gz_path, marker_path, partial_path, xml_path, workers)
                     decompressed = True
             finally:
                 # Loop to take the read lock and check again: another run can
@@ -133,11 +230,23 @@ def ensure_xml(gz_path: Path, xml_path: Path, workers: int) -> XmlLease:
 
 
 def _decompress(
-    gz_path: Path, partial_path: Path, xml_path: Path, workers: int
+    gz_path: Path, marker_path: Path, partial_path: Path, xml_path: Path, workers: int
 ) -> None:
-    """Decompress into ``partial_path``, then rename it to ``xml_path``."""
+    """Decompress into ``partial_path``, then rename it to ``xml_path``.
+
+    Any XML already there is discogskit's (stale or empty), so it's replaced.
+    """
+    # Remove a stale XML before its marker, and both before writing anything:
+    # the new marker must never vouch for the old XML, even after a power loss.
+    # Synced even if the XML is already gone: a run that crashed right after
+    # unlinking it may have left that removal off the disk.
+    xml_path.unlink(missing_ok=True)
+    _sync_dir(xml_path.parent)
+    marker_path.unlink(missing_ok=True)
     # Left behind by a run that died mid-decompression; never complete.
     partial_path.unlink(missing_ok=True)
+    # Taken before reading, so a .gz that changes meanwhile counts as stale.
+    source = _source_identity(gz_path)
     t0 = time.perf_counter()
     try:
         with (
@@ -164,10 +273,20 @@ def _decompress(
         partial_path.unlink(missing_ok=True)
         raise DecompressError(gz_path) from exc
     try:
+        with open(marker_path, "wb") as marker:
+            marker.write(source)
+            marker.flush()
+            os.fsync(marker.fileno())
+        # The marker must be on disk before the rename, which would otherwise
+        # leave an XML without its marker after a power loss.
+        _sync_dir(marker_path.parent)
         os.replace(partial_path, xml_path)
     except OSError:
         # Not a decompression failure: surface the real filesystem error.
+        # The XML wasn't published, so neither file may stay.  (Not on
+        # Ctrl+C: the rename may have finished, and its XML needs the marker.)
         partial_path.unlink(missing_ok=True)
+        marker_path.unlink(missing_ok=True)
         raise
     elapsed = time.perf_counter() - t0
     size_mb = xml_path.stat().st_size / 1024 / 1024
