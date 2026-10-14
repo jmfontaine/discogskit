@@ -95,6 +95,11 @@ point, no files appear under their final names and any previous output stays unc
 `--overwrite`. Don't run two conversions of the same entity into the same output directory at once: their files can
 end up mixed. A process killed mid-run can leave an `<entity>.partial-*` directory behind; it's safe to delete.
 
+A run checks that it can move files into an existing `<output>/<entity>/` before it parses anything, and fails
+early if it can't (e.g. the directory isn't writable). If moving the finished files fails anyway, the run keeps
+them: the error names the `<entity>.partial-*` directory that holds the files not moved yet, which can then be
+moved by hand. Files moved before the failure are already in `<output>/<entity>/`, next to any older files.
+
 | Option | Values |
 |-----------------|-------------------------------|
 | Output formats | `parquet`, `jsonl` |
@@ -202,23 +207,41 @@ In PostgreSQL, tables are created in the current schema — the first existing s
 `public`), or the schema given with `--pg-schema` (which must already exist, unless `--pg-create-schema` is also
 passed). Without `--overwrite`, the load stops if any of its tables already exist there. With `--overwrite`, the
 existing tables are dropped and recreated, all in one transaction; if your own views or foreign keys depend on them,
-the load stops and lists those objects instead of dropping them.
+the load stops and lists those objects instead of dropping them. The write connections open before anything is
+dropped, so a load that can't open them (for example, when the server reaches `max_connections`) leaves the existing
+tables as they were.
+
+`--pg-write-workers` splits each entity's tables into groups, one per worker, and writes each group on its own
+connection. An entity with fewer tables than workers gets one worker per table.
+
+In SQLite, the tables are likewise dropped and recreated in one transaction: if a drop fails (e.g. with `--fk`, a
+table of your own references `artists` and has rows), the load stops and every table stays as it was. During the
+load, the file is in WAL journal mode with `synchronous=OFF`, for speed, so an OS crash or power loss mid-load can
+corrupt it. When the load finishes, discogskit sets `synchronous=FULL`, checkpoints the WAL into the database file,
+and switches the file back to the journal mode it had before (rollback-journal `delete` for a new file); a failed
+load tries the same before it exits. The finished database is then durable. A new file, or one that wasn't in WAL
+mode before, then opens without `-wal`/`-shm` files, even from a read-only directory; a file that was already in WAL
+mode stays in WAL mode, with WAL's usual side files. List columns (e.g. `namevariations`, `genres`) are stored as
+compact JSON text with non-ASCII characters as-is, e.g. `["Björk","ビョーク"]`, so `LIKE` matches them;
+`json_each()` reads them as arrays.
 
 After a failed or interrupted `load` (crash, Ctrl+C, lost connection), re-run it with `--overwrite`: the tables
 aren't consistent until a load finishes. Chunks commit as they go, so earlier chunks stay in the tables after a
 failure. With PostgreSQL and `--pg-write-workers` above its default of 1, each table group commits on its own
 connection, so the chunk that was in progress when the failure happened can itself end up partially written — some
-of its tables committed, others not. With `--pg-write-workers 1` (the default) and with SQLite, a chunk commits in a
-single transaction on one connection, so it's never partially written, but earlier, already-committed chunks are
-still not rolled back.
+of its tables committed, others not. When one group fails, the load waits for the other groups to finish before it
+reports the error. With `--pg-write-workers 1` (the default) and with SQLite, a chunk commits in a single transaction
+on one connection, so it's never partially written, but earlier, already-committed chunks are still not rolled back.
 
 | Database | Versions |
 |----------|----------|
 | SQLite | 3.x |
 | PostgreSQL | 14+ |
 
-`--dsn` accepts `postgresql://` or `postgres://` (both work identically) for PostgreSQL, or a `sqlite:///` DSN
-or a path ending in `.db`, `.sqlite`, or `.sqlite3` for SQLite.
+`--dsn` accepts `postgresql://` or `postgres://` (both work identically) for PostgreSQL. For SQLite, it accepts
+`sqlite:///<path>` (`sqlite:///discogs.db` is relative to the current directory, `sqlite:////data/discogs.db` is
+absolute) or a plain path ending in `.db`, `.sqlite`, or `.sqlite3`. Other `sqlite:` forms and paths containing `?`
+(SQLite URI parameters such as `?mode=ro` aren't supported) are rejected before any file is created.
 
 <details>
 <summary>Full command help</summary>
