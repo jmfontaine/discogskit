@@ -524,7 +524,7 @@ class TestPipelineRun:
     def test_end_to_end_with_profile(self, tmp_path):
         """Full pipeline with profile=True collects timing data, accumulated across chunks."""
         from discogskit import pipeline
-        from discogskit.entities import get as get_entity
+        from discogskit.entities import ENTITIES
         from discogskit.writers.jsonl import JSONLWriter
 
         gz_path = _many_artists_gz(tmp_path / "artists.xml.gz")
@@ -544,7 +544,7 @@ class TestPipelineRun:
         assert isinstance(result.profile_data.get_wait, float)
         table_timings = result.profile_data.table_timings
         assert isinstance(table_timings, dict)
-        assert set(table_timings) == set(get_entity("artists").table_order)
+        assert set(table_timings) == set(ENTITIES["artists"].table_order)
         assert all(v >= 0 for v in table_timings.values())
 
         # keep_xml=True should preserve the XML
@@ -675,7 +675,7 @@ class TestPipelineRun:
     ):
         """#35 regression: a second entity's --profile must not include the first entity's tables."""
         from discogskit import pipeline
-        from discogskit.entities import get as get_entity
+        from discogskit.entities import ENTITIES
         from discogskit.writers.postgresql import PostgreSQLWriter
 
         labels_xml = (
@@ -706,7 +706,7 @@ class TestPipelineRun:
         assert result.profile_data is not None
         table_timings = result.profile_data.table_timings
         assert isinstance(table_timings, dict)
-        assert set(table_timings) == set(get_entity("labels").table_order) | {"_commit"}
+        assert set(table_timings) == set(ENTITIES["labels"].table_order) | {"_commit"}
 
     @pytest.mark.integration
     def test_postgresql_writer_duplicate_id(self, duplicate_artists_gz, pg_dsn):
@@ -1145,3 +1145,52 @@ class TestPipelineRunParseWorkers:
             if isinstance(thread, _RefreshThread):
                 thread.join(timeout=2)
                 assert not thread.is_alive()
+
+
+class TestPipelineRunConsole:
+    """Library callers choose where ``run()`` prints, through the public API alone."""
+
+    @staticmethod
+    def _run(config, tmp_path, console):
+        from discogskit import get_writer, run
+
+        writer = get_writer(str(tmp_path / "out.db"))
+        try:
+            return run(config, writer, console=console)
+        finally:
+            writer.close()
+
+    @pytest.mark.parametrize("progress", [False, True], ids=["no-progress", "progress"])
+    def test_quiet_console_prints_nothing(self, capfd, tmp_path, artists_gz, progress):
+        """capfd also captures the spawned workers' output and anything the progress display redirects."""
+        from rich.console import Console
+
+        config = dataclasses.replace(
+            _single_chunk_config(artists_gz), progress=progress
+        )
+
+        result = self._run(
+            config, tmp_path, Console(force_terminal=progress, quiet=True)
+        )
+
+        assert result.total_records == 2
+        assert capfd.readouterr() == ("", "")
+
+    def test_supplied_console_gets_all_output(self, capfd, tmp_path, artists_gz):
+        from io import StringIO
+
+        from rich.console import Console
+
+        buffer = StringIO()
+
+        result = self._run(
+            _single_chunk_config(artists_gz),
+            tmp_path,
+            Console(file=buffer, force_terminal=False, width=200),
+        )
+
+        assert result.total_records == 2
+        assert capfd.readouterr() == ("", "")
+        labels = [line.split()[0] for line in buffer.getvalue().splitlines()]
+        # Decompress and Chunks from the pipeline, chunk from the writer thread, Create and Index from the writer.
+        assert labels == ["Decompress", "Chunks", "Create", "chunk", "Index"]

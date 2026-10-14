@@ -9,7 +9,7 @@ import sqlite3
 import pyarrow as pa
 import pytest
 
-from discogskit.entities import get
+from discogskit.entities import ENTITIES
 from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers.sqlite import SQLiteWriter
@@ -38,7 +38,7 @@ from tests.conftest import (
 )
 def test_every_entity_loads(tmp_path, entity_name, xml, fk):
     """Every table round-trips, including columns named after SQL keywords like `join` (#56)."""
-    entity = get(entity_name)
+    entity = ENTITIES[entity_name]
     f = tmp_path / f"{entity_name}.xml"
     f.write_text(xml)
     ipc_dict = extract_chunk_to_ipc(

@@ -13,9 +13,8 @@ from rich.table import Table
 from rich.text import Text
 
 from discogskit import pipeline
-from discogskit._console import console, error, print_text, status
-from discogskit.entities import detect_entity
-from discogskit.entities import get as get_entity
+from discogskit._console import current, error, print_text, status
+from discogskit.entities import ENTITIES, detect_entity
 from discogskit.writers import Writer, get_writer
 
 
@@ -101,7 +100,7 @@ app: typer.Typer = typer.Typer(no_args_is_help=True)
 
 def _version_callback(value: bool) -> None:
     if value:
-        console.print(f"discogskit {version('discogskit')}")
+        current().print(f"discogskit {version('discogskit')}")
         raise typer.Exit()
 
 
@@ -184,13 +183,13 @@ def _print_result(
         if result.t_parse_load > 0
         else ""
     )
-    console.print(
+    current().print(
         f"  [green]✓[/] {result.total_records:,} {entity_name} {verb} "
         f"[dim][{result.t_total:.2f}s][/]"
     )
 
     if verbose:
-        console.print()
+        current().print()
         status("Decompress", f"{result.t_decompress:.2f}s")
         status(
             "Load",
@@ -203,11 +202,11 @@ def _print_result(
 
     if result.profile_data:
         pd = result.profile_data
-        console.print()
-        console.rule("[bold]Profile[/]", style="dim")
+        current().print()
+        current().rule("[bold]Profile[/]", style="dim")
         status("Put blocked", f"{pd.put_blocked:.2f}s")
         status("Get wait", f"{pd.get_wait:.2f}s")
-        console.print()
+        current().print()
 
         table_timings = pd.table_timings
         flush_total = sum(table_timings.values())
@@ -229,7 +228,7 @@ def _print_result(
             pct = t / flush_total * 100 if flush_total else 0
             label = "commit" if key == "_commit" else key
             tbl.add_row(label, f"{t:.2f}s", f"{pct:.1f}%")
-        console.print(tbl)
+        current().print(tbl)
 
 
 def _run_jobs(
@@ -256,12 +255,12 @@ def _run_jobs(
     """
     # The pipeline shows a progress bar only on a terminal; elsewhere it prints
     # per-chunk lines, as with --no-progress.
-    verbose = not (progress and console.is_terminal) or profile
+    verbose = not (progress and current().is_terminal) or profile
     try:
         for _, entity_name in jobs:
-            writer.check(get_entity(entity_name))
+            writer.check(ENTITIES[entity_name])
         for gz_path, entity_name in jobs:
-            console.print()
+            current().print()
             print_text(
                 Text.assemble(
                     (entity_name.capitalize(), "bold green"),
@@ -290,7 +289,7 @@ def _run_jobs(
             )
             result = pipeline.run(config, writer)
 
-            entity_def = get_entity(entity_name)
+            entity_def = ENTITIES[entity_name]
             _print_result(
                 result,
                 entity_name,
@@ -299,7 +298,7 @@ def _run_jobs(
                 verbose=verbose,
             )
     except KeyboardInterrupt:
-        console.print("\n  [yellow]Interrupted — cleaning up …[/]")
+        current().print("\n  [yellow]Interrupted — cleaning up …[/]")
         raise typer.Exit(130) from None
     # Top-level error boundary: any failure becomes a one-line error and exit 1.
     except Exception as exc:  # noqa: BLE001

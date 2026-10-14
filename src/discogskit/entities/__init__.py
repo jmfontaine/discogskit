@@ -11,6 +11,8 @@ from __future__ import annotations
 from discogskit.entities import artists, labels, masters, releases
 from discogskit.entities._def import EntityDef
 
+__all__ = ["ENTITIES", "EntityDef", "detect_entity"]
+
 _ALL: tuple[EntityDef, ...] = (
     artists.ENTITY,
     labels.ENTITY,
@@ -30,10 +32,6 @@ def _by_name(entities: tuple[EntityDef, ...]) -> dict[str, EntityDef]:
 
 
 ENTITIES: dict[str, EntityDef] = _by_name(_ALL)
-
-
-def get(name: str) -> EntityDef:
-    return ENTITIES[name]
 
 
 def detect_entity(filename: str) -> str:

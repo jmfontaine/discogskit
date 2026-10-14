@@ -1,11 +1,27 @@
-"""Shared Rich console for all discogskit output."""
+"""Shared Rich console for all discogskit output.
+
+Everything discogskit prints goes through ``current()``: ``console``, the default, unless ``using()`` set another one
+for the current context. ``pipeline.run()`` sets the console its caller passes, so a library caller can silence or
+redirect a run's output.
+"""
 
 from __future__ import annotations
+
+from collections.abc import Generator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from rich.console import Console
 from rich.text import Text
 
 console = Console()
+
+_current: ContextVar[Console] = ContextVar("discogskit_console", default=console)
+
+
+def current() -> Console:
+    """The console output goes to in the current context."""
+    return _current.get()
 
 
 def error(message: str) -> None:
@@ -21,9 +37,15 @@ def print_text(text: Text) -> None:
     lose words or raise ``MarkupError``. A ``Text`` is never parsed; this keeps the
     highlighting a str would get, with ``text``'s own styles on top.
     """
-    highlighted = console.highlighter(text.plain)
+    out = current()
+    highlighted = out.highlighter(text.plain)
     highlighted.copy_styles(text)
-    console.print(highlighted)
+    out.print(highlighted)
+
+
+def set_current(target: Console) -> None:
+    """Send the current context's output to ``target``, e.g. as a new thread's initializer."""
+    _current.set(target)
 
 
 def status(label: str, detail: str = "", timing: str = "", *, style: str = "") -> None:
@@ -42,3 +64,13 @@ def status(label: str, detail: str = "", timing: str = "", *, style: str = "") -
         line.append(" ")
         line.append(timing, style="dim")
     print_text(line)
+
+
+@contextmanager
+def using(target: Console) -> Generator[None, None, None]:
+    """Send the current context's output to ``target`` until the block ends."""
+    token = _current.set(target)
+    try:
+        yield
+    finally:
+        _current.reset(token)

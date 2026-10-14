@@ -11,7 +11,7 @@ import pyarrow as pa
 import pytest
 
 from discogskit._ipc import deserialize_batch
-from discogskit.entities import get
+from discogskit.entities import ENTITIES
 from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers import _staging
@@ -347,7 +347,7 @@ def unicode_artists_xml_file(tmp_path):
 
 @pytest.fixture()
 def entity():
-    return get("artists")
+    return ENTITIES["artists"]
 
 
 @pytest.fixture()

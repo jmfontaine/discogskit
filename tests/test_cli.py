@@ -24,7 +24,7 @@ from typer.testing import CliRunner, Result
 from discogskit import pipeline
 from discogskit.cli import app
 from discogskit.decompress import DecompressError
-from discogskit.entities import get
+from discogskit.entities import ENTITIES
 from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers import OutputExistsError
@@ -208,7 +208,7 @@ class TestRecordErrorOutput:
 
         # The same chunk parsed in this process gives the message the CLI must print unchanged.
         xml = str(gz.with_suffix(""))
-        [(start, end)] = get("artists").find_split_points(xml, 1 << 20)
+        [(start, end)] = ENTITIES["artists"].find_split_points(xml, 1 << 20)
         with pytest.raises(ValueError) as info:
             extract_chunk_to_ipc(
                 ChunkArgs(end=end, entity="artists", file_path=xml, start=start)
@@ -928,7 +928,7 @@ class TestProfile:
             ],
         )
         assert result.exit_code == 0, _unstyle(result.output)
-        assert self._flush_table_rows(result.output) == get("artists").table_order
+        assert self._flush_table_rows(result.output) == ENTITIES["artists"].table_order
 
     def test_sqlite_load_has_commit_row(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -950,7 +950,7 @@ class TestProfile:
         )
         assert result.exit_code == 0, _unstyle(result.output)
         assert self._flush_table_rows(result.output) == [
-            *get("artists").table_order,
+            *ENTITIES["artists"].table_order,
             "commit",
         ]
 
@@ -983,7 +983,7 @@ class TestUnicodeConvert:
         )
 
         assert result.exit_code == 0, _unstyle(result.output)
-        for table_name in get("artists").table_order:
+        for table_name in ENTITIES["artists"].table_order:
             with gzip.open(
                 out / "artists" / f"{table_name}.jsonl.gz", "rt", encoding="utf-8"
             ) as f:

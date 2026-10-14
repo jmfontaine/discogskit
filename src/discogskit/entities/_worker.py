@@ -22,7 +22,7 @@ import pyarrow as pa
 from lxml import etree
 
 from discogskit._ipc import serialize_batch
-from discogskit.entities import get
+from discogskit.entities import ENTITIES
 from discogskit.entities._def import ChunkArgs, Cols, ElementValueError
 
 _T = TypeVar("_T")
@@ -184,7 +184,7 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
     and parses it with lxml iterparse. With ``args.strict``, also returns the paths of the elements no parser handled;
     the main process reports them once per run, so workers print nothing.
     """
-    entity = get(args.entity)
+    entity = ENTITIES[args.entity]
     with open(args.file_path, "rb") as f:
         f.seek(args.start)
         data = f.read(args.end - args.start)
