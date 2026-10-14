@@ -83,6 +83,10 @@ Both commands decompress each `.xml.gz` to a `.xml` next to it, so that director
 which is much larger than the `.gz`. The `.xml` is deleted after a successful run unless `--keep-xml` is set.
 
 - A run that fails or is interrupted after decompression keeps the `.xml`, and the next run reuses it.
+- A truncated, corrupt or non-gzip `.xml.gz` stops the run with
+  `failed to decompress <name> (truncated, corrupt, or not a gzip file)`; when the truncation makes the decompressor
+  hang, that comes after 60 seconds without output. Check the `.xml.gz` against the matching month's
+  `discogs_YYYYMMDD_CHECKSUM.txt` first.
 - Runs on the same dump can overlap (a `convert` and a `load`): one decompresses while the others wait, then all
   read the same `.xml`. They coordinate through `<name>.xml.lock`, which stays next to the dump; delete it only
   while no run uses that dump.
