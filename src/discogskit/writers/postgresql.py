@@ -174,9 +174,13 @@ def _create_indexes(dsn: str, tables: list[str], column: str, workers: int) -> N
             conn.close()
 
     executor = ThreadPoolExecutor(max_workers=workers)
+    futures = []
     try:
-        futures = [executor.submit(create, t) for t in tables]
         try:
+            # Submitting is inside the handler: Ctrl+C here must also cancel the
+            # tasks already running.
+            for t in tables:
+                futures.append(executor.submit(create, t))
             for f in as_completed(futures):
                 f.result()
         except BaseException:

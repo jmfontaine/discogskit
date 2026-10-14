@@ -720,6 +720,57 @@ class TestIndexAbort:
         self._assert_failed_index_skips_queued_ones(dsn, monkeypatch)
         assert interrupted
 
+    def test_interrupt_while_submitting_cancels_started_indexes(self, dsn, monkeypatch):
+        """Ctrl+C before every index is queued still cancels the ones already running."""
+        import psycopg
+        from psycopg import sql
+
+        from discogskit.writers import postgresql
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        entity = get("releases")
+        root, *children = entity.table_order
+        workers = 2
+
+        # Each started CREATE INDEX waits on the lock; the interrupt lands on the
+        # submit after the workers' tasks, once both have reached execute.
+        real_execute = psycopg.Connection.execute
+        started = threading.Semaphore(0)
+
+        def execute(conn, query, *args, **kwargs):
+            if isinstance(query, sql.Composable) and query.as_string(conn).startswith(
+                "CREATE INDEX"
+            ):
+                started.release()
+            return real_execute(conn, query, *args, **kwargs)
+
+        class InterruptingExecutor(postgresql.ThreadPoolExecutor):
+            submitted = 0
+
+            def submit(self, *args, **kwargs):
+                if self.submitted == workers:
+                    for _ in range(workers):
+                        assert started.acquire(timeout=10)
+                    raise KeyboardInterrupt
+                self.submitted += 1
+                return super().submit(*args, **kwargs)
+
+        monkeypatch.setattr(psycopg.Connection, "execute", execute)
+        monkeypatch.setattr(postgresql, "ThreadPoolExecutor", InterruptingExecutor)
+        writer = PostgreSQLWriter(dsn, overwrite=True, index_workers=workers)
+        try:
+            writer.setup(entity)
+            with _locked(dsn, children, hold=self._HOLD):
+                t0 = time.monotonic()
+                with pytest.raises(KeyboardInterrupt):
+                    writer.finalize(entity)
+                elapsed = time.monotonic() - t0
+        finally:
+            writer.close()
+
+        assert elapsed < self._HOLD / 2
+        assert self._indexed_tables(dsn) == {root}
+
     def test_interrupt_cancels_running_index(self, dsn):
         import psycopg
 
