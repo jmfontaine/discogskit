@@ -73,10 +73,12 @@ run.source = [ "discogskit" ]
 
 [tool.deadcode]
 ignore_names = [
-  "_callback",         # Typer app.callback()
-  "_version_callback", # Typer Option callback
-  "convert",           # Typer app.command()
-  "load",              # Typer app.command()
-  "render",            # Rich ProgressColumn override
-  "return_value",      # mock attribute setup
+  "EndElementHandler",   # expat parser callback
+  "StartElementHandler", # expat parser callback
+  "_callback",           # Typer app.callback()
+  "_version_callback",   # Typer Option callback
+  "convert",             # Typer app.command()
+  "load",                # Typer app.command()
+  "render",              # Rich ProgressColumn override
+  "return_value",        # mock attribute setup
 ]
