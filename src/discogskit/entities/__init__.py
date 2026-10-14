@@ -41,6 +41,17 @@ class ChunkArgs:
     strict: bool = False
 
 
+class ElementValueError(ValueError):
+    """A record value error about one element inside the record. The chunk worker adds that element's chunk line.
+
+    It never leaves the worker, which re-raises it as a plain ``ValueError``, so it needn't pickle.
+    """
+
+    def __init__(self, message: str, element: etree._Element) -> None:
+        super().__init__(message)
+        self.element = element
+
+
 @dataclass
 class EntityDef:
     """Definition for one Discogs entity type.

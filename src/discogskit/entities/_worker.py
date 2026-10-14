@@ -21,57 +21,97 @@ import pyarrow as pa
 from lxml import etree
 from pyarrow import ipc
 
-from discogskit.entities import ChunkArgs, Cols, get
+from discogskit.entities import ChunkArgs, Cols, ElementValueError, get
+
+
+def _line(element: etree._Element) -> str:
+    return "unknown" if element.sourceline is None else str(element.sourceline)
 
 
 class _RecordFound(Exception):
-    """Stops the expat scan in ``_record_line`` once it reaches the record."""
+    """Stops the expat scan in ``_record_lines`` once it reaches the record; carries both lines."""
 
 
-def _record_line(
-    xml_data: bytes, container: str, record: etree._Element, ordinal: int
-) -> str:
-    """Return the chunk line where ``record``, the ``ordinal``-th record (0-based) the worker parsed, starts.
+def _record_lines(
+    xml_data: bytes,
+    container: str,
+    record: etree._Element,
+    ordinal: int,
+    element: etree._Element,
+) -> tuple[str, str]:
+    """Return the chunk lines where ``record``, the ``ordinal``-th record (0-based) the worker parsed, and ``element``,
+    the record itself or an element inside it, start.
 
     lxml's ``sourceline`` isn't enough: libxml2 stores element lines in 16 bits, and past line 65535 it reports what a
     bounded search inside the element finds, or 65535, e.g. for a compact record whose first text is nested deep.
     expat counts lines exactly. Only the error path calls this, so the second parse costs nothing on valid data.
     """
     root_tag = record.tag
+    # The element's position among the record's elements in document order, which expat counts too. A record that
+    # holds records of its own (under a nested container) lost their content when the worker cleared them, so the
+    # count would no longer match expat's.
+    elements = [e for e in record.iter() if isinstance(e.tag, str)]
+    nested_records = any(
+        e.tag == root_tag and (p := e.getparent()) is not None and p.tag == container
+        for e in elements[1:]
+    )
+    offset = (
+        None
+        if nested_records
+        else next((i for i, e in enumerate(elements) if e is element), None)
+    )
     # Namespaced names carry their URI ("urn:x artist"), so they never equal a bare tag, just as lxml's never do.
     parser = expat.ParserCreate(namespace_separator=" ")
     # (name, start line) of each open element.
     open_elements: list[tuple[str, int]] = []
+    # One per open record: [its start line, elements started in it so far, the element's start line or 0].
+    open_records: list[list[int]] = []
     seen = 0
+
+    def is_record(name: str) -> bool:
+        # The worker's selection: record tags whose parent is the container tag.
+        return (
+            name == root_tag
+            and bool(open_elements)
+            and open_elements[-1][0] == container
+        )
 
     def end(name: str) -> None:
         nonlocal seen
-        _, line = open_elements.pop()
-        # The worker's selection, in its order: end events of record tags whose parent is the container tag.
-        if name == root_tag and open_elements and open_elements[-1][0] == container:
+        open_elements.pop()
+        if is_record(name):
+            record_line, _, element_line = open_records.pop()
+            # The worker handles records in end-event order.
             if seen == ordinal:
-                raise _RecordFound(line)
+                raise _RecordFound(record_line, element_line)
             seen += 1
 
     def start(name: str, _attrs: dict[str, str]) -> None:
-        open_elements.append((name, parser.CurrentLineNumber))
+        line = parser.CurrentLineNumber
+        for counts in open_records:
+            if counts[1] == offset:
+                counts[2] = line
+            counts[1] += 1
+        if is_record(name):
+            open_records.append([line, 1, line if offset == 0 else 0])
+        open_elements.append((name, line))
 
     parser.EndElementHandler = end
     parser.StartElementHandler = start
     try:
         parser.Parse(xml_data, True)
     except _RecordFound as found:
-        return str(found.args[0])
+        record_line, element_line = found.args
+        return str(record_line), str(element_line) if element_line else "unknown"
     # expat rejects some names lxml accepts, e.g. with characters beyond U+FFFF.
     except expat.ExpatError:
         pass
-    # From line 65535 on, lxml can report another node's line, even a smaller one. Its line is the record's own only
-    # when the chunk can't reach that line; counting CRs too keeps the bound safe whatever the line breaks. It's where
-    # the start tag ends rather than where it starts.
-    line = record.sourceline
-    if line is not None and xml_data.count(b"\n") + xml_data.count(b"\r") < 65534:
-        return str(line)
-    return "unknown"
+    # From line 65535 on, lxml can report another node's line, even a smaller one. Its lines are the elements' own only
+    # when the chunk can't reach that line; counting CRs too keeps the bound safe whatever the line breaks. They're
+    # where the start tags end rather than where they start.
+    if xml_data.count(b"\n") + xml_data.count(b"\r") < 65534:
+        return _line(record), _line(element)
+    return "unknown", "unknown"
 
 
 def _serialize_batch(batch: pa.RecordBatch, schema: pa.Schema) -> bytes:
@@ -134,10 +174,16 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> dict[str, bytes]:
                 # carries only a string, so it pickles back to the parent.
                 record_id = entity.record_id(elem)
                 id_part = "" if record_id is None else f", id={record_id!r}"
-                line = _record_line(xml_data, entity.name, elem, ordinal)
+                element = exc.element if isinstance(exc, ElementValueError) else elem
+                line, element_line = _record_lines(
+                    xml_data, entity.name, elem, ordinal, element
+                )
+                detail = (
+                    exc if element is elem else f"{exc} at chunk line {element_line}"
+                )
                 raise ValueError(
                     f"Invalid <{entity.root_tag}> record in {args.file_path} at chunk line {line}"
-                    f" (chunk bytes {args.start}-{args.end}{id_part}): {exc}"
+                    f" (chunk bytes {args.start}-{args.end}{id_part}): {detail}"
                 ) from exc
             ordinal += 1
             # Standard lxml memory optimization for iterparse: free each element after processing to prevent the

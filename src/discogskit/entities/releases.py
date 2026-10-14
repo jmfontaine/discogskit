@@ -10,7 +10,13 @@ from __future__ import annotations
 import pyarrow as pa
 from lxml import etree
 
-from discogskit.entities import Cols, EntityDef, parse_bool, register
+from discogskit.entities import (
+    Cols,
+    ElementValueError,
+    EntityDef,
+    parse_bool,
+    register,
+)
 
 _ArtistRec = tuple[int | None, str, str | None, str | None]
 _ExtraArtistRec = tuple[int | None, str, str | None, str | None, str | None]
@@ -435,10 +441,11 @@ def append_record(
                             sub, unknown
                         )
                         if nested is not None:
-                            # Only one level of sub-tracks is parsed, so fail rather than drop the deeper ones. Name the
-                            # positions, not the element's line: from line 65535 on, lxml can report another node's.
-                            raise ValueError(
-                                f"<sub_tracks> nested in sub-track {s_pos!r} of track {pos!r}"
+                            # Only one level of sub-tracks is parsed, so fail rather than drop the deeper ones. The
+                            # worker adds the nested element's line.
+                            raise ElementValueError(
+                                f"<sub_tracks> nested in sub-track {s_pos!r} of track {pos!r}",
+                                nested,
                             )
                         r_tracks.append(
                             (track_idx, parent, s_pos, s_ttl, s_dur, s_art, s_ea)
