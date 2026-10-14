@@ -690,6 +690,80 @@ class TestFkOption:
         assert len(fks) > 0
 
 
+class TestProfile:
+    """--profile lists a commit row only for writers that time a commit (#118)."""
+
+    @staticmethod
+    def _flush_table_rows(output: str) -> list[str]:
+        """First cell of each row in the "Per-table flush" table."""
+        lines = _unstyle(output).splitlines()
+        start = next(i for i, line in enumerate(lines) if "Per-table flush" in line)
+        # Skip the title, the header row and the rule under it; the table ends at the first blank line.
+        rows = []
+        for line in lines[start + 3 :]:
+            if not line.strip():
+                break
+            rows.append(line.split()[0])
+        return rows
+
+    @staticmethod
+    def _artists_gz(tmp_path: Path) -> Path:
+        gz = tmp_path / _ENTITY_FILE
+        with gzip.open(gz, "wb") as f:
+            f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
+            f.write(ARTISTS_XML.encode())
+            f.write(b"</artists>")
+        return gz
+
+    @pytest.mark.parametrize("fmt", ["jsonl", "parquet"])
+    def test_convert_has_no_commit_row(
+        self, fmt: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        gz = self._artists_gz(tmp_path)
+        _widen_console(monkeypatch)
+        result = runner.invoke(
+            app,
+            [
+                "convert",
+                str(gz),
+                "-f",
+                fmt,
+                "--output",
+                str(tmp_path / "out"),
+                "--parse-workers",
+                "1",
+                "--profile",
+                "--no-progress",
+            ],
+        )
+        assert result.exit_code == 0, _unstyle(result.output)
+        assert self._flush_table_rows(result.output) == get("artists").table_order
+
+    def test_sqlite_load_has_commit_row(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        gz = self._artists_gz(tmp_path)
+        _widen_console(monkeypatch)
+        result = runner.invoke(
+            app,
+            [
+                "load",
+                str(gz),
+                "--dsn",
+                str(tmp_path / "out.db"),
+                "--parse-workers",
+                "1",
+                "--profile",
+                "--no-progress",
+            ],
+        )
+        assert result.exit_code == 0, _unstyle(result.output)
+        assert self._flush_table_rows(result.output) == [
+            *get("artists").table_order,
+            "commit",
+        ]
+
+
 class TestCompressionLevel:
     """--compression-level (#32): the level must actually reach the codec through the real CLI."""
 
