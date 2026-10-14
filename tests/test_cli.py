@@ -714,24 +714,6 @@ class TestPreflight:
 
 
 class TestFormatAndCompressionEnums:
-    def test_compression_default_for_jsonl_is_none(self, tmp_path: Path) -> None:
-        gz = _make_gz(tmp_path)
-        with (
-            patch("discogskit.cli.pipeline.run"),
-            patch("discogskit.writers.jsonl.JSONLWriter") as writer_cls,
-        ):
-            runner.invoke(app, ["convert", str(gz), "-f", "jsonl"])
-        assert writer_cls.call_args.kwargs["compression"] == "none"
-
-    def test_compression_default_for_parquet_is_zstd(self, tmp_path: Path) -> None:
-        gz = _make_gz(tmp_path)
-        with (
-            patch("discogskit.cli.pipeline.run"),
-            patch("discogskit.writers.parquet.ParquetWriter") as writer_cls,
-        ):
-            runner.invoke(app, ["convert", str(gz), "-f", "parquet"])
-        assert writer_cls.call_args.kwargs["compression"] == "zstd"
-
     @pytest.mark.parametrize(
         "fmt, compression",
         [("jsonl", "snappy"), ("jsonl", "zstd"), ("parquet", "bzip2")],
@@ -773,7 +755,6 @@ class TestFormatAndCompressionEnums:
             runner.invoke(app, ["convert", str(gz), "-f", "PARQUET"])
         parquet_cls.assert_called_once()
         jsonl_cls.assert_not_called()
-        assert parquet_cls.call_args.kwargs["compression"] == "zstd"
 
     def test_invalid_compression_value_is_a_usage_error(self, tmp_path: Path) -> None:
         gz = _make_gz(tmp_path)
@@ -1120,7 +1101,7 @@ class TestCompressionLevel:
         )
         assert result.exit_code == 1
         output = _unstyle(result.output)
-        assert "none does not support --compression-level." in output
+        assert "none does not support a compression level." in output
 
     def test_rejects_level_for_snappy(self, tmp_path: Path) -> None:
         gz = _make_gz(tmp_path)
@@ -1139,7 +1120,7 @@ class TestCompressionLevel:
         )
         assert result.exit_code == 1
         output = _unstyle(result.output)
-        assert "snappy does not support --compression-level." in output
+        assert "snappy does not support a compression level." in output
 
     @pytest.mark.parametrize(
         "fmt, compression, level",

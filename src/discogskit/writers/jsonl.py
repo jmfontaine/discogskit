@@ -6,8 +6,8 @@ the library's level-9 default: output a few percent larger for much
 less compression CPU (measured in #32). bz2 stays at its own default —
 its ``compresslevel`` only changes the BWT block size, not compression
 speed, and level 6 produced no measured speedup and slightly larger
-output. ``compression_level`` overrides either default; see
-``cli._validate_compression_level`` for the accepted range per codec.
+output. ``compression_level`` overrides either default, within the
+range ``_LEVEL_RANGES`` gives per codec.
 Batching rows into fewer, larger write() calls was tried and measured:
 the speedup didn't reproduce beyond noise, since json.dumps() dominates,
 so write_chunk() still makes two write() calls per row (the JSON text,
@@ -26,9 +26,12 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
 from discogskit._console import status
+from discogskit.writers._compression import check_compression, check_compression_level
 from discogskit.writers._staging import StagedFiles
 
 if TYPE_CHECKING:
+    import os
+
     import pyarrow as pa
 
     from discogskit.entities import EntityDef
@@ -36,22 +39,27 @@ if TYPE_CHECKING:
 
 _COMPRESSED_EXT = {"bzip2": ".jsonl.bz2", "gzip": ".jsonl.gz"}
 
+# (min, max) compression level Python's own bz2/gzip modules accept.
+_LEVEL_RANGES = {"bzip2": (1, 9), "gzip": (0, 9)}
+
 
 class JSONLWriter:
     """Writer implementation that produces one .jsonl file per table."""
 
     def __init__(
         self,
-        output_dir: str,
+        output_dir: str | os.PathLike[str],
         *,
-        compression: str = "none",
+        compression: str | None = None,
         compression_level: int | None = None,
         overwrite: bool = False,
     ) -> None:
-        if compression != "none" and compression not in _COMPRESSED_EXT:
-            raise ValueError(
-                f"Unsupported JSONL compression {compression!r}: expected bzip2, gzip, none."
-            )
+        """``compression`` None means uncompressed. Raises ``ValueError`` for a codec or level JSONL output can't use."""
+        compression = "none" if compression is None else compression
+        check_compression("jsonl", compression, [*_COMPRESSED_EXT, "none"])
+        check_compression_level(
+            compression, compression_level, _LEVEL_RANGES.get(compression)
+        )
         self._output_dir = Path(output_dir)
         self._compression = compression
         self._compression_level = compression_level
