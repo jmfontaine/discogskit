@@ -31,7 +31,7 @@ repos:
     hooks:
       - id: dead-code
         name: dead-code
-        entry: bash -c 'output=$(uv run --python 3.13 deadcode src tests 2>&1); echo "$output"; echo "$output" | grep -q "DC0" && exit 1 || exit 0'
+        entry: scripts/dead-code.sh
         language: system
         types: [python]
         pass_filenames: false

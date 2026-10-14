@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 
@@ -22,8 +22,9 @@ from discogskit.entities._split import find_split_points
 if TYPE_CHECKING:
     from lxml import etree
 
-# Column accumulators: table name -> column name -> values, one list per column.
-Cols = dict[str, dict[str, list]]
+# Column accumulators: table name -> column name -> values, one list per column. The value type
+# follows each column's Arrow type, so it differs per column: hence Any.
+Cols = dict[str, dict[str, list[Any]]]
 
 
 @dataclass

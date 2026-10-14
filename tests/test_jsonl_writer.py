@@ -6,13 +6,19 @@ import bz2
 import gzip
 import json
 import os
+import re
 
 import pytest
 
 from discogskit.entities import ChunkArgs, get
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers.jsonl import JSONLWriter
-from tests.conftest import empty_ipc, ipc_to_record_batches
+from tests.conftest import (
+    empty_ipc,
+    fail_after_first_move,
+    ipc_to_record_batches,
+    needs_permissions,
+)
 
 
 @pytest.mark.integration
@@ -156,6 +162,46 @@ class TestJSONLWriter:
 
         assert list(out.iterdir()) == []
 
+    @needs_permissions
+    def test_unwritable_entity_dir_fails_in_setup(self, tmp_path, entity):
+        """commit() couldn't move files into it, so setup() fails, before any parsing."""
+        out = tmp_path / "out"
+        entity_dir = out / "artists"
+        entity_dir.mkdir(parents=True)
+        entity_dir.chmod(0o500)
+        writer = JSONLWriter(str(out))
+        try:
+            with pytest.raises(OSError, match=re.escape(str(entity_dir))):
+                writer.setup(entity)
+        finally:
+            writer.close()
+            entity_dir.chmod(0o700)
+        assert [p.name for p in out.iterdir()] == ["artists"]
+        assert list(entity_dir.iterdir()) == []
+
+    def test_failed_commit_keeps_staged_files(
+        self, monkeypatch, tmp_path, entity, ipc_dict
+    ):
+        """A move failing after setup() keeps the finished files and names their directory."""
+        out = tmp_path / "out"
+        writer = JSONLWriter(str(out))
+        writer.setup(entity)
+        writer.write_chunk(ipc_to_record_batches(ipc_dict))
+        fail_after_first_move(monkeypatch)
+        try:
+            with pytest.raises(OSError, match="completed files") as excinfo:
+                writer.finalize(entity)
+        finally:
+            writer.close()
+
+        root, *children = [f"{t}.jsonl" for t in entity.table_order]
+        assert [p.name for p in (out / "artists").iterdir()] == [root]
+        (staging,) = [p for p in out.iterdir() if p.name != "artists"]
+        assert str(staging) in str(excinfo.value)
+        assert sorted(p.name for p in staging.iterdir()) == sorted(children)
+        aliases = (staging / "artist_aliases.jsonl").read_text().splitlines()
+        assert json.loads(aliases[0])["alias_id"] == 10
+
     def test_failed_overwrite_keeps_previous_output(self, tmp_path, entity, ipc_dict):
         """With overwrite=True, a run that fails before finalize() keeps the old files."""
         out = tmp_path / "out"
@@ -197,3 +243,11 @@ class TestJSONLWriter:
         writer2.setup(entity)
         writer2.write_chunk(ipc_to_record_batches(ipc_dict))
         writer2.finalize(entity)
+
+
+class TestJSONLWriterCompression:
+    @pytest.mark.parametrize("compression", ["zstd", "snappy", "GZIP", ""])
+    def test_unsupported_compression_raises(self, tmp_path, compression):
+        """It used to write plain output while the status line claimed the codec."""
+        with pytest.raises(ValueError, match="bzip2, gzip, none"):
+            JSONLWriter(str(tmp_path), compression=compression)

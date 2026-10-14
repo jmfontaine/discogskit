@@ -48,6 +48,10 @@ class JSONLWriter:
         compression_level: int | None = None,
         overwrite: bool = False,
     ) -> None:
+        if compression != "none" and compression not in _COMPRESSED_EXT:
+            raise ValueError(
+                f"Unsupported JSONL compression {compression!r}: expected bzip2, gzip, none."
+            )
         self._output_dir = Path(output_dir)
         self._compression = compression
         self._compression_level = compression_level
@@ -131,7 +135,7 @@ class JSONLWriter:
         status("Output", f"{n_files} files, {total_mb:,.1f} MB total")
 
     def close(self) -> None:
-        """Release file handles; output not committed by ``finalize()`` is deleted."""
+        """Release file handles; output not committed by ``finalize()`` is deleted, unless a failed commit kept it."""
         for f in self._files.values():
             # The file is discarded below, so a failing flush doesn't matter and
             # must not replace the error that aborted the run.
