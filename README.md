@@ -148,9 +148,12 @@ JSONL bzip2 1-9, Parquet gzip 1-9, Parquet zstd -131072 to 22. `snappy` and `non
 │ --chunk-mb                                 <int range> [x>=1]       Split XML into chunks of │
 │                                                                     roughly this size (MB)   │
 │                                                                     [default: 256]           │
-│ --write-queue                              <int range> [x>=1]       Max chunks buffered in   │
-│                                                                     memory before writes     │
-│                                                                     must catch up            │
+│ --write-queue                              <int range> [x>=1]       Chunks parsing may run   │
+│                                                                     ahead of writing: at     │
+│                                                                     most --parse-workers     │
+│                                                                     plus this many chunks    │
+│                                                                     are parsing or waiting   │
+│                                                                     to be written            │
 │                                                                     [default: 2]             │
 │ --keep-xml               --no-keep-xml                              Keep decompressed XML    │
 │                                                                     file after converting    │
@@ -264,8 +267,10 @@ absolute) or a plain path ending in `.db`, `.sqlite`, or `.sqlite3`. Other `sqli
 │ --chunk-mb                           <int range> [x>=1]  Split XML into chunks of roughly    │
 │                                                          this size (MB)                      │
 │                                                          [default: 256]                      │
-│ --write-queue                        <int range> [x>=1]  Max chunks buffered in memory       │
-│                                                          before writes must catch up         │
+│ --write-queue                        <int range> [x>=1]  Chunks parsing may run ahead of     │
+│                                                          writing: at most --parse-workers    │
+│                                                          plus this many chunks are parsing   │
+│                                                          or waiting to be written            │
 │                                                          [default: 2]                        │
 │ --fk               --no-fk                               Enforce foreign key constraints     │
 │                                                          (SQLite and PostgreSQL)             │
