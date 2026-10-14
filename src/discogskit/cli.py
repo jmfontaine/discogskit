@@ -242,6 +242,12 @@ def _run_jobs(
                     (gz_path.name, "dim"),
                 )
             )
+            # Without a progress bar (--no-progress or --profile), echo the run's settings.
+            if verbose:
+                status("Workers", str(parse_workers))
+                status("Chunk size", f"{chunk_mb} MB")
+                status("Write queue", str(write_queue))
+                status("Source", str(gz_path))
 
             config = pipeline.PipelineConfig(
                 chunk_mb=chunk_mb,
@@ -321,7 +327,8 @@ def convert(
     write_queue: Annotated[
         int,
         typer.Option(
-            help="Max chunks buffered in memory before writes must catch up", min=1
+            help="Chunks parsing may run ahead of writing: at most --parse-workers plus this many chunks are parsing or waiting to be written",
+            min=1,
         ),
     ] = 2,
     # Behavior
@@ -428,7 +435,8 @@ def load(
     write_queue: Annotated[
         int,
         typer.Option(
-            help="Max chunks buffered in memory before writes must catch up", min=1
+            help="Chunks parsing may run ahead of writing: at most --parse-workers plus this many chunks are parsing or waiting to be written",
+            min=1,
         ),
     ] = 2,
     # Behavior
