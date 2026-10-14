@@ -218,10 +218,15 @@ def _crc32_multiply(a: int, b: int) -> int:
         b = (b >> 1) ^ _CRC32_POLY if b & 1 else b >> 1
 
 
-# x^(2^k) modulo the CRC-32 polynomial for k = 0..31 (zlib's x2n_table).
-_CRC32_X2N = [1 << 30]
-for _ in range(31):
-    _CRC32_X2N.append(_crc32_multiply(_CRC32_X2N[-1], _CRC32_X2N[-1]))
+def _crc32_x2n_table() -> tuple[int, ...]:
+    """x^(2^k) modulo the CRC-32 polynomial for k = 0..31 (zlib's x2n_table)."""
+    table = [1 << 30]  # x^1
+    while len(table) < 32:
+        table.append(_crc32_multiply(table[-1], table[-1]))
+    return tuple(table)
+
+
+_CRC32_X2N = _crc32_x2n_table()
 
 
 def _crc32_shift(crc: int, length: int) -> int:
