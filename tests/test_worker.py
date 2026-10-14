@@ -164,6 +164,20 @@ class TestRecordErrorContext:
             f"Invalid <artist> record in {file} at chunk line 2 (chunk bytes {start}-{end}, id='abc'): "
         )
 
+    def test_element_line_unknown_in_a_record_holding_records(self, tmp_path):
+        """The worker cleared the inner record, so counting elements would name the wrong line (#96)."""
+        chunk = (
+            b'<release id="7">\n'
+            b'<x><releases><release id="8"><title>a</title></release></releases></x>\n'
+            b"<tracklist><track><position>1</position><sub_tracks><track><position>1a</position>\n"
+            b"<sub_tracks/></track></sub_tracks></track></tracklist></release>\n"
+        )
+        file, start, end, message = _extract_error(tmp_path, "releases", chunk)
+        assert message == (
+            f"Invalid <release> record in {file} at chunk line 1 (chunk bytes {start}-{end}, id='7'):"
+            " <sub_tracks> nested in sub-track '1a' of track '1' at chunk line unknown"
+        )
+
 
 class TestTableErrorContext:
     @pytest.mark.parametrize(

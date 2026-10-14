@@ -10,7 +10,13 @@ from __future__ import annotations
 import pyarrow as pa
 from lxml import etree
 
-from discogskit.entities import Cols, EntityDef, parse_bool, register
+from discogskit.entities import (
+    Cols,
+    ElementValueError,
+    EntityDef,
+    parse_bool,
+    register,
+)
 
 _ArtistRec = tuple[int | None, str, str | None, str | None]
 _ExtraArtistRec = tuple[int | None, str, str | None, str | None, str | None]
@@ -431,9 +437,16 @@ def append_record(
                     for sub in sub_elem:
                         if sub.tag != "track":
                             continue
-                        s_pos, s_ttl, s_dur, s_art, s_ea, _ = _parse_single_track(
+                        s_pos, s_ttl, s_dur, s_art, s_ea, nested = _parse_single_track(
                             sub, unknown
                         )
+                        if nested is not None:
+                            # Only one level of sub-tracks is parsed, so fail rather than drop the deeper ones. The
+                            # worker adds the nested element's line.
+                            raise ElementValueError(
+                                f"<sub_tracks> nested in sub-track {s_pos!r} of track {pos!r}",
+                                nested,
+                            )
                         r_tracks.append(
                             (track_idx, parent, s_pos, s_ttl, s_dur, s_art, s_ea)
                         )

@@ -101,6 +101,51 @@ class TestReleasesParsing:
         assert t.column("position").to_pylist() == ["A1", "A1.1"]
         assert t.column("title").to_pylist() == ["Track One", "Sub Track"]
 
+    def test_sub_tracks_nested_in_a_sub_track_fail(self, tmp_path):
+        """A <sub_tracks> inside a sub-track fails instead of vanishing with everything below it (#96)."""
+        xml = (
+            '<release id="7" status="Accepted">\n'
+            "  <tracklist>\n"
+            "    <track><position>1</position>\n"
+            "      <sub_tracks>\n"
+            "        <track><position>1a</position>\n"
+            "          <sub_tracks>\n"
+            "            <track><position>1a.i</position></track>\n"
+            "          </sub_tracks>\n"
+            "        </track>\n"
+            "      </sub_tracks>\n"
+            "    </track>\n"
+            "  </tracklist>\n"
+            "</release>\n"
+        )
+        f = tmp_path / "nested_sub_tracks.xml"
+        f.write_text(xml)
+
+        with pytest.raises(
+            ValueError,
+            match=r"^Invalid <release> record in .* at chunk line 1 \(chunk bytes \d+-\d+, id='7'\):"
+            r" <sub_tracks> nested in sub-track '1a' of track '1' at chunk line 6$",
+        ):
+            extract_chunk_to_ipc(ChunkArgs("releases", str(f), 0, os.path.getsize(f)))
+
+    def test_nested_sub_tracks_line_past_libxml2_limit(self, tmp_path):
+        """The nested <sub_tracks> line is its own past line 65535, where lxml reports its parent's line 1 (#96)."""
+        xml = (
+            '<release id="7" status="Accepted"><tracklist><track><position>1</position>'
+            "<sub_tracks><track><position>1a</position><title>"
+            + "\n" * 70_000
+            + "</title><sub_tracks/></track></sub_tracks></track></tracklist></release>\n"
+        )
+        f = tmp_path / "nested_sub_tracks.xml"
+        f.write_text(xml)
+
+        with pytest.raises(
+            ValueError,
+            match=r"^Invalid <release> record in .* at chunk line 1 \(chunk bytes \d+-\d+, id='7'\):"
+            r" <sub_tracks> nested in sub-track '1a' of track '1' at chunk line 70001$",
+        ):
+            extract_chunk_to_ipc(ChunkArgs("releases", str(f), 0, os.path.getsize(f)))
+
     def test_track_artists(self, releases_xml_file):
         tables = self._parse(releases_xml_file)
         ta = tables["release_track_artists"]
