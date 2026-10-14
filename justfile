@@ -15,6 +15,10 @@ bench-setup *args:
 changelog-preview:
     uvx git-cliff --unreleased
 
+# Find dead code
+dead-code:
+    scripts/dead-code.sh
+
 # Check for unused or undeclared deps
 deps-unused:
     uv run deptry src
@@ -23,10 +27,6 @@ deps-unused:
 deps-update:
     uv lock --upgrade
     uv sync --all-extras --all-groups
-
-# Find dead code
-dead-code:
-    scripts/dead-code.sh
 
 # Run formatters
 format:
@@ -104,17 +104,17 @@ skill-references:
 test *args:
     uv run pytest {{ args }}
 
-# Run unit tests only
-test-unit *args:
-    uv run pytest -m "not integration" {{ args }}
+# Run all tests with coverage
+test-cov *args:
+    uv run pytest --cov --cov-report=term-missing {{ args }}
 
 # Run integration tests only
 test-integration *args:
     uv run pytest -m integration {{ args }}
 
-# Run all tests with coverage
-test-cov *args:
-    uv run pytest --cov --cov-report=term-missing {{ args }}
+# Run unit tests only
+test-unit *args:
+    uv run pytest -m "not integration" {{ args }}
 
 # Run type checker
 type-check:

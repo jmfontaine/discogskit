@@ -7,7 +7,8 @@ import pickle
 
 import pytest
 
-from discogskit.entities import ChunkArgs, get
+from discogskit.entities import ENTITIES
+from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.entities.artists import SCHEMAS
 from tests.conftest import (
@@ -121,7 +122,13 @@ _UNHANDLED = [
 def test_strict_reports_unhandled_element_path(tmp_path, entity_name, record, path):
     f = tmp_path / "chunk.xml"
     f.write_text(record)
-    args = ChunkArgs(entity_name, str(f), 0, os.path.getsize(f), strict=True)
+    args = ChunkArgs(
+        end=os.path.getsize(f),
+        entity=entity_name,
+        file_path=str(f),
+        start=0,
+        strict=True,
+    )
 
     assert extract_chunk_to_ipc(args).unknown == [path]
 
@@ -144,7 +151,7 @@ def test_strict_reports_unhandled_element_path(tmp_path, entity_name, record, pa
 def test_namespaced_record_fails(tmp_path, entity_name, layout):
     """A namespaced record element must fail, naming the file, the element and the line where its start tag begins,
     instead of being dropped."""
-    tag = get(entity_name).root_tag
+    tag = ENTITIES[entity_name].root_tag
     # A start tag over several lines: lxml's own line would be its last one.
     namespaced = f'<{tag}\n  xmlns="urn:x"\n  id="9">\n  <id>9</id>\n</{tag}>\n'
     plain = PLAIN_RECORDS[entity_name]
@@ -154,7 +161,11 @@ def test_namespaced_record_fails(tmp_path, entity_name, layout):
     f.write_text(xml)
 
     with pytest.raises(ValueError) as info:
-        extract_chunk_to_ipc(ChunkArgs(entity_name, str(f), 0, os.path.getsize(f)))
+        extract_chunk_to_ipc(
+            ChunkArgs(
+                end=os.path.getsize(f), entity=entity_name, file_path=str(f), start=0
+            )
+        )
 
     message = str(info.value)
     assert str(f) in message
@@ -169,7 +180,11 @@ def test_namespaced_line_past_65535_is_approximate_when_expat_fails(tmp_path):
     f.write_text(xml, encoding="utf-8")
 
     with pytest.raises(ValueError, match=r"<\{urn:x\}artist> near line \d+;"):
-        extract_chunk_to_ipc(ChunkArgs("artists", str(f), 0, os.path.getsize(f)))
+        extract_chunk_to_ipc(
+            ChunkArgs(
+                end=os.path.getsize(f), entity="artists", file_path=str(f), start=0
+            )
+        )
 
 
 def test_namespaced_element_in_nested_container_is_not_a_record(tmp_path):
@@ -183,7 +198,7 @@ def test_namespaced_element_in_nested_container_is_not_a_record(tmp_path):
     f.write_text(xml)
 
     ipc_dict = extract_chunk_to_ipc(
-        ChunkArgs("artists", str(f), 0, os.path.getsize(f))
+        ChunkArgs(end=os.path.getsize(f), entity="artists", file_path=str(f), start=0)
     ).tables
 
     assert 1 in ipc_to_tables(ipc_dict, SCHEMAS)["artists"].column("id").to_pylist()
@@ -199,7 +214,9 @@ def _extract_error(tmp_path, entity: str, chunk: bytes) -> tuple[str, int, int, 
     f.write_bytes(_PREFIX + chunk)
     start, end = len(_PREFIX), len(_PREFIX) + len(chunk)
     with pytest.raises(ValueError) as info:
-        extract_chunk_to_ipc(ChunkArgs(entity, str(f), start, end))
+        extract_chunk_to_ipc(
+            ChunkArgs(end=end, entity=entity, file_path=str(f), start=start)
+        )
     # The pool pickles the error to send it to the parent; the message must survive.
     message = str(pickle.loads(pickle.dumps(info.value)))
     assert message == str(info.value)

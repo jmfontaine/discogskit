@@ -20,9 +20,10 @@ from xml.parsers import expat
 
 import pyarrow as pa
 from lxml import etree
-from pyarrow import ipc
 
-from discogskit.entities import ChunkArgs, Cols, ElementValueError, get
+from discogskit._ipc import serialize_batch
+from discogskit.entities import ENTITIES
+from discogskit.entities._def import ChunkArgs, Cols, ElementValueError
 
 _T = TypeVar("_T")
 
@@ -164,14 +165,6 @@ def _scan_lines(
     return None
 
 
-def _serialize_batch(batch: pa.RecordBatch, schema: pa.Schema) -> bytes:
-    sink = pa.BufferOutputStream()
-    writer = ipc.new_stream(sink, schema)
-    writer.write_batch(batch)
-    writer.close()
-    return sink.getvalue().to_pybytes()
-
-
 def _to_batch(
     args: ChunkArgs, columns: dict[str, list], name: str, schema: pa.Schema
 ) -> pa.RecordBatch:
@@ -191,7 +184,7 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
     and parses it with lxml iterparse. With ``args.strict``, also returns the paths of the elements no parser handled;
     the main process reports them once per run, so workers print nothing.
     """
-    entity = get(args.entity)
+    entity = ENTITIES[args.entity]
     with open(args.file_path, "rb") as f:
         f.seek(args.start)
         data = f.read(args.end - args.start)
@@ -292,7 +285,7 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
 
     return ChunkResult(
         tables={
-            name: _serialize_batch(_to_batch(args, cols[name], name, schema), schema)
+            name: serialize_batch(_to_batch(args, cols[name], name, schema), schema)
             for name, schema in entity.schemas.items()
         },
         unknown=sorted(unknown) if unknown else [],

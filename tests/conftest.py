@@ -10,10 +10,11 @@ from typing import NoReturn
 import pyarrow as pa
 import pytest
 
-from discogskit.entities import ChunkArgs, get
+from discogskit._ipc import deserialize_batch
+from discogskit.entities import ENTITIES
+from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers import _staging
-from discogskit.writers._ipc import deserialize_batch
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Helper: IPC dict → dict[str, pa.Table] / dict[str, pa.RecordBatch]
@@ -39,7 +40,9 @@ def ipc_to_record_batches(ipc_dict: dict[str, bytes]) -> dict[str, pa.RecordBatc
 
 def empty_ipc(entity: str) -> dict[str, bytes]:
     """IPC dict for a chunk with no records, from an empty byte range of any file."""
-    return extract_chunk_to_ipc(ChunkArgs(entity, __file__, 0, 0)).tables
+    return extract_chunk_to_ipc(
+        ChunkArgs(end=0, entity=entity, file_path=__file__, start=0)
+    ).tables
 
 
 # Root ignores directory permissions, and Windows doesn't apply POSIX modes to directories.
@@ -344,14 +347,14 @@ def unicode_artists_xml_file(tmp_path):
 
 @pytest.fixture()
 def entity():
-    return get("artists")
+    return ENTITIES["artists"]
 
 
 @pytest.fixture()
 def ipc_dict(artists_xml_file):
     size = os.path.getsize(artists_xml_file)
     return extract_chunk_to_ipc(
-        ChunkArgs("artists", str(artists_xml_file), 0, size)
+        ChunkArgs(end=size, entity="artists", file_path=str(artists_xml_file), start=0)
     ).tables
 
 

@@ -83,6 +83,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rich.console import Console
 from rich.progress import (
     BarColumn,
     Progress,
@@ -92,13 +93,15 @@ from rich.progress import (
 )
 from rich.text import Text
 
-from discogskit import decompress
-from discogskit._console import console, status
-from discogskit.entities import ChunkArgs, EntityDef
-from discogskit.entities import get as get_entity
+from discogskit._console import current, set_current, status, using
+from discogskit._ipc import deserialize_batch
+from discogskit.decompress import ensure_xml
+from discogskit.entities import ENTITIES, EntityDef
+from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import ChunkResult, extract_chunk_to_ipc
 from discogskit.writers import Writer
-from discogskit.writers._ipc import deserialize_batch
+
+__all__ = ["PipelineConfig", "PipelineResult", "run"]
 
 
 class _ElapsedEstTotalColumn(ProgressColumn):
@@ -148,7 +151,7 @@ class _ProgressBar:
             TextColumn("[progress.description]{task.description}"),
             TextColumn("[dim]·[/]"),
             _ElapsedEstTotalColumn(),
-            console=console,
+            console=current(),
             redirect_stderr=True,
             redirect_stdout=True,
             transient=True,
@@ -175,6 +178,16 @@ class _ProgressBar:
 
 @dataclass
 class PipelineConfig:
+    """Settings for one ``run()``: one dump of one entity.
+
+    ``entity`` is a key of ``ENTITIES`` and must match the dump at ``gz_path`` (``detect_entity()`` reads it from a
+    Discogs dump file name). ``chunk_mb`` sets the rough size, in MB, of the chunks the XML is split into, and
+    ``parse_workers`` the number of parse processes. At most ``parse_workers + write_queue`` chunks are being parsed
+    or waiting to be written at once. ``keep_xml`` keeps the decompressed XML after a successful run. ``profile``
+    fills ``PipelineResult.profile_data`` and prints per-chunk lines instead of a progress bar; ``progress`` shows a
+    progress bar when the console is a terminal. ``strict`` reports the XML elements no parser handled.
+    """
+
     chunk_mb: int
     entity: str
     gz_path: Path
@@ -197,6 +210,12 @@ class ProfileData:
 
 @dataclass
 class PipelineResult:
+    """What one ``run()`` did: records loaded and seconds spent per stage.
+
+    ``t_parse_load`` covers splitting, parsing and writing; ``t_indexes`` the writer's ``finalize()``; ``t_total``
+    is their sum with ``t_decompress``. ``profile_data`` is set only with ``PipelineConfig.profile``.
+    """
+
     profile_data: ProfileData | None
     t_decompress: float
     t_indexes: float
@@ -308,7 +327,7 @@ class _ChunkWriter:
         else:
             # Through the console, which flushes each line, so piped output
             # shows every chunk as it's written. Literal text, never wrapped.
-            console.print(
+            current().print(
                 f"  chunk {self.chunks_done}/{self.n_chunks}: "
                 f"{chunk_count:,} {self.entity.name} ({self.total:,} total) "
                 f"[{chunk_count / chunk_elapsed:,.0f} rec/s chunk, "
@@ -393,8 +412,12 @@ def _parse_and_write(
     # Unfinished writes in submission order, which is the order they finish in.
     writes: deque[Future[None]] = deque()
 
+    # The writer thread prints to the run's console: a new thread may not inherit the caller's context.
     write_executor = ThreadPoolExecutor(
-        max_workers=1, thread_name_prefix="discogskit-writer"
+        initargs=(current(),),
+        initializer=set_current,
+        max_workers=1,
+        thread_name_prefix="discogskit-writer",
     )
     parse_executor: ProcessPoolExecutor | None = None
     writer_done: threading.Event | None = None
@@ -459,7 +482,7 @@ def _parse_and_write(
             progress_bar.stop()
         if isinstance(exc, KeyboardInterrupt):
             # Chunks being parsed can't be interrupted; say why we pause.
-            console.print(
+            current().print(
                 "\n  [yellow]Interrupted — waiting for in-flight chunks to finish …[/]"
             )
         # Drop queued writes now, so none starts while the workers stop.
@@ -484,9 +507,23 @@ def _parse_and_write(
     return put_blocked, sorted(unknown)
 
 
-def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
-    """Execute the full ingest pipeline."""
-    entity = get_entity(config.entity)
+def run(
+    config: PipelineConfig, writer: Writer, *, console: Console | None = None
+) -> PipelineResult:
+    """Run one dump through the whole pipeline: decompress, split, parse, write, finalize.
+
+    Everything the run prints, from the pipeline and from ``writer``'s ``setup()`` and ``finalize()``, goes to
+    ``console``; by default, a console on stdout. Pass ``Console(quiet=True)`` to print nothing, or a ``Console``
+    of your own to capture the output. The caller keeps ownership of ``writer`` and closes it.
+    """
+    if console is None:
+        return _run(config, writer)
+    with using(console):
+        return _run(config, writer)
+
+
+def _run(config: PipelineConfig, writer: Writer) -> PipelineResult:
+    entity = ENTITIES[config.entity]
 
     gz_path = config.gz_path
     xml_path = gz_path.with_suffix("")
@@ -496,12 +533,12 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
     # Profiling requires verbose per-chunk output, so disable progress bar. So
     # does output that isn't a terminal (a pipe, a file, CI): a live display
     # only shows there once it ends.
-    use_progress = config.progress and not config.profile and console.is_terminal
+    use_progress = config.progress and not config.profile and current().is_terminal
 
     # Stage 1: Decompress. The lease keeps other runs from deleting or
     # rewriting the XML while this run reads it.
     t0 = time.perf_counter()
-    xml_lease = decompress.ensure_xml(gz_path, xml_path, parse_workers)
+    xml_lease = ensure_xml(gz_path, xml_path, parse_workers)
     t_decompress = time.perf_counter() - t0
 
     try:
@@ -511,7 +548,13 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
         splits = entity.find_split_points(str(xml_path), chunk_bytes)
         t_split = time.perf_counter() - t_split_start
         worker_args = [
-            ChunkArgs(entity.name, str(xml_path), s, e, config.strict)
+            ChunkArgs(
+                end=e,
+                entity=entity.name,
+                file_path=str(xml_path),
+                start=s,
+                strict=config.strict,
+            )
             for s, e in splits
         ]
         n_chunks = len(splits)

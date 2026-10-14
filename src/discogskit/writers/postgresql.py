@@ -561,7 +561,7 @@ class PostgreSQLWriter:
         self._conn.execute(_primary_key_ddl(root))
         status("Index", f"primary key on {root}", f"[{time.perf_counter() - t0:.2f}s]")
 
-        if fk_col and len(table_order) > 1:
+        if len(table_order) > 1:
             t1 = time.perf_counter()
             if self._index_workers <= 1:
                 for t in table_order[1:]:
@@ -579,7 +579,7 @@ class PostgreSQLWriter:
                 f"[{time.perf_counter() - t1:.2f}s]",
             )
 
-        if self._fk and fk_col and len(table_order) > 1:
+        if self._fk and len(table_order) > 1:
             t2 = time.perf_counter()
             for t in table_order[1:]:
                 self._conn.execute(_foreign_key_ddl(t, fk_col, root))

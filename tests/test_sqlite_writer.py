@@ -9,7 +9,8 @@ import sqlite3
 import pyarrow as pa
 import pytest
 
-from discogskit.entities import ChunkArgs, get
+from discogskit.entities import ENTITIES
+from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers.sqlite import SQLiteWriter
 from tests.conftest import (
@@ -37,11 +38,11 @@ from tests.conftest import (
 )
 def test_every_entity_loads(tmp_path, entity_name, xml, fk):
     """Every table round-trips, including columns named after SQL keywords like `join` (#56)."""
-    entity = get(entity_name)
+    entity = ENTITIES[entity_name]
     f = tmp_path / f"{entity_name}.xml"
     f.write_text(xml)
     ipc_dict = extract_chunk_to_ipc(
-        ChunkArgs(entity_name, str(f), 0, os.path.getsize(f))
+        ChunkArgs(end=os.path.getsize(f), entity=entity_name, file_path=str(f), start=0)
     ).tables
     expected = {
         name: table.num_rows
@@ -131,10 +132,14 @@ class TestSQLiteWriter:
         f2.write_text(xml2)
 
         ipc1 = extract_chunk_to_ipc(
-            ChunkArgs("artists", str(f1), 0, os.path.getsize(f1))
+            ChunkArgs(
+                end=os.path.getsize(f1), entity="artists", file_path=str(f1), start=0
+            )
         ).tables
         ipc2 = extract_chunk_to_ipc(
-            ChunkArgs("artists", str(f2), 0, os.path.getsize(f2))
+            ChunkArgs(
+                end=os.path.getsize(f2), entity="artists", file_path=str(f2), start=0
+            )
         ).tables
 
         db_path = str(tmp_path / "test.db")
@@ -375,7 +380,9 @@ class TestSQLiteWriter:
         f = tmp_path / "artists.xml"
         f.write_text(xml, encoding="utf-8")
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("artists", str(f), 0, os.path.getsize(f))
+            ChunkArgs(
+                end=os.path.getsize(f), entity="artists", file_path=str(f), start=0
+            )
         ).tables
         db_path = str(tmp_path / "test.db")
         self._load(db_path, entity, ipc_dict)

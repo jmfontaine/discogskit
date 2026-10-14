@@ -8,7 +8,7 @@ from typing import Annotated
 
 import typer
 
-from discogskit._console import console, error
+from discogskit._console import current, error
 
 SKILLS_ROOT = Path(__file__).parent / "skills"
 
@@ -59,7 +59,7 @@ def _complete_name(incomplete: str) -> list[str]:
 
 def _out(text: str) -> None:
     """Print ``text`` exactly: no markup, emoji codes, highlighting or wrapping, which would alter Markdown."""
-    console.out(text, highlight=False, end="")
+    current().out(text, highlight=False, end="")
 
 
 @app.callback(invoke_without_command=True)

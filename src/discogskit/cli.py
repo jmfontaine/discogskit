@@ -13,9 +13,8 @@ from rich.table import Table
 from rich.text import Text
 
 from discogskit import _skills, pipeline
-from discogskit._console import console, error, print_text, status
-from discogskit.entities import detect_entity
-from discogskit.entities import get as get_entity
+from discogskit._console import current, error, print_text, status
+from discogskit.entities import ENTITIES, detect_entity
 from discogskit.writers import Writer, get_writer
 
 
@@ -101,7 +100,7 @@ app: typer.Typer = typer.Typer(no_args_is_help=True)
 
 def _version_callback(value: bool) -> None:
     if value:
-        console.print(f"discogskit {version('discogskit')}")
+        current().print(f"discogskit {version('discogskit')}")
         raise typer.Exit()
 
 
@@ -184,13 +183,13 @@ def _print_result(
         if result.t_parse_load > 0
         else ""
     )
-    console.print(
+    current().print(
         f"  [green]✓[/] {result.total_records:,} {entity_name} {verb} "
         f"[dim][{result.t_total:.2f}s][/]"
     )
 
     if verbose:
-        console.print()
+        current().print()
         status("Decompress", f"{result.t_decompress:.2f}s")
         status(
             "Load",
@@ -203,11 +202,11 @@ def _print_result(
 
     if result.profile_data:
         pd = result.profile_data
-        console.print()
-        console.rule("[bold]Profile[/]", style="dim")
+        current().print()
+        current().rule("[bold]Profile[/]", style="dim")
         status("Put blocked", f"{pd.put_blocked:.2f}s")
         status("Get wait", f"{pd.get_wait:.2f}s")
-        console.print()
+        current().print()
 
         table_timings = pd.table_timings
         flush_total = sum(table_timings.values())
@@ -229,7 +228,7 @@ def _print_result(
             pct = t / flush_total * 100 if flush_total else 0
             label = "commit" if key == "_commit" else key
             tbl.add_row(label, f"{t:.2f}s", f"{pct:.1f}%")
-        console.print(tbl)
+        current().print(tbl)
 
 
 def _run_jobs(
@@ -256,12 +255,12 @@ def _run_jobs(
     """
     # The pipeline shows a progress bar only on a terminal; elsewhere it prints
     # per-chunk lines, as with --no-progress.
-    verbose = not (progress and console.is_terminal) or profile
+    verbose = not (progress and current().is_terminal) or profile
     try:
         for _, entity_name in jobs:
-            writer.check(get_entity(entity_name))
+            writer.check(ENTITIES[entity_name])
         for gz_path, entity_name in jobs:
-            console.print()
+            current().print()
             print_text(
                 Text.assemble(
                     (entity_name.capitalize(), "bold green"),
@@ -290,7 +289,7 @@ def _run_jobs(
             )
             result = pipeline.run(config, writer)
 
-            entity_def = get_entity(entity_name)
+            entity_def = ENTITIES[entity_name]
             _print_result(
                 result,
                 entity_name,
@@ -299,7 +298,7 @@ def _run_jobs(
                 verbose=verbose,
             )
     except KeyboardInterrupt:
-        console.print("\n  [yellow]Interrupted — cleaning up …[/]")
+        current().print("\n  [yellow]Interrupted — cleaning up …[/]")
         raise typer.Exit(130) from None
     # Top-level error boundary: any failure becomes a one-line error and exit 1.
     except Exception as exc:  # noqa: BLE001
@@ -316,14 +315,6 @@ def convert(
         typer.Argument(help="One or more .xml.gz files or directories containing them"),
     ],
     # Output
-    output_format: Annotated[
-        OutputFormat,
-        typer.Option("-f", "--format", case_sensitive=False, help="Output format"),
-    ] = OutputFormat.PARQUET,
-    output: Annotated[
-        Path,
-        typer.Option(help="Output directory"),
-    ] = Path("."),
     compression: Annotated[
         Compression | None,
         typer.Option(
@@ -340,7 +331,19 @@ def convert(
             )
         ),
     ] = None,
+    output_format: Annotated[
+        OutputFormat,
+        typer.Option("-f", "--format", case_sensitive=False, help="Output format"),
+    ] = OutputFormat.PARQUET,
+    output: Annotated[
+        Path,
+        typer.Option(help="Output directory"),
+    ] = Path("."),
     # Performance tuning
+    chunk_mb: Annotated[
+        int,
+        typer.Option(help="Split XML into chunks of roughly this size (MB)", min=1),
+    ] = 256,
     parse_workers: Annotated[
         int,
         typer.Option(
@@ -349,10 +352,6 @@ def convert(
             show_default="half the CPU count, at least 1",
         ),
     ] = max(1, CPUS // 2),
-    chunk_mb: Annotated[
-        int,
-        typer.Option(help="Split XML into chunks of roughly this size (MB)", min=1),
-    ] = 256,
     write_queue: Annotated[
         int,
         typer.Option(
@@ -453,6 +452,10 @@ def load(
         ),
     ] = "postgresql://localhost/discogskit",
     # Performance tuning
+    chunk_mb: Annotated[
+        int,
+        typer.Option(help="Split XML into chunks of roughly this size (MB)", min=1),
+    ] = 256,
     parse_workers: Annotated[
         int,
         typer.Option(
@@ -461,10 +464,6 @@ def load(
             show_default="half the CPU count, at least 1",
         ),
     ] = max(1, CPUS // 2),
-    chunk_mb: Annotated[
-        int,
-        typer.Option(help="Split XML into chunks of roughly this size (MB)", min=1),
-    ] = 256,
     write_queue: Annotated[
         int,
         typer.Option(
@@ -498,13 +497,6 @@ def load(
         typer.Option(help="Warn about unhandled XML elements during parsing"),
     ] = False,
     # PostgreSQL options
-    pg_unlogged: Annotated[
-        bool,
-        typer.Option(
-            help="Skip WAL for faster writes (tables stay unlogged; data lost on crash)",
-            rich_help_panel="PostgreSQL",
-        ),
-    ] = False,
     pg_create_schema: Annotated[
         bool,
         typer.Option(
@@ -512,21 +504,6 @@ def load(
             rich_help_panel="PostgreSQL",
         ),
     ] = False,
-    pg_schema: Annotated[
-        str | None,
-        typer.Option(
-            help="Schema to create tables in (must exist unless --pg-create-schema)",
-            rich_help_panel="PostgreSQL",
-        ),
-    ] = None,
-    pg_write_workers: Annotated[
-        int,
-        typer.Option(
-            help="Number of parallel database write workers",
-            min=1,
-            rich_help_panel="PostgreSQL",
-        ),
-    ] = 1,
     pg_index_workers: Annotated[
         int,
         typer.Option(
@@ -535,6 +512,28 @@ def load(
             rich_help_panel="PostgreSQL",
         ),
     ] = 2,
+    pg_schema: Annotated[
+        str | None,
+        typer.Option(
+            help="Schema to create tables in (must exist unless --pg-create-schema)",
+            rich_help_panel="PostgreSQL",
+        ),
+    ] = None,
+    pg_unlogged: Annotated[
+        bool,
+        typer.Option(
+            help="Skip WAL for faster writes (tables stay unlogged; data lost on crash)",
+            rich_help_panel="PostgreSQL",
+        ),
+    ] = False,
+    pg_write_workers: Annotated[
+        int,
+        typer.Option(
+            help="Number of parallel database write workers",
+            min=1,
+            rich_help_panel="PostgreSQL",
+        ),
+    ] = 1,
 ) -> None:
     """Load Discogs XML dumps into a database."""
     jobs = _resolve_jobs(paths)

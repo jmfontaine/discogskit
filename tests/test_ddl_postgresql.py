@@ -5,7 +5,7 @@ from __future__ import annotations
 import pyarrow as pa
 import pytest
 
-from discogskit.entities import ENTITIES, get
+from discogskit.entities import ENTITIES
 from discogskit.writers.postgresql import generate_ddl
 
 
@@ -76,7 +76,7 @@ class TestGenerateDDL:
         """Every table of every entity: each column quoted (``join`` is a keyword), typed, and NOT NULL
         exactly where the Arrow field is non-nullable."""
         pg_types = {pa.bool_(): "BOOLEAN", pa.int32(): "INTEGER", pa.utf8(): "TEXT"}
-        for table_name, schema in get(entity_name).schemas.items():
+        for table_name, schema in ENTITIES[entity_name].schemas.items():
             columns = []
             for field in schema:
                 if isinstance(field.type, pa.ListType):

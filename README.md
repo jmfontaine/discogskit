@@ -156,10 +156,6 @@ JSONL bzip2 1-9, Parquet gzip 1-9, Parquet zstd -131072 to 22. `snappy` and `non
 │ *    paths      <path>  One or more .xml.gz files or directories containing them [required]  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────╮
-│ --format             -f                    <jsonl|parquet>          Output format            │
-│                                                                     [default: parquet]       │
-│ --output                                   <path>                   Output directory         │
-│                                                                     [default: .]             │
 │ --compression                              <bzip2|gzip|none|snappy  Compression codec.       │
 │                                            |zstd>                   Parquet: gzip, snappy,   │
 │                                                                     zstd (default), none.    │
@@ -177,13 +173,17 @@ JSONL bzip2 1-9, Parquet gzip 1-9, Parquet zstd -131072 to 22. `snappy` and `non
 │                                                                     in #32); every other     │
 │                                                                     codec uses its own       │
 │                                                                     library default.         │
+│ --format             -f                    <jsonl|parquet>          Output format            │
+│                                                                     [default: parquet]       │
+│ --output                                   <path>                   Output directory         │
+│                                                                     [default: .]             │
+│ --chunk-mb                                 <int range> [x>=1]       Split XML into chunks of │
+│                                                                     roughly this size (MB)   │
+│                                                                     [default: 256]           │
 │ --parse-workers                            <int range> [x>=1]       Number of parallel parse │
 │                                                                     workers                  │
 │                                                                     [default: (half the CPU  │
 │                                                                     count, at least 1)]      │
-│ --chunk-mb                                 <int range> [x>=1]       Split XML into chunks of │
-│                                                                     roughly this size (MB)   │
-│                                                                     [default: 256]           │
 │ --write-queue                              <int range> [x>=1]       Chunks parsing may run   │
 │                                                                     ahead of writing: at     │
 │                                                                     most --parse-workers     │
@@ -303,12 +303,12 @@ absolute) or a plain path ending in `.db`, `.sqlite`, or `.sqlite3`. Other `sqli
 │                                                          [env var: DATABASE_URL]             │
 │                                                          [default:                           │
 │                                                          postgresql://localhost/discogskit]  │
-│ --parse-workers                      <int range> [x>=1]  Number of parallel parse workers    │
-│                                                          [default: (half the CPU count, at   │
-│                                                          least 1)]                           │
 │ --chunk-mb                           <int range> [x>=1]  Split XML into chunks of roughly    │
 │                                                          this size (MB)                      │
 │                                                          [default: 256]                      │
+│ --parse-workers                      <int range> [x>=1]  Number of parallel parse workers    │
+│                                                          [default: (half the CPU count, at   │
+│                                                          least 1)]                           │
 │ --write-queue                        <int range> [x>=1]  Chunks parsing may run ahead of     │
 │                                                          writing: at most --parse-workers    │
 │                                                          plus this many chunks are parsing   │
@@ -335,24 +335,24 @@ absolute) or a plain path ending in `.db`, `.sqlite`, or `.sqlite3`. Other `sqli
 │ --help                                                   Show this message and exit.         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ PostgreSQL ─────────────────────────────────────────────────────────────────────────────────╮
+│ --pg-create-schema    --no-pg-create-schema                        Create --pg-schema if it  │
+│                                                                    doesn't exist             │
+│                                                                    [default:                 │
+│                                                                    no-pg-create-schema]      │
+│ --pg-index-workers                             <int range> [x>=1]  Number of parallel index  │
+│                                                                    creation workers          │
+│                                                                    [default: 2]              │
+│ --pg-schema                                    <str>               Schema to create tables   │
+│                                                                    in (must exist unless     │
+│                                                                    --pg-create-schema)       │
 │ --pg-unlogged         --no-pg-unlogged                             Skip WAL for faster       │
 │                                                                    writes (tables stay       │
 │                                                                    unlogged; data lost on    │
 │                                                                    crash)                    │
 │                                                                    [default: no-pg-unlogged] │
-│ --pg-create-schema    --no-pg-create-schema                        Create --pg-schema if it  │
-│                                                                    doesn't exist             │
-│                                                                    [default:                 │
-│                                                                    no-pg-create-schema]      │
-│ --pg-schema                                    <str>               Schema to create tables   │
-│                                                                    in (must exist unless     │
-│                                                                    --pg-create-schema)       │
 │ --pg-write-workers                             <int range> [x>=1]  Number of parallel        │
 │                                                                    database write workers    │
 │                                                                    [default: 1]              │
-│ --pg-index-workers                             <int range> [x>=1]  Number of parallel index  │
-│                                                                    creation workers          │
-│                                                                    [default: 2]              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
 ```
@@ -426,6 +426,64 @@ Afterwards, undo exactly what you changed. If you had already set `max_wal_size`
 `postgresql.auto.conf`), set it back to that value: `ALTER SYSTEM SET max_wal_size = '<previous value>';`.
 Otherwise remove the override with `ALTER SYSTEM RESET max_wal_size;`; the value from `postgresql.conf` (or the
 built-in default) applies again. Either way, follow it with `SELECT pg_reload_conf();`, then check `SHOW max_wal_size;`.
+
+## Python API
+
+discogskit can also run from Python. The supported API is what the `discogskit` package exports; every other module
+and name may change in any release.
+
+| Name | What it is |
+|---|---|
+| `run(config, writer, *, console=None)` | Runs one dump through the pipeline and returns a `PipelineResult` |
+| `PipelineConfig` | `run()`'s settings: the dump, its entity, and the options `convert` and `load` take |
+| `PipelineResult` | Records loaded and seconds spent per stage |
+| `get_writer(dsn, ...)` | A SQLite or PostgreSQL `Writer` for a DSN, with `load`'s options as keyword arguments |
+| `Writer` | The protocol every writer implements |
+| `ENTITIES` | Every entity (`artists`, `labels`, `masters`, `releases`) by name, as an `EntityDef` |
+| `EntityDef` | One entity's tables and Arrow schemas |
+| `detect_entity(filename)` | The entity a Discogs dump file name holds, e.g. `artists` |
+| `OutputExistsError` | Raised when the output exists and the writer doesn't overwrite it |
+| `DecompressError` | Raised when a `.xml.gz` is truncated, corrupt or not gzip |
+
+Other failures raise other exceptions, e.g. `ValueError` for a value discogskit can't store.
+
+```python
+from pathlib import Path
+
+from rich.console import Console
+
+import discogskit
+
+if __name__ == "__main__":
+    gz_path = Path("discogs_20260301_artists.xml.gz")
+    config = discogskit.PipelineConfig(
+        chunk_mb=256,
+        entity=discogskit.detect_entity(gz_path.name),
+        gz_path=gz_path,
+        keep_xml=False,
+        parse_workers=4,
+        profile=False,
+        progress=False,
+        strict=False,
+        write_queue=2,
+    )
+    writer = discogskit.get_writer("discogs.db", overwrite=True)
+    try:
+        result = discogskit.run(config, writer, console=Console(quiet=True))
+    finally:
+        writer.close()
+    print(f"{result.total_records:,} artists in {result.t_total:.1f}s")
+```
+
+The parse workers are separate processes started with `spawn`, which imports the calling script again in each
+worker: keep the code that calls `run()` under `if __name__ == "__main__":`.
+
+`run()` prints the status and progress lines the CLI shows during a run, to stdout by default. Pass a
+[Rich](https://rich.readthedocs.io/) `Console` as `console` to change that: `Console(quiet=True)` prints nothing, and
+`Console(file=...)` writes the output to a file or a buffer of your own. The progress bar shows only when that console
+is a terminal, `config.progress` is set and `config.profile` isn't. The console covers everything the run prints,
+including the messages of the writer's `setup()` and `finalize()`. It doesn't cover the writer's `close()`, which
+prints only when a PostgreSQL connection doesn't close in time.
 
 ## Benchmarks
 

@@ -17,7 +17,8 @@ import click
 import pytest
 from typer.testing import CliRunner
 
-from discogskit.entities import ChunkArgs, get
+from discogskit.entities import ENTITIES
+from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from tests.conftest import ARTISTS_XML, LABELS_XML, empty_ipc, ipc_to_record_batches
 
@@ -459,10 +460,12 @@ class TestWriteGroupFailure:
         from discogskit.writers.postgresql import PostgreSQLWriter
 
         gate, _, events = groups
-        entity = get("artists")
+        entity = ENTITIES["artists"]
         size = os.path.getsize(artists_xml_file)
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("artists", str(artists_xml_file), 0, size)
+            ChunkArgs(
+                end=size, entity="artists", file_path=str(artists_xml_file), start=0
+            )
         ).tables
         errors = []
         writer = PostgreSQLWriter(pg_dsn, overwrite=True, write_workers=2)
@@ -562,7 +565,7 @@ class TestWriteWorkerCap:
             "postgresql://unused", overwrite=True, write_workers=3
         )
         try:
-            writer.setup(get("labels"))
+            writer.setup(ENTITIES["labels"])
         finally:
             writer.close()
 
@@ -588,7 +591,7 @@ class TestCancelRequests:
         writer = PostgreSQLWriter(
             "postgresql://unused", overwrite=True, write_workers=len(conns)
         )
-        writer.setup(get("artists"))
+        writer.setup(ENTITIES["artists"])
         return writer
 
     @staticmethod
@@ -705,7 +708,7 @@ class TestIndexAbort:
 
         from discogskit.writers.postgresql import PostgreSQLWriter
 
-        entity = get("releases")
+        entity = ENTITIES["releases"]
         root, failing, *waiting = entity.table_order
 
         # The failing CREATE INDEX runs only once a sibling is about to start
@@ -772,7 +775,7 @@ class TestIndexAbort:
         from discogskit.writers import postgresql
         from discogskit.writers.postgresql import PostgreSQLWriter
 
-        entity = get("releases")
+        entity = ENTITIES["releases"]
         root, *children = entity.table_order
         workers = 2
 
@@ -820,7 +823,7 @@ class TestIndexAbort:
 
         from discogskit.writers.postgresql import PostgreSQLWriter
 
-        entity = get("artists")
+        entity = ENTITIES["artists"]
         root, *children = entity.table_order
         main = threading.main_thread().ident
         assert main is not None
@@ -1360,7 +1363,7 @@ class TestExistingTablesCheckedUpFront:
         labels = self._gz(tmp_path, "labels", LABELS_XML)
         first = self._load_cli(dsn, labels)
         assert first.exit_code == 0, click.unstyle(first.output)
-        labels_tables = set(get("labels").table_order)
+        labels_tables = set(ENTITIES["labels"].table_order)
         assert self._tables(dsn) == labels_tables
 
         with patch("discogskit.cli.pipeline.run") as run:
@@ -1385,8 +1388,8 @@ class TestExistingTablesCheckedUpFront:
         result = self._load_cli(dsn, artists, labels, overwrite=True)
         assert result.exit_code == 0, click.unstyle(result.output)
         assert self._tables(dsn) == {
-            *get("artists").table_order,
-            *get("labels").table_order,
+            *ENTITIES["artists"].table_order,
+            *ENTITIES["labels"].table_order,
         }
 
 
@@ -1454,11 +1457,10 @@ class TestDsnWithSchema:
 class TestSplitTableGroups:
     def test_balances_by_weight(self):
         """Heaviest table first, each into the lightest group: round-robin would pair 4+2 and 3+1."""
-        from discogskit.entities import get
         from discogskit.writers.postgresql import _split_table_groups
 
         entity = dataclasses.replace(
-            get("artists"),
+            ENTITIES["artists"],
             table_weights={
                 "artist_aliases": 3,
                 "artist_groups": 2,
@@ -1473,10 +1475,9 @@ class TestSplitTableGroups:
         ]
 
     def test_distributes_all_tables(self):
-        from discogskit.entities import get
         from discogskit.writers.postgresql import _split_table_groups
 
-        entity = get("releases")
+        entity = ENTITIES["releases"]
         groups = _split_table_groups(3, entity)
 
         assert len(groups) == 3
@@ -1486,19 +1487,17 @@ class TestSplitTableGroups:
     def test_more_groups_than_tables(self):
         """Each table gets a group of its own; the extra groups stay empty (the writer caps workers
         at the table count, so it never asks for them)."""
-        from discogskit.entities import get
         from discogskit.writers.postgresql import _split_table_groups
 
-        entity = get("artists")
+        entity = ENTITIES["artists"]
         groups = _split_table_groups(len(entity.table_order) + 2, entity)
 
         assert sorted(groups) == [[], [], *sorted([t] for t in entity.table_order)]
 
     def test_single_group(self):
-        from discogskit.entities import get
         from discogskit.writers.postgresql import _split_table_groups
 
-        entity = get("artists")
+        entity = ENTITIES["artists"]
         groups = _split_table_groups(1, entity)
 
         assert len(groups) == 1

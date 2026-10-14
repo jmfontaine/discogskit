@@ -1,10 +1,12 @@
-"""Tests for entity registry: detect_entity(), get(), registration."""
+"""Tests for the entity definitions: detect_entity(), get(), ENTITIES."""
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
-from discogskit.entities import ENTITIES, EntityDef, detect_entity, get
+from discogskit.entities import ENTITIES, _by_name, detect_entity
 
 
 class TestDetectEntity:
@@ -28,25 +30,20 @@ class TestDetectEntity:
             detect_entity("discogs_20240101_unknown.xml.gz")
 
 
-class TestGet:
-    def test_known_entity(self):
-        entity = get("artists")
-        assert isinstance(entity, EntityDef)
-        assert entity.name == "artists"
-
-    def test_unknown_raises(self):
-        with pytest.raises(KeyError):
-            get("nonexistent")
-
-
-class TestRegistration:
+class TestEntities:
     @pytest.mark.parametrize("name", ["artists", "labels", "masters", "releases"])
-    def test_entity_registered(self, name):
-        assert name in ENTITIES
+    def test_entity_listed(self, name):
+        assert ENTITIES[name].name == name
+
+    def test_duplicate_name_raises(self):
+        artists = ENTITIES["artists"]
+        twin = dataclasses.replace(artists, root_tag="other")
+        with pytest.raises(ValueError, match="Duplicate entity name 'artists'"):
+            _by_name((artists, twin))
 
     @pytest.mark.parametrize("name", ["artists", "labels", "masters", "releases"])
     def test_entity_has_required_fields(self, name):
-        entity = get(name)
+        entity = ENTITIES[name]
         assert len(entity.table_order) > 0
         assert set(entity.table_weights.keys()) == set(entity.table_order)
         root_schema = entity.schemas[entity.table_order[0]]
@@ -62,11 +59,11 @@ class TestRegistration:
         ],
     )
     def test_fk_columns(self, name, fk_column):
-        assert get(name).fk_column == fk_column
+        assert ENTITIES[name].fk_column == fk_column
 
     @pytest.mark.parametrize(
         "name, n_tables",
         [("artists", 4), ("labels", 2), ("masters", 3), ("releases", 12)],
     )
     def test_table_counts(self, name, n_tables):
-        assert len(get(name).table_order) == n_tables
+        assert len(ENTITIES[name].table_order) == n_tables

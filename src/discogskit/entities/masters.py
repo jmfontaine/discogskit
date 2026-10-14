@@ -8,7 +8,7 @@ from __future__ import annotations
 import pyarrow as pa
 from lxml import etree
 
-from discogskit.entities import Cols, EntityDef, parse_bool, register
+from discogskit.entities._def import Cols, EntityDef, parse_bool
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Arrow schemas (the first table is the root table)
@@ -159,14 +159,12 @@ def record_id(elem: etree._Element) -> str | None:
     return elem.get("id")
 
 
-register(
-    EntityDef(
-        append_record=append_record,
-        fk_column="master_id",
-        name="masters",
-        record_id=record_id,
-        root_tag="master",
-        schemas=SCHEMAS,
-        table_weights=TABLE_WEIGHTS,
-    )
+ENTITY = EntityDef(
+    append_record=append_record,
+    fk_column="master_id",
+    name="masters",
+    record_id=record_id,
+    root_tag="master",
+    schemas=SCHEMAS,
+    table_weights=TABLE_WEIGHTS,
 )

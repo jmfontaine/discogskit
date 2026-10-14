@@ -38,12 +38,12 @@ Arguments:
 
 Options:
 
-- `-f, --format <jsonl|parquet>`: Output format [default: parquet]
-- `--output <path>`: Output directory [default: .]
 - `--compression <bzip2|gzip|none|snappy|zstd>`: Compression codec. Parquet: gzip, snappy, zstd (default), none. JSONL: bzip2, gzip, none (default).
 - `--compression-level <int>`: Compression level for codecs that support one: JSONL gzip/bzip2, Parquet gzip/zstd. Rejected for snappy and none. Default: JSONL gzip uses level 6 (faster, slightly larger output than 9; measured in #32); every other codec uses its own library default.
-- `--parse-workers <int range>`: Number of parallel parse workers [default: (half the CPU count, at least 1); x>=1]
+- `-f, --format <jsonl|parquet>`: Output format [default: parquet]
+- `--output <path>`: Output directory [default: .]
 - `--chunk-mb <int range>`: Split XML into chunks of roughly this size (MB) [default: 256; x>=1]
+- `--parse-workers <int range>`: Number of parallel parse workers [default: (half the CPU count, at least 1); x>=1]
 - `--write-queue <int range>`: Chunks parsing may run ahead of writing: at most --parse-workers plus this many chunks are parsing or waiting to be written [default: 2; x>=1]
 - `--keep-xml / --no-keep-xml`: Keep decompressed XML file after converting [default: no-keep-xml]
 - `--overwrite / --no-overwrite`: Overwrite existing output files [default: no-overwrite]
@@ -66,8 +66,8 @@ Arguments:
 Options:
 
 - `--dsn <str>`: Database DSN (e.g., postgresql://localhost/postgres) or path to SQLite file [env var: DATABASE_URL; default: postgresql://localhost/discogskit]
-- `--parse-workers <int range>`: Number of parallel parse workers [default: (half the CPU count, at least 1); x>=1]
 - `--chunk-mb <int range>`: Split XML into chunks of roughly this size (MB) [default: 256; x>=1]
+- `--parse-workers <int range>`: Number of parallel parse workers [default: (half the CPU count, at least 1); x>=1]
 - `--write-queue <int range>`: Chunks parsing may run ahead of writing: at most --parse-workers plus this many chunks are parsing or waiting to be written [default: 2; x>=1]
 - `--fk / --no-fk`: Enforce foreign key constraints (SQLite and PostgreSQL) [default: no-fk]
 - `--keep-xml / --no-keep-xml`: Keep decompressed XML file after loading [default: no-keep-xml]
@@ -78,11 +78,11 @@ Options:
 
 PostgreSQL:
 
-- `--pg-unlogged / --no-pg-unlogged`: Skip WAL for faster writes (tables stay unlogged; data lost on crash) [default: no-pg-unlogged]
 - `--pg-create-schema / --no-pg-create-schema`: Create --pg-schema if it doesn't exist [default: no-pg-create-schema]
-- `--pg-schema <str>`: Schema to create tables in (must exist unless --pg-create-schema)
-- `--pg-write-workers <int range>`: Number of parallel database write workers [default: 1; x>=1]
 - `--pg-index-workers <int range>`: Number of parallel index creation workers [default: 2; x>=1]
+- `--pg-schema <str>`: Schema to create tables in (must exist unless --pg-create-schema)
+- `--pg-unlogged / --no-pg-unlogged`: Skip WAL for faster writes (tables stay unlogged; data lost on crash) [default: no-pg-unlogged]
+- `--pg-write-workers <int range>`: Number of parallel database write workers [default: 1; x>=1]
 
 ## `discogskit skills`
 
