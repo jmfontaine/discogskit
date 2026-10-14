@@ -57,7 +57,8 @@ Each entity module (e.g., `artists.py`) defines this interface, plus any private
 
 ## Testing
 
-- Unit tests run without external services. Integration tests need Docker (PostgreSQL via testcontainers).
+- Unit tests run without external services. Integration tests are the ones that need a PostgreSQL container (testcontainers, Docker); mark only those `integration`. SQLite, JSONL, Parquet and decompression tests are unit tests.
+- PostgreSQL tests skip when Docker is unavailable. With `DISCOGSKIT_REQUIRE_DOCKER=1`, set on the Ubuntu CI jobs, they fail instead.
 - Test markers: `unit` (default), `integration`.
 - Fixtures with XML snippets in `tests/conftest.py`.
 

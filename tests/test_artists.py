@@ -94,6 +94,7 @@ class TestArtistsParsing:
         ):
             extract_chunk_to_ipc(ChunkArgs("artists", str(f), 0, os.path.getsize(f)))
 
+    @pytest.mark.filterwarnings("error")
     def test_strict_reports_nothing_on_known_xml(self, artists_xml_file):
         """Strict mode reports nothing when all XML elements are handled."""
         size = os.path.getsize(artists_xml_file)
@@ -108,6 +109,7 @@ class TestArtistsParsing:
     def test_strict_ignores_comments_and_pis(self, tmp_path):
         """Comments and processing instructions inside a record aren't elements: strict mode reports only the unknown
         element, and the text around a comment is kept whole."""
+
         xml = (
             "<artist>\n"
             "  <id>1</id>\n"
@@ -129,6 +131,7 @@ class TestArtistsParsing:
         assert result.unknown == ["brand_new_tag"]
         assert tables["artists"].column("name").to_pylist() == ["Test"]
 
+    @pytest.mark.filterwarnings("error")
     def test_nothing_reported_without_strict(self, tmp_path):
         """Without strict mode, unknown elements aren't collected."""
         xml = (

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 import random
 import re
 import sqlite3
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from importlib.metadata import version
 from pathlib import Path
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
@@ -25,7 +27,12 @@ from discogskit.decompress import DecompressError
 from discogskit.entities import ChunkArgs, get
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers import OutputExistsError
-from tests.conftest import ARTISTS_XML, LABELS_XML
+from tests.conftest import (
+    ARTISTS_XML,
+    LABELS_XML,
+    UNICODE_ARTISTS_ROWS,
+    UNICODE_ARTISTS_XML,
+)
 
 runner = CliRunner()
 
@@ -137,6 +144,7 @@ _WRITER_CLOSE_FAILURE_IDS = [
 class TestNoTracebacks:
     """Every unhandled exception from the pipeline must produce a clean error message."""
 
+    @pytest.mark.parametrize("command", ["convert", "load"])
     @pytest.mark.parametrize(
         "exc",
         [
@@ -146,48 +154,22 @@ class TestNoTracebacks:
         ],
         ids=["RuntimeError", "TypeError", "ValueError"],
     )
-    def test_convert_unexpected_exception(self, tmp_path: Path, exc: Exception) -> None:
-        gz = _make_gz(tmp_path)
-        with patch("discogskit.cli.pipeline.run", side_effect=exc):
-            result = runner.invoke(app, ["convert", str(gz), "-f", "parquet"])
-        assert result.exit_code != 0
-        assert "Traceback" not in result.output
-
-    @pytest.mark.parametrize(
-        "exc",
-        [
-            RuntimeError("something broke"),
-            TypeError("bad type"),
-            ValueError("bad value"),
-        ],
-        ids=["RuntimeError", "TypeError", "ValueError"],
-    )
-    def test_load_unexpected_exception(self, tmp_path: Path, exc: Exception) -> None:
+    def test_unexpected_exception(
+        self, tmp_path: Path, command: str, exc: Exception
+    ) -> None:
         gz = _make_gz(tmp_path)
         with (
             patch("discogskit.cli.pipeline.run", side_effect=exc),
             patch("discogskit.cli.get_writer"),
         ):
-            result = runner.invoke(app, ["load", str(gz)])
-        assert result.exit_code != 0
-        assert "Traceback" not in result.output
-
-    def test_convert_shows_error_message(self, tmp_path: Path) -> None:
-        gz = _make_gz(tmp_path)
-        with patch(
-            "discogskit.cli.pipeline.run", side_effect=RuntimeError("disk full")
-        ):
-            result = runner.invoke(app, ["convert", str(gz), "-f", "parquet"])
-        assert "disk full" in result.output
-
-    def test_load_shows_error_message(self, tmp_path: Path) -> None:
-        gz = _make_gz(tmp_path)
-        with (
-            patch("discogskit.cli.pipeline.run", side_effect=RuntimeError("disk full")),
-            patch("discogskit.cli.get_writer"),
-        ):
-            result = runner.invoke(app, ["load", str(gz)])
-        assert "disk full" in result.output
+            result = runner.invoke(app, [command, str(gz)])
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        # CliRunner turns an escaped exception into result.exception with empty output, so
+        # SystemExit (from typer.Exit) is what proves the handler caught it.
+        assert type(result.exception) is SystemExit, repr(result.exception)
+        assert f"Error: {exc}" in output
+        assert "Traceback" not in output
 
 
 class TestRecordErrorOutput:
@@ -667,6 +649,67 @@ class TestLiteralText:
         assert f"  {'Source':<14s} {gz}" in lines
 
 
+class TestPreflight:
+    @pytest.mark.parametrize(
+        "name, kind, extra, message",
+        [
+            ("", "dir", [], "no .xml.gz files found in {p}"),
+            (_ENTITY_FILE, "missing", [], "file not found: {p}"),
+            (
+                "discogs_20260301_unknown.xml.gz",
+                "file",
+                [],
+                (
+                    "Cannot detect entity from 'discogs_20260301_unknown.xml.gz'. Expected format: "
+                    "discogs_YYYYMMDD_ENTITY.xml.gz (known entities: artists, labels, masters, releases)"
+                ),
+            ),
+            (
+                _ENTITY_FILE,
+                "file",
+                ["--pg-create-schema"],
+                "--pg-create-schema requires --pg-schema.",
+            ),
+        ],
+        ids=[
+            "empty-dir",
+            "missing-file",
+            "unknown-entity",
+            "create-schema-without-schema",
+        ],
+    )
+    def test_load_rejects_bad_input_before_opening_the_database(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        name: str,
+        kind: str,
+        extra: list[str],
+        message: str,
+    ) -> None:
+        """Bad input fails with exit 1 before the writer is built, so no SQLite file is left behind."""
+        inputs = tmp_path / "in"
+        inputs.mkdir()
+        p = inputs / name
+        if kind == "file":
+            p.write_bytes(b"not a real gz")
+        db = tmp_path / "out.db"
+        _widen_console(monkeypatch)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = runner.invoke(app, ["load", str(p), "--dsn", str(db), *extra])
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        assert type(result.exception) is SystemExit, repr(result.exception)
+        assert f"Error: {message.format(p=p)}\n" in output
+        run.assert_not_called()
+        assert not db.exists()
+
+    def test_version(self) -> None:
+        result = runner.invoke(app, ["--version"])
+        assert result.exit_code == 0, result.output
+        assert _unstyle(result.output) == f"discogskit {version('discogskit')}\n"
+
+
 class TestFormatAndCompressionEnums:
     def test_compression_default_for_jsonl_is_none(self, tmp_path: Path) -> None:
         gz = _make_gz(tmp_path)
@@ -801,8 +844,12 @@ class TestOptionMinimums:
 
 
 class TestFkOption:
-    def test_fk_enforced_in_sqlite(self, tmp_path: Path) -> None:
-        """--fk (renamed from --pg-fk, #38) enforces foreign keys in SQLite too."""
+    def test_fk_declared_in_sqlite(self, tmp_path: Path) -> None:
+        """--fk (renamed from --pg-fk, #38) reaches SQLite: the child tables declare their keys.
+
+        Enforcement is per connection, so it can't be checked once the CLI has closed the database;
+        ``test_sqlite_writer.py``'s ``test_fk_rejects_orphan_child_row`` covers it.
+        """
         gz = tmp_path / "discogs_20260301_artists.xml.gz"
         with gzip.open(gz, "wb") as f:
             f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
@@ -903,6 +950,42 @@ class TestProfile:
             *get("artists").table_order,
             "commit",
         ]
+
+
+class TestUnicodeConvert:
+    def test_gzip_jsonl_round_trips_unicode_text(self, tmp_path: Path) -> None:
+        """Non-ASCII text, entity references and CDATA reach gzip-compressed JSONL intact."""
+        gz = tmp_path / _ENTITY_FILE
+        with gzip.open(gz, "wt", encoding="utf-8") as f:
+            f.write("<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
+            f.write(UNICODE_ARTISTS_XML)
+            f.write("</artists>")
+        out = tmp_path / "out"
+
+        result = runner.invoke(
+            app,
+            [
+                "convert",
+                str(gz),
+                "--compression",
+                "gzip",
+                "-f",
+                "jsonl",
+                "--no-progress",
+                "--output",
+                str(out),
+                "--parse-workers",
+                "1",
+            ],
+        )
+
+        assert result.exit_code == 0, _unstyle(result.output)
+        for table_name in get("artists").table_order:
+            with gzip.open(
+                out / "artists" / f"{table_name}.jsonl.gz", "rt", encoding="utf-8"
+            ) as f:
+                rows = [json.loads(line) for line in f]
+            assert rows == UNICODE_ARTISTS_ROWS.get(table_name, []), table_name
 
 
 class TestCompressionLevel:
