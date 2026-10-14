@@ -18,8 +18,8 @@ from discogskit.entities import (
     register,
 )
 
-_ArtistRec = tuple[int | None, str, str | None, str | None]
-_ExtraArtistRec = tuple[int | None, str, str | None, str | None, str | None]
+_ArtistRec = tuple[int | None, str | None, str | None, str | None]
+_ExtraArtistRec = tuple[int | None, str | None, str | None, str | None, str | None]
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Arrow schemas (single source of truth for column definitions; the first table is the root table)
@@ -196,15 +196,14 @@ def _parse_artist_children(
             if t == "id":
                 aid = int(ch.text) if ch.text else None
             elif t == "name":
-                name = ch.text
+                name = ch.text or ""
             elif t == "anv":
                 anv = ch.text or ""
             elif t == "join":
                 join_text = ch.text or ""
             elif unknown is not None:
                 unknown.add(f"artist/{t}")
-        if name:
-            result.append((aid, name, anv, join_text))
+        result.append((aid, name, anv, join_text))
     return result
 
 
@@ -225,7 +224,7 @@ def _parse_extraartist_children(
             if t == "id":
                 aid = int(ch.text) if ch.text else None
             elif t == "name":
-                name = ch.text
+                name = ch.text or ""
             elif t == "anv":
                 anv = ch.text or ""
             elif t == "role":
@@ -234,8 +233,7 @@ def _parse_extraartist_children(
                 tracks_text = ch.text or ""
             elif unknown is not None:
                 unknown.add(f"extraartist/{t}")
-        if name:
-            result.append((aid, name, anv, role, tracks_text))
+        result.append((aid, name, anv, role, tracks_text))
     return result
 
 
