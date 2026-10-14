@@ -14,10 +14,9 @@ from rich.text import Text
 
 from discogskit import pipeline
 from discogskit._console import console, error, print_text, status
-from discogskit.decompress import DecompressError
 from discogskit.entities import detect_entity
 from discogskit.entities import get as get_entity
-from discogskit.writers import OutputExistsError, Writer, get_writer
+from discogskit.writers import Writer, get_writer
 
 
 class OutputFormat(str, Enum):
@@ -296,9 +295,6 @@ def _run_jobs(
                 verb=verb,
                 verbose=verbose,
             )
-    except (DecompressError, OutputExistsError) as exc:
-        error(str(exc))
-        raise typer.Exit(1) from None
     except KeyboardInterrupt:
         console.print("\n  [yellow]Interrupted — cleaning up …[/]")
         raise typer.Exit(130) from None

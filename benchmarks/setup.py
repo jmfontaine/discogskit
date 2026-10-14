@@ -17,10 +17,25 @@ ALTERNATIVES_DIR = SCRIPT_DIR / "alternatives"
 
 TOOLS: dict[str, dict[str, Any]] = {
     "xml2db-python": {
-        "repo": "https://github.com/philipmat/discogs-xml2db.git",
+        # Pinned so every setup benchmarks the same code: a commit, not a branch, and exact versions of the packages
+        # its requirements.txt names (unversioned there) and their dependencies.
+        "commit": "1f7cd478b3b157b5554699ff19f050d56572806e",
         "dir": "discogs-xml2db",
+        "install": [
+            ".venv/bin/pip",
+            "install",
+            "-q",
+            "certifi==2026.7.22",
+            "charset-normalizer==3.5.2",
+            "docopt==0.6.2",
+            "idna==3.20",
+            "lxml==6.1.3",
+            "requests==2.34.2",
+            "tqdm==4.70.1",
+            "urllib3==2.8.0",
+        ],
+        "repo": "https://github.com/philipmat/discogs-xml2db.git",
         "setup": ["python3", "-m", "venv", ".venv"],
-        "install": [".venv/bin/pip", "install", "-q", "-r", "requirements.txt"],
     },
 }
 
@@ -42,20 +57,26 @@ def _setup_tool(name: str, config: dict[str, Any], *, force: bool = False) -> bo
     console.print(f"[bold]=== {name} ===[/]")
     tool_dir = ALTERNATIVES_DIR / config["dir"]
 
-    # Clone if needed
+    # Re-clone if asked
     if tool_dir.exists() and force:
         console.print("  Removing existing directory...")
         import shutil
 
         shutil.rmtree(tool_dir)
 
-    if not tool_dir.exists():
-        console.print(f"  Cloning {config['repo']}...")
-        if not _run(["git", "clone", "--depth", "1", config["repo"], str(tool_dir)]):
-            console.print("  [red]Failed to clone[/]")
-            return False
-    else:
-        console.print("  Already cloned, skipping...")
+    # Fetch only the pinned commit; this also moves an existing checkout to it.
+    console.print(f"  Checking out {config['repo']} at {config['commit']}...")
+    tool_dir.mkdir(exist_ok=True, parents=True)
+    if not (
+        _run(["git", "init", "-q"], cwd=tool_dir)
+        and _run(
+            ["git", "fetch", "-q", "--depth", "1", config["repo"], config["commit"]],
+            cwd=tool_dir,
+        )
+        and _run(["git", "checkout", "-q", "--detach", "FETCH_HEAD"], cwd=tool_dir)
+    ):
+        console.print("  [red]Failed to check out[/]")
+        return False
 
     # Run setup commands
     if "setup" in config:
