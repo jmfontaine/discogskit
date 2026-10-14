@@ -32,24 +32,21 @@ import re
 # inside a value is never mistaken for the end of the tag.
 _ATTRS = rb"(?:\s+[^\s=/>]+\s*=\s*(?:\"[^\"]*\"|'[^']*'))*\s*"
 
-# Constructs that can contain tag-like text that isn't a real element, each matched whole. Shared between the
-# main scan (where an unterminated one is an error) and the trailing-content check (where any number of them,
-# complete, are allowed after the last record).
+# The constructs allowed around the container's closing tag after the last record, each matched whole. The main
+# scan in ``_compile_pattern`` matches these, CDATA sections and DOCTYPE declarations with its own inline copies.
 _COMMENT = rb"<!--(?:[^-]*(?:-(?!->)[^-]*)*-->)"
-_CDATA = rb"<!\[CDATA\[(?:[^\]]*(?:\](?!\]>)[^\]]*)*\]\]>)"
-_DOCTYPE = rb"<!DOCTYPE(?:[^\[>]*(?:\[[^\]]*\])?\s*>)"
 _PI = rb"<\?(?:[^?]*(?:\?(?!>)[^?]*)*\?>)"
 
 # XML's own whitespace production (S ::= (#x20 | #x9 | #xD | #xA)+), not Python's broader \s (which also matches
 # \f and \v, neither of which XML allows).
 _XML_WS = rb"[\x20\x09\x0d\x0a]"
 
-# Before the closing tag: any mix of whitespace and complete comments/CDATA/PI/DOCTYPE. After it: XML's own
-# ``Misc`` production (comments, PIs, and whitespace — not CDATA or DOCTYPE, which aren't valid there either).
-_MISC = rb"(?:\s+|" + _COMMENT + rb"|" + _PI + rb")*"
-_LEADING_TRAILING_MARKUP = (
-    rb"(?:\s+|" + _COMMENT + rb"|" + _CDATA + rb"|" + _DOCTYPE + rb"|" + _PI + rb")*"
-)
+# What may surround the container's closing tag: whitespace, comments and processing instructions. After the closer
+# that's XML's ``Misc`` production; before it, a CDATA section or DOCTYPE would be content no chunk carries or
+# markup XML doesn't allow there. Each repetition consumes exactly one whitespace byte so no two ways of matching
+# the same bytes exist: with ``\s+`` instead, a failed match tried every way to split a whitespace run, which took
+# exponential time in its length (issue #104).
+_MISC = rb"(?:" + _XML_WS + rb"|" + _COMMENT + rb"|" + _PI + rb")*"
 
 
 def _compile_pattern(tag: bytes) -> re.Pattern[bytes]:
@@ -224,16 +221,9 @@ def _check_leading_content(
 
 def _trailing_content_pattern(container: bytes) -> re.Pattern[bytes]:
     """Compile a pattern for exactly what may follow the last record: the container's own closing tag — not any
-    tag, not duplicated, not missing — preceded and followed by whatever markup is actually valid there.
+    tag, not duplicated, not missing — preceded and followed by whitespace, comments and processing instructions.
     """
-    return re.compile(
-        _LEADING_TRAILING_MARKUP
-        + rb"</"
-        + re.escape(container)
-        + _XML_WS
-        + rb"*>"
-        + _MISC
-    )
+    return re.compile(_MISC + rb"</" + re.escape(container) + _XML_WS + rb"*>" + _MISC)
 
 
 def _check_trailing_content(
