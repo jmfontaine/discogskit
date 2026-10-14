@@ -8,7 +8,7 @@ from __future__ import annotations
 import pyarrow as pa
 from lxml import etree
 
-from discogskit.entities import Cols, EntityDef, register
+from discogskit.entities import Cols, EntityDef, parse_bool, register
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Arrow schemas (the first table is the root table)
@@ -119,9 +119,8 @@ def append_record(
                     continue
                 src = video.get("src")
                 dur_str = video.get("duration")
-                duration = int(dur_str) if dur_str else None
-                embed_str = video.get("embed")
-                embed = embed_str == "true" if embed_str else None
+                duration = None if dur_str is None else int(dur_str)
+                embed = parse_bool("embed", video.get("embed"))
                 vdesc = None
                 vtitle = None
                 for vc in video:
