@@ -1,4 +1,4 @@
-"""Writer protocol and registry for multi-target output."""
+"""Writer protocol and the factory for database writers."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
     from discogskit.entities import EntityDef
+
+__all__ = ["OutputExistsError", "Writer", "get_writer"]
 
 # Table name -> seconds spent flushing it. "_commit" holds any shared commit cost.
 TableTimings = dict[str, float]

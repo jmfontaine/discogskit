@@ -7,7 +7,7 @@ import pickle
 
 import pytest
 
-from discogskit.entities import get
+from discogskit.entities import ENTITIES
 from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.entities.artists import SCHEMAS
@@ -151,7 +151,7 @@ def test_strict_reports_unhandled_element_path(tmp_path, entity_name, record, pa
 def test_namespaced_record_fails(tmp_path, entity_name, layout):
     """A namespaced record element must fail, naming the file, the element and the line where its start tag begins,
     instead of being dropped."""
-    tag = get(entity_name).root_tag
+    tag = ENTITIES[entity_name].root_tag
     # A start tag over several lines: lxml's own line would be its last one.
     namespaced = f'<{tag}\n  xmlns="urn:x"\n  id="9">\n  <id>9</id>\n</{tag}>\n'
     plain = PLAIN_RECORDS[entity_name]

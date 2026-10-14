@@ -43,9 +43,11 @@ Multiprocessing is used because lxml is CPU-bound and holds the GIL. Arrow IPC i
 ### Key modules
 
 - **`entities/`** — One module per Discogs entity (artists, labels, masters, releases) with its table schemas and record parser, plus the definitions they share (`_def.py`: `EntityDef`, `ChunkArgs`, `Cols`), the shared splitter (`_split.py`) and chunk worker (`_worker.py`). `entities/__init__.py` builds `ENTITIES` from an explicit tuple of the modules' `ENTITY` definitions. Writers generate SQL DDL from the schemas. Releases is the most complex (12 normalized tables).
-- **`writers/`** — Output format implementations (parquet, jsonl, sqlite, postgresql). Factory in `__init__.py` selects writer by format string.
+- **`writers/`** — Output format implementations (parquet, jsonl, sqlite, postgresql). `get_writer` in `__init__.py` picks the database writer from a DSN.
 - **`cli.py`** — Typer CLI with `convert` and `load` commands.
 - **`decompress.py`** — Gzip decompression wrapper using rapidgzip; `ensure_xml` returns an `XmlLease` the pipeline holds while it reads the XML.
+- **`__init__.py`** — The supported Python API is the package's `__all__`, documented in the README's "Python API" section; `pipeline`, `writers` and `entities` declare their share in their own `__all__`. Changing it means updating the README too.
+- **`_console.py`** — All output goes through `status()`, `error()` and `current()`, never `print()`: `pipeline.run()` points `current()` at the caller's console for the run, including the writer thread.
 
 ### Entity pattern
 
