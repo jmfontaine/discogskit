@@ -78,6 +78,19 @@ class TestSplitFinder:
         for i in range(len(splits) - 1):
             assert splits[i][1] == splits[i + 1][0], "Chunks must be contiguous"
 
+    @pytest.mark.parametrize("target_chunk_bytes", [1, 50, 100, 1000])
+    def test_every_chunk_but_the_last_reaches_the_target(
+        self, tmp_path, find_splits, target_chunk_bytes
+    ):
+        """A chunk ends at the first record boundary at or past the target size, so only the last can be smaller."""
+        items = b"".join(f"<item>{'x' * (i % 7)}</item>\n".encode() for i in range(100))
+        f = tmp_path / "test.xml"
+        f.write_bytes(b"<?xml version='1.0'?>\n<items>\n" + items + b"</items>")
+
+        splits = find_splits(str(f), target_chunk_bytes)
+
+        assert all(end - start >= target_chunk_bytes for start, end in splits[:-1])
+
     def test_each_chunk_ends_at_closing_tag(self, tmp_path, find_splits):
         """Each chunk boundary must fall on a closing tag."""
         items = b"".join(f"<item>{i}</item>\n".encode() for i in range(50))
