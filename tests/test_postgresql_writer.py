@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import gzip
 import os
+import threading
+import time
 import uuid
+from unittest.mock import MagicMock
 from urllib.parse import urlsplit
 
+import click
 import pytest
+from typer.testing import CliRunner
 
 from discogskit.entities import ChunkArgs, get
 from discogskit.entities._worker import extract_chunk_to_ipc
-from tests.conftest import empty_ipc, ipc_to_record_batches
+from tests.conftest import ARTISTS_XML, empty_ipc, ipc_to_record_batches
 
 
 def _load(dsn, entity, ipc_dict, **options):
@@ -374,6 +380,212 @@ class TestOverwriteSafety:
 
         with pytest.raises(OutputExistsError, match="--overwrite"):
             _load(dsn, entity, ipc_dict, overwrite=False)
+
+    def test_failed_write_connection_leaves_tables_untouched(
+        self, entity, ipc_dict, schemas, monkeypatch
+    ):
+        """A write connection that can't open stops setup() before any drop (#108)."""
+        import adbc_driver_postgresql.dbapi as adbc_pg
+        import psycopg
+        from psycopg import sql
+
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        target, _, dsn = schemas
+        _load(dsn, entity, ipc_dict, overwrite=True)
+
+        real_connect = adbc_pg.connect
+        opened = []
+
+        def connect_once(*args, **kwargs):
+            if opened:
+                raise RuntimeError("too many connections")
+            opened.append(real_connect(*args, **kwargs))
+            return opened[-1]
+
+        monkeypatch.setattr(adbc_pg, "connect", connect_once)
+        app_name = f"discogskit_{uuid.uuid4().hex[:8]}"
+        writer = PostgreSQLWriter(
+            f"{dsn}&application_name={app_name}", overwrite=True, write_workers=2
+        )
+        try:
+            with pytest.raises(RuntimeError, match="too many connections"):
+                writer.setup(entity)
+            # Only the writer's own DDL connection is left; a closed backend can
+            # take a moment to leave pg_stat_activity.
+            deadline = time.monotonic() + 5
+            with psycopg.connect(dsn, autocommit=True) as conn:
+                while True:
+                    open_conns = conn.execute(
+                        "SELECT COUNT(*) FROM pg_stat_activity "
+                        "WHERE application_name = %s",
+                        (app_name,),
+                    ).fetchone()
+                    if open_conns == (1,) or time.monotonic() > deadline:
+                        break
+                    time.sleep(0.05)
+        finally:
+            writer.close()
+        assert open_conns == (1,)
+
+        with psycopg.connect(dsn) as conn:
+            counts = {
+                t: conn.execute(
+                    sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(target, t))
+                ).fetchone()
+                for t in entity.table_order
+            }
+        assert counts["artists"] == (2,)
+        assert counts["artist_aliases"] == (1,)
+
+
+@pytest.mark.integration
+class TestWriteGroupFailure:
+    """With several write workers, one group's error waits for the others (#108)."""
+
+    @pytest.fixture()
+    def groups(self, monkeypatch):
+        """Make the group holding ``artists`` fail at once and the other wait for a gate.
+
+        The failing group comes first, so collecting results in order hits its
+        error while the other group is still writing. Yields the gate, an event
+        set once the sibling group waits on it, and the list of events the
+        sibling group records.
+        """
+        from discogskit.writers import postgresql
+
+        real_flush = postgresql._flush_group
+        gate = threading.Event()
+        waiting = threading.Event()
+        events = []
+
+        def flush(conn, tables, schemas):
+            if "artists" in tables:
+                raise RuntimeError("boom")
+            waiting.set()
+            gate.wait(30)
+            timings = real_flush(conn, tables, schemas)
+            events.append("sibling committed")
+            return timings
+
+        monkeypatch.setattr(postgresql, "_flush_group", flush)
+        yield gate, waiting, events
+        gate.set()
+
+    def test_write_chunk_raises_after_sibling_groups_finish(
+        self, pg_dsn, artists_xml_file, groups
+    ):
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        gate, _, events = groups
+        entity = get("artists")
+        size = os.path.getsize(artists_xml_file)
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("artists", str(artists_xml_file), 0, size)
+        )
+        errors = []
+        writer = PostgreSQLWriter(pg_dsn, overwrite=True, write_workers=2)
+
+        def write():
+            try:
+                writer.write_chunk(ipc_to_record_batches(ipc_dict))
+            except RuntimeError as exc:
+                errors.append(exc)
+                events.append("raised")
+
+        try:
+            writer.setup(entity)
+            thread = threading.Thread(target=write)
+            thread.start()
+            thread.join(1)
+            returned_early = not thread.is_alive()
+            gate.set()
+            thread.join(30)
+        finally:
+            writer.close()
+
+        assert not returned_early
+        assert [str(e) for e in errors] == ["boom"]
+        assert events == ["sibling committed", "raised"]
+
+    def test_cli_reports_the_group_error_after_siblings_finish(
+        self, pg_dsn, tmp_path, groups, monkeypatch
+    ):
+        from discogskit.cli import app
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        gate, waiting, events = groups
+        real_close = PostgreSQLWriter.close
+
+        def close(self):
+            events.append("close")
+            real_close(self)
+
+        monkeypatch.setattr(PostgreSQLWriter, "close", close)
+        gz = tmp_path / "discogs_20260301_artists.xml.gz"
+        with gzip.open(gz, "wb") as f:
+            f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
+            f.write(ARTISTS_XML.encode())
+            f.write(b"</artists>")
+
+        # The CLI runs on this thread, so another opens the gate a second after
+        # the sibling group reaches it: long enough for a close() that doesn't
+        # wait for the sibling to come first.
+        def open_gate():
+            if waiting.wait(30):
+                time.sleep(1)
+            gate.set()
+
+        opener = threading.Thread(target=open_gate)
+        opener.start()
+        try:
+            result = CliRunner().invoke(
+                app,
+                [
+                    "load",
+                    str(gz),
+                    "--dsn",
+                    pg_dsn,
+                    "--no-progress",
+                    "--overwrite",
+                    "--parse-workers",
+                    "1",
+                    "--pg-write-workers",
+                    "2",
+                ],
+            )
+        finally:
+            waiting.set()
+            opener.join()
+
+        assert result.exit_code == 1, click.unstyle(result.output)
+        assert "Error: boom" in click.unstyle(result.output)
+        assert events == ["sibling committed", "close"]
+
+
+class TestWriteWorkerCap:
+    def test_workers_capped_at_table_count(self, monkeypatch):
+        """Three workers on labels (two tables) open two write connections, not three."""
+        import adbc_driver_postgresql.dbapi as adbc_pg
+        import psycopg
+
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        ddl_conn = MagicMock()
+        ddl_conn.execute.return_value.fetchone.return_value = ("public",)
+        monkeypatch.setattr(psycopg, "connect", MagicMock(return_value=ddl_conn))
+        adbc_connect = MagicMock()
+        monkeypatch.setattr(adbc_pg, "connect", adbc_connect)
+
+        writer = PostgreSQLWriter(
+            "postgresql://unused", overwrite=True, write_workers=3
+        )
+        try:
+            writer.setup(get("labels"))
+        finally:
+            writer.close()
+
+        assert adbc_connect.call_count == 2
 
 
 @pytest.mark.integration

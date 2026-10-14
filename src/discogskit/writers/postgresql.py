@@ -21,9 +21,9 @@ re-loaded quickly.
 
 from __future__ import annotations
 
-import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+from contextlib import suppress
 from threading import Thread
 from typing import TYPE_CHECKING, Protocol
 
@@ -166,13 +166,22 @@ class _Closeable(Protocol):
     def close(self) -> None: ...
 
 
-def _close_with_timeout(conn: _Closeable, timeout: float, log: logging.Logger) -> None:
-    """Call ``conn.close()`` in a thread, abandoning it after *timeout* seconds."""
+# Seconds close() waits for each connection to close before abandoning it, so an unresponsive server (e.g. after
+# Ctrl-C) can't block it forever.
+_CLOSE_TIMEOUT = 5.0
+
+
+def _close_with_timeout(conn: _Closeable) -> None:
+    """Call ``conn.close()`` in a thread, abandoning it after ``_CLOSE_TIMEOUT`` seconds."""
     t = Thread(daemon=True, target=conn.close)
     t.start()
-    t.join(timeout)
+    t.join(_CLOSE_TIMEOUT)
     if t.is_alive():
-        log.debug("close() timed out after %.1fs for %s", timeout, type(conn).__name__)
+        status(
+            "Close",
+            f"gave up on a {type(conn).__name__} after {_CLOSE_TIMEOUT:.0f}s; "
+            "it stays open until discogskit exits",
+        )
 
 
 class PostgreSQLWriter:
@@ -274,7 +283,7 @@ class PostgreSQLWriter:
         self._schemas: dict[str, pa.Schema] = {}
 
     def setup(self, entity: EntityDef) -> None:
-        """Drop/create tables in the current schema, set up ADBC."""
+        """Open the ADBC write connections, then drop/create tables in the current schema."""
         import adbc_driver_postgresql.dbapi as adbc_pg
         import psycopg
 
@@ -307,6 +316,28 @@ class PostgreSQLWriter:
                     f"(e.g. {example}). Use --overwrite to replace them."
                 )
 
+        # Open the write connections before touching any table, so a connection
+        # that can't open (driver, max_connections) leaves the old tables in place.
+        # One connection per table group, never more groups than tables.
+        self._schemas = entity.schemas
+        n = min(self._write_workers, len(entity.table_order))
+        conns = []
+        try:
+            for _ in range(n):
+                conns.append(adbc_pg.connect(self._dsn))
+        except BaseException:
+            for conn in conns:
+                # Report the connect error, not a failure to close.
+                with suppress(Exception):
+                    conn.close()
+            raise
+        if n == 1:
+            self._adbc_conn = conns[0]
+        else:
+            self._groups = _split_table_groups(n, entity)
+            self._adbc_conns = conns
+            self._executor = ThreadPoolExecutor(max_workers=n)
+
         # Drop and recreate tables in one transaction, so a refused drop leaves
         # every table as it was. One DROP for all tables: foreign keys between
         # them don't block it, and PostgreSQL lists every outside dependent.
@@ -338,23 +369,11 @@ class PostgreSQLWriter:
             f"[{time.perf_counter() - t_ddl:.2f}s]",
         )
 
-        # Set up ADBC connections
-        self._schemas = entity.schemas
-        if self._write_workers <= 1:
-            self._adbc_conn = adbc_pg.connect(self._dsn)
-        else:
-            self._groups = _split_table_groups(self._write_workers, entity)
-            self._adbc_conns = [
-                adbc_pg.connect(self._dsn) for _ in range(self._write_workers)
-            ]
-            self._executor = ThreadPoolExecutor(max_workers=self._write_workers)
-
     def write_chunk(self, tables: dict[str, pa.RecordBatch]) -> dict[str, float]:
-        if self._write_workers <= 1:
+        if self._executor is None:
             return _flush_group(self._adbc_conn, tables, self._schemas)
 
         # Multi-writer path: dispatch each group's tables to its own connection.
-        assert self._executor is not None
         futures = [
             self._executor.submit(
                 _flush_group,
@@ -364,6 +383,9 @@ class PostgreSQLWriter:
             )
             for conn, group in zip(self._adbc_conns, self._groups)
         ]
+        # Let every group finish before raising one's error: otherwise the caller
+        # could close connections other groups are still writing on.
+        wait(futures)
         merged: dict[str, float] = {}
         for f in futures:
             for k, v in f.result().items():
@@ -376,7 +398,7 @@ class PostgreSQLWriter:
 
         # Shut down write executor and ADBC connections before index building
         if self._executor is not None:
-            self._executor.shutdown(wait=False)
+            self._executor.shutdown()
             self._executor = None
         if self._adbc_conn is not None:
             self._adbc_conn.close()
@@ -454,23 +476,21 @@ class PostgreSQLWriter:
                 f"[{time.perf_counter() - t2:.2f}s]",
             )
 
-    def close(self, *, timeout: float = 5.0) -> None:
+    def close(self) -> None:
         """Release all resources.
 
-        Each network operation is guarded by *timeout* seconds so that
-        ``close()`` never blocks indefinitely (e.g. after Ctrl-C when the
-        server is unresponsive).
+        Waits for in-flight group writes before closing their connections, then
+        closes each connection with ``_close_with_timeout`` so that ``close()``
+        doesn't block forever on an unresponsive server.
         """
-        log = logging.getLogger(__name__)
-
         if self._executor is not None:
-            self._executor.shutdown(wait=False)
+            self._executor.shutdown()
             self._executor = None
 
         for closeable in [self._adbc_conn, *self._adbc_conns]:
             if closeable is not None:
-                _close_with_timeout(closeable, timeout, log)
+                _close_with_timeout(closeable)
         self._adbc_conn = None
         self._adbc_conns = []
 
-        _close_with_timeout(self._conn, timeout, log)
+        _close_with_timeout(self._conn)
