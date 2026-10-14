@@ -43,6 +43,39 @@ class TestGetWriter:
         assert isinstance(writer, SQLiteWriter)
         writer.close()
 
+    def test_sqlite_dsn_relative_path(self, monkeypatch, tmp_path):
+        """``sqlite:///out.db`` is relative to the working directory, as in SQLAlchemy."""
+        monkeypatch.chdir(tmp_path)
+        get_writer("sqlite:///out.db").close()
+        assert [p.name for p in tmp_path.iterdir()] == ["out.db"]
+
+    @pytest.mark.parametrize(
+        "dsn, reason",
+        [
+            ("sqlite:out.db", "Use sqlite:///<path>"),
+            ("sqlite://out.db", "Use sqlite:///<path>"),
+            ("SQLite://out.db", "Use sqlite:///<path>"),
+            ("sqlite:///", "no path"),
+            ("sqlite:///out.db?mode=ro", "contains '?'"),
+            ("out.db?mode=ro.db", "contains '?'"),
+        ],
+    )
+    def test_malformed_sqlite_dsn_creates_no_file(
+        self, monkeypatch, tmp_path, dsn, reason
+    ):
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ValueError, match="Invalid SQLite DSN") as excinfo:
+            get_writer(dsn)
+        assert reason in str(excinfo.value)
+        assert list(tmp_path.iterdir()) == []
+
+    def test_other_url_with_sqlite_suffix_is_unsupported(self, monkeypatch, tmp_path):
+        """A URL isn't a SQLite path just because it ends in .db."""
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ValueError, match="Unsupported database DSN"):
+            get_writer("mysql://localhost/discogs.db")
+        assert list(tmp_path.iterdir()) == []
+
     def test_sqlite_accepts_cli_defaults_for_pg_only_options(self, tmp_path):
         """CLI defaults the user never touched must not trigger the PostgreSQL-only check."""
         db_path = str(tmp_path / "test.db")
@@ -102,3 +135,60 @@ class TestGetWriter:
     def test_unknown_dsn_raises(self):
         with pytest.raises(ValueError, match="Unsupported database DSN"):
             get_writer("unknown://something")
+
+    @pytest.mark.parametrize(
+        "dsn",
+        [
+            "postgresql+psycopg://user:s3cr3t@localhost/discogs",
+            # Unencoded "@", "/" and "?" in the password: everything up to the last "@" is userinfo.
+            "mysql://user:s3/cr@3t@localhost/discogs",
+            "mysql://user:s3?cr3t@localhost/discogs?sslmode=require",
+            "postgresql+psycopg://user@localhost/discogs?password=s3cr3t&sslmode=require",
+            # A percent-encoded parameter name, which libpq decodes.
+            "postgresql+psycopg://user@localhost/discogs?%70assword=s3cr3t",
+            "host=localhost password=s3cr3t dbname=discogs",
+            "host=localhost password = s3&cr3t dbname=discogs",
+            "host=localhost password=s3\\ cr3t dbname=discogs",
+            "host=localhost password='s3 cr3t' dbname=discogs",
+            "host=localhost password='s3\\' cr3t' dbname=discogs",
+            # Unterminated quote: not valid keyword/value syntax, so the whole DSN is hidden.
+            "host=localhost password='s3 cr3t",
+            "host=localhost password='s3 x=cr3t",
+            # "://" in a keyword/value password doesn't make the DSN a URL.
+            "host=localhost password='https://s3 cr3t' dbname=discogs",
+            "host=localhost password=http://s3cr3t dbname=discogs",
+            # "password=" inside another keyword's value isn't the password keyword.
+            "application_name='password=' password='s3 cr3t' dbname=discogs",
+        ],
+    )
+    def test_unsupported_dsn_error_hides_the_password(self, dsn):
+        with pytest.raises(ValueError, match="Unsupported database DSN") as excinfo:
+            get_writer(dsn)
+        message = str(excinfo.value)
+        assert "s3" not in message
+        assert "cr3t" not in message
+        assert "***" in message
+
+    @pytest.mark.parametrize(
+        "dsn, shown",
+        [
+            (
+                "postgresql+psycopg://user:s3cr3t@localhost:5432/discogs",
+                "postgresql+psycopg://user:***@localhost:5432/discogs",
+            ),
+            (
+                "postgresql+psycopg://user@localhost/discogs?sslmode=require",
+                "postgresql+psycopg://user@localhost/discogs?***",
+            ),
+            (
+                "application_name='password=' password='s3 cr3t' dbname=discogs",
+                "application_name='password=' password=*** dbname=discogs",
+            ),
+            ("host=localhost password='s3 cr3t", "***"),
+            ("output/discogs.txt", "output/discogs.txt"),
+        ],
+    )
+    def test_unsupported_dsn_error_keeps_the_rest_of_the_dsn(self, dsn, shown):
+        with pytest.raises(ValueError) as excinfo:
+            get_writer(dsn)
+        assert f"Unsupported database DSN: {shown!r}." in str(excinfo.value)

@@ -5,13 +5,15 @@ from __future__ import annotations
 import gzip
 import random
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
-import click
 import pyarrow as pa
 import pytest
+from rich.text import Text
 from typer.testing import CliRunner
 
 from discogskit import pipeline
@@ -72,6 +74,11 @@ def _compressible_artists_gz(tmp_path: Path, n: int = 3000) -> Path:
             )
         f.write(b"</artists>")
     return gz
+
+
+def _unstyle(output: str) -> str:
+    """Strip ANSI styling from CLI output (Typer colors its error panels when it detects CI)."""
+    return Text.from_ansi(output).plain
 
 
 def _widen_console(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -199,7 +206,7 @@ class TestRecordErrorOutput:
             f"Invalid <artist> record in {xml} at chunk line 4 (chunk bytes {start}-{end}, id='[b]'): "
         )
         assert result.exit_code == 1
-        assert f"Error: {message}\n" in click.unstyle(result.output)
+        assert f"Error: {message}" in _unstyle(result.output).splitlines()
 
 
 class TestWriterAlwaysClosed:
@@ -224,7 +231,7 @@ class TestWriterAlwaysClosed:
         ):
             result = runner.invoke(app, ["convert", str(gz), "-f", "parquet"])
         assert result.exit_code == expected_exit_code
-        assert expected_message in click.unstyle(result.output)
+        assert expected_message in _unstyle(result.output)
         close.assert_called_once()
 
     def test_convert_closes_writer_once_on_success(self, tmp_path: Path) -> None:
@@ -236,7 +243,7 @@ class TestWriterAlwaysClosed:
         ):
             result = runner.invoke(app, ["convert", str(gz), "-f", "parquet"])
         assert result.exit_code == 0
-        assert "0 artists converted" in click.unstyle(result.output)
+        assert "0 artists converted" in _unstyle(result.output)
         close.assert_called_once()
 
     @pytest.mark.parametrize(
@@ -259,7 +266,7 @@ class TestWriterAlwaysClosed:
         ):
             result = runner.invoke(app, ["load", str(gz)])
         assert result.exit_code == expected_exit_code
-        assert expected_message in click.unstyle(result.output)
+        assert expected_message in _unstyle(result.output)
         mock_writer.close.assert_called_once()
 
     def test_load_closes_writer_once_on_success(self, tmp_path: Path) -> None:
@@ -272,7 +279,7 @@ class TestWriterAlwaysClosed:
         ):
             result = runner.invoke(app, ["load", str(gz)])
         assert result.exit_code == 0
-        assert "0 artists loaded" in click.unstyle(result.output)
+        assert "0 artists loaded" in _unstyle(result.output)
         mock_writer.close.assert_called_once()
 
 
@@ -292,9 +299,7 @@ class TestUncompressedXmlInput:
         ):
             result = runner.invoke(app, [command, str(gz), str(xml)])
         assert result.exit_code == 1
-        assert "uncompressed .xml input is not supported" in click.unstyle(
-            result.output
-        )
+        assert "uncompressed .xml input is not supported" in _unstyle(result.output)
         run.assert_not_called()
         assert xml.read_bytes() == b"<labels></labels>"
 
@@ -326,7 +331,7 @@ class TestUnrecognizedFileExtension:
         ):
             result = runner.invoke(app, [command, str(gz), str(other)])
         assert result.exit_code == 1
-        assert f"{other}: not a .xml.gz dump" in click.unstyle(result.output)
+        assert f"{other}: not a .xml.gz dump" in _unstyle(result.output)
         run.assert_not_called()
 
 
@@ -363,7 +368,7 @@ class TestFormatAndCompressionEnums:
                 app, ["convert", str(gz), "-f", fmt, "--compression", compression]
             )
         assert result.exit_code == 1
-        output = click.unstyle(result.output)
+        output = _unstyle(result.output)
         assert f"unsupported compression '{compression}' for {fmt}" in output
         run.assert_not_called()
 
@@ -397,7 +402,7 @@ class TestFormatAndCompressionEnums:
         with patch("discogskit.cli.pipeline.run") as run:
             result = runner.invoke(app, ["convert", str(gz), "--compression", "bogus"])
         assert result.exit_code == 2
-        assert "'bogus'" in click.unstyle(result.output)
+        assert "'bogus'" in _unstyle(result.output)
         run.assert_not_called()
 
     def test_invalid_format_is_a_usage_error(self, tmp_path: Path) -> None:
@@ -405,7 +410,7 @@ class TestFormatAndCompressionEnums:
         with patch("discogskit.cli.pipeline.run") as run:
             result = runner.invoke(app, ["convert", str(gz), "-f", "bogus"])
         assert result.exit_code == 2
-        output = click.unstyle(result.output)
+        output = _unstyle(result.output)
         assert "'bogus'" in output
         assert "'parquet'" in output
         assert "'jsonl'" in output
@@ -442,7 +447,7 @@ class TestOptionMinimums:
         with patch("discogskit.cli.pipeline.run") as run:
             result = runner.invoke(app, [command, str(gz), option, value])
         assert result.exit_code == 2
-        output = click.unstyle(result.output)
+        output = _unstyle(result.output)
         # Typer colors the error panel when it detects CI (GITHUB_ACTIONS).
         assert option in output
         assert "is not in the range x>=1" in output
@@ -459,7 +464,7 @@ class TestOptionMinimums:
         with patch("discogskit.cli.pipeline.run") as run:
             result = runner.invoke(app, ["load", str(gz), option, "1"])
         assert result.exit_code == 2
-        assert "No such option" in click.unstyle(result.output)
+        assert "No such option" in _unstyle(result.output)
         run.assert_not_called()
 
 
@@ -486,7 +491,7 @@ class TestFkOption:
                 "--no-progress",
             ],
         )
-        assert result.exit_code == 0, click.unstyle(result.output)
+        assert result.exit_code == 0, _unstyle(result.output)
 
         conn = sqlite3.connect(db)
         fks = conn.execute("PRAGMA foreign_key_list(artist_aliases)").fetchall()
@@ -518,7 +523,7 @@ class TestCompressionLevel:
                 *extra_args,
             ],
         )
-        assert result.exit_code == 0, click.unstyle(result.output)
+        assert result.exit_code == 0, _unstyle(result.output)
 
     @pytest.mark.parametrize(
         "fmt, compression, low, high",
@@ -622,7 +627,7 @@ class TestCompressionLevel:
             ],
         )
         assert result.exit_code == 1
-        output = click.unstyle(result.output)
+        output = _unstyle(result.output)
         assert "none does not support --compression-level." in output
 
     def test_rejects_level_for_snappy(self, tmp_path: Path) -> None:
@@ -641,7 +646,7 @@ class TestCompressionLevel:
             ],
         )
         assert result.exit_code == 1
-        output = click.unstyle(result.output)
+        output = _unstyle(result.output)
         assert "snappy does not support --compression-level." in output
 
     @pytest.mark.parametrize(
@@ -685,7 +690,7 @@ class TestCompressionLevel:
             ],
         )
         assert result.exit_code == 1
-        assert "is out of range for" in click.unstyle(result.output)
+        assert "is out of range for" in _unstyle(result.output)
 
     def test_format_compression_mismatch_error_still_wins(self, tmp_path: Path) -> None:
         """An invalid format/compression pairing is rejected before --compression-level is even looked at."""
@@ -705,7 +710,7 @@ class TestCompressionLevel:
                 ],
             )
         assert result.exit_code == 1
-        output = click.unstyle(result.output)
+        output = _unstyle(result.output)
         assert "unsupported compression 'zstd' for jsonl" in output
         assert "compression-level" not in output
         run.assert_not_called()
@@ -720,7 +725,7 @@ class TestLoadRejectsPostgreSqlOnlyOptionsForSqlite:
         pipeline_result = pipeline.PipelineResult(None, 0.0, 0.0, 0.0, 0.0, 0)
         with patch("discogskit.cli.pipeline.run", return_value=pipeline_result):
             result = runner.invoke(app, ["load", str(gz), "--dsn", str(db)])
-        assert result.exit_code == 0, click.unstyle(result.output)
+        assert result.exit_code == 0, _unstyle(result.output)
 
     @pytest.mark.parametrize(
         "flag, value",
@@ -753,7 +758,7 @@ class TestLoadRejectsPostgreSqlOnlyOptionsForSqlite:
         pipeline_result = pipeline.PipelineResult(None, 0.0, 0.0, 0.0, 0.0, 0)
         with patch("discogskit.cli.pipeline.run", return_value=pipeline_result):
             result = runner.invoke(app, args)
-        output = click.unstyle(result.output)
+        output = _unstyle(result.output)
         assert result.exit_code == 1, output
         assert flag in output
         assert "can only be used with PostgreSQL, not a SQLite DSN." in output
@@ -767,6 +772,25 @@ class TestLoadRejectsPostgreSqlOnlyOptionsForSqlite:
         result = runner.invoke(
             app, ["load", str(gz), "--dsn", str(db), "--pg-bogus-option"]
         )
-        output = click.unstyle(result.output)
+        output = _unstyle(result.output)
         assert result.exit_code == 2, output
         assert "No such option" in output
+
+
+class TestConsoleScriptEntryPoint:
+    def test_loads_in_a_fresh_interpreter(self) -> None:
+        """Tools that load console scripts through importlib.metadata must get the Typer app.
+
+        A fresh interpreter, because importing ``discogskit.cli`` here (as this module does) sets the
+        package's ``cli`` attribute and hides a ``discogskit:cli.app`` entry point that fails elsewhere.
+        """
+        code = (
+            "from importlib.metadata import entry_points\n"
+            "import typer\n"
+            "app = entry_points(group='console_scripts')['discogskit'].load()\n"
+            "assert isinstance(app, typer.Typer), app\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, check=False, text=True
+        )
+        assert result.returncode == 0, result.stderr
