@@ -35,10 +35,13 @@ waiting on the old file and a new run on a fresh one both hold "the" lock.
 
 from __future__ import annotations
 
+import bisect
 import enum
 import json
 import os
+import struct
 import time
+import zlib
 from collections.abc import Callable
 from pathlib import Path
 
@@ -254,18 +257,19 @@ def _decompress(
             rapidgzip.open(str(gz_path), parallelization=workers) as fin,
             open(partial_path, "wb") as fout,
         ):
+            checkpoints = [(0, 0)]
             while True:
                 chunk = fin.read(4 * 1024 * 1024)
                 if not chunk:
                     break
                 fout.write(chunk)
+                offset, crc = checkpoints[-1]
+                checkpoints.append((offset + len(chunk), zlib.crc32(chunk, crc)))
             # rapidgzip's ISA-L decoder, built into its Linux wheels but not its
             # macOS ones, takes a deflate stream that runs out of input for its
             # end: reads stop early with no error.  A complete .gz is decoded to
             # its last byte (trailing bytes are already an error), so stopping
-            # anywhere else is truncation.  One cut this can't see: a later
-            # gzip member that ends right after its header, where rapidgzip
-            # with ISA-L stops at the end of the file without decoding it.
+            # anywhere else is truncation.
             consumed_bits = fin.tell_compressed()
             if consumed_bits != gz_bits:
                 raise ValueError(
@@ -273,6 +277,11 @@ def _decompress(
                     f" of {gz_bits // 8:,}"
                 )
             fout.flush()
+            # It can also stop at the end of the file right after a later gzip
+            # member's header, without decoding that member.  A complete .gz
+            # ends with its last member's footer, which has to match the end of
+            # the output.
+            _check_last_member(gz_path, partial_path, checkpoints)
             # Without this, a power loss can persist the rename below before
             # the data, leaving a complete-looking but corrupt .xml.
             os.fsync(fout.fileno())
@@ -306,3 +315,76 @@ def _decompress(
     elapsed = time.perf_counter() - t0
     size_mb = xml_path.stat().st_size / 1024 / 1024
     status("Decompress", f"{size_mb:,.1f} MB", f"[{elapsed:.2f}s]")
+
+
+# The CRC-32 polynomial, bit-reflected as gzip and zlib use it.
+_CRC32_POLY = 0xEDB88320
+
+
+def _crc32_multiply(a: int, b: int) -> int:
+    """Multiply two polynomials modulo the CRC-32 polynomial (zlib's multmodp).
+
+    ``a`` must not be 0.
+    """
+    m = 1 << 31
+    p = 0
+    while True:
+        if a & m:
+            p ^= b
+            if a & (m - 1) == 0:
+                return p
+        m >>= 1
+        b = (b >> 1) ^ _CRC32_POLY if b & 1 else b >> 1
+
+
+# x^(2^k) modulo the CRC-32 polynomial for k = 0..31 (zlib's x2n_table).
+_CRC32_X2N = [1 << 30]
+for _ in range(31):
+    _CRC32_X2N.append(_crc32_multiply(_CRC32_X2N[-1], _CRC32_X2N[-1]))
+
+
+def _crc32_shift(crc: int, length: int) -> int:
+    """``crc`` times x^(8 * length): what ``crc`` contributes to the CRC-32 of
+    its data followed by ``length`` more bytes (zlib's crc32_combine).
+    """
+    x2n = 1 << 31  # x^0
+    k = 3  # x^(8 * length) = x^(2^3 * length)
+    while length:
+        if length & 1:
+            x2n = _crc32_multiply(_CRC32_X2N[k & 31], x2n)
+        length >>= 1
+        k += 1
+    return _crc32_multiply(x2n, crc)
+
+
+def _check_last_member(
+    gz_path: Path, partial_path: Path, checkpoints: list[tuple[int, int]]
+) -> None:
+    """Raise ``ValueError`` unless the .gz ends with the footer of a gzip member
+    whose output ends exactly where the decompressed output does.
+
+    ``checkpoints`` holds ``(offset, CRC-32 of the output before offset)``,
+    ascending, from ``(0, 0)`` to the end of the output.  The footer holds the
+    last member's CRC-32 and its size modulo 2^32, so every size it allows is
+    tried; each needs only the CRC of the output between the checkpoint before
+    the member's start and that start, read back from ``partial_path``.
+    """
+    with open(gz_path, "rb") as gz:
+        # rapidgzip also decodes raw deflate, which can be shorter than this.
+        if os.fstat(gz.fileno()).st_size < 8:
+            raise ValueError("too short to end with a gzip footer")
+        gz.seek(-8, os.SEEK_END)
+        footer_crc, footer_size = struct.unpack("<II", gz.read(8))
+    total, total_crc = checkpoints[-1]
+    for size in range(footer_size, total + 1, 1 << 32):
+        start = total - size
+        i = bisect.bisect_right(checkpoints, start, key=lambda c: c[0]) - 1
+        offset, prefix_crc = checkpoints[i]
+        if offset < start:
+            with open(partial_path, "rb") as out:
+                out.seek(offset)
+                prefix_crc = zlib.crc32(out.read(start - offset), prefix_crc)
+        # CRC(prefix + member) = shift(CRC(prefix), len(member)) ^ CRC(member)
+        if total_crc ^ _crc32_shift(prefix_crc, size) == footer_crc:
+            return
+    raise ValueError("the output doesn't end with a complete gzip member")

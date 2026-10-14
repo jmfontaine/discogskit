@@ -234,16 +234,41 @@ class TestPartialFile:
         [
             lambda gz: gz[:10],
             lambda gz: gz + gz[:-20],
+            lambda gz: gz + gz[:10],
         ],
-        ids=["header_only", "second_member_cut"],
+        ids=["header_only", "second_member_cut", "second_member_header_only"],
     )
     def test_truncation_rapidgzip_misses_raises_decompress_error(self, tmp_path, cut):
         """rapidgzip reads these as a clean end of data (with ISA-L: its Linux
-        wheels), so only the check that every byte was decoded catches them.
+        wheels), so only discogskit's own checks catch them.
         """
         gz_path = tmp_path / "test.xml.gz"
         gz_path.write_bytes(cut(gzip.compress(_XML * 1000)))
         xml_path = tmp_path / "test.xml"
+
+        with pytest.raises(
+            DecompressError, match=r"truncated, corrupt, or not a gzip file"
+        ):
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        assert not xml_path.exists()
+        assert not (tmp_path / "test.xml.partial").exists()
+
+    def test_unfinished_last_member_raises_decompress_error(
+        self, monkeypatch, tmp_path
+    ):
+        """Like rapidgzip with ISA-L on a .gz cut right after a later member's
+        header: the first member's output, every byte reported as consumed.
+        """
+        member = gzip.compress(_XML)
+        gz_path = tmp_path / "test.xml.gz"
+        gz_path.write_bytes(member + member[:10])
+        xml_path = tmp_path / "test.xml"
+        monkeypatch.setattr(
+            decompress.rapidgzip,
+            "open",
+            lambda path, parallelization: _CompleteGzipReader(path),
+        )
 
         with pytest.raises(
             DecompressError, match=r"truncated, corrupt, or not a gzip file"
@@ -456,3 +481,13 @@ class TestDecompress:
 
         assert xml_path.exists()
         assert xml_path.read_bytes() == xml_content
+
+    def test_multi_member_gz_decompressed(self, tmp_path):
+        """The footer check finds the last member's start inside the output."""
+        gz_path = tmp_path / "test.xml.gz"
+        gz_path.write_bytes(gzip.compress(_XML * 1000) + gzip.compress(_XML))
+        xml_path = tmp_path / "test.xml"
+
+        ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
+
+        assert xml_path.read_bytes() == _XML * 1001

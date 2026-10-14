@@ -4,20 +4,25 @@ from __future__ import annotations
 
 import gzip
 import random
+import re
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
-import click
 import pyarrow as pa
 import pytest
-from typer.testing import CliRunner
+from rich.text import Text
+from typer.testing import CliRunner, Result
 
 from discogskit import pipeline
 from discogskit._console import console
 from discogskit.cli import app
 from discogskit.decompress import DecompressError
+from discogskit.entities import ChunkArgs, get
+from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers import OutputExistsError
 from tests.conftest import ARTISTS_XML
 
@@ -41,6 +46,30 @@ _PARQUET_LEVEL_DEFAULT = {
 
 # A valid-looking .xml.gz filename so detect_entity() succeeds.
 _ENTITY_FILE = "discogs_20260301_artists.xml.gz"
+
+# entity -> (a record with an id, one without, one with an empty id)
+_RECORDS_WITHOUT_ID = {
+    "artists": (
+        "<artist><id>1</id></artist>",
+        "<artist><name>A</name></artist>",
+        "<artist><id/></artist>",
+    ),
+    "labels": (
+        "<label><id>1</id></label>",
+        "<label><name>A</name></label>",
+        "<label><id/></label>",
+    ),
+    "masters": (
+        '<master id="1"/>',
+        "<master><title>A</title></master>",
+        '<master id=""/>',
+    ),
+    "releases": (
+        '<release id="1" status="Accepted"/>',
+        '<release status="Accepted"/>',
+        '<release id="" status="Accepted"/>',
+    ),
+}
 
 
 def _make_gz(tmp_path: Path) -> Path:
@@ -70,6 +99,11 @@ def _compressible_artists_gz(tmp_path: Path, n: int = 3000) -> Path:
             )
         f.write(b"</artists>")
     return gz
+
+
+def _unstyle(output: str) -> str:
+    """Strip ANSI styling from CLI output (Typer colors its error panels when it detects CI)."""
+    return Text.from_ansi(output).plain
 
 
 def _widen_console(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -154,6 +188,88 @@ class TestNoTracebacks:
         assert "disk full" in result.output
 
 
+class TestRecordErrorOutput:
+    def test_record_error_reaches_output_intact(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A record error keeps its file, chunk and line through the process pool and Rich (#93).
+
+        The id looks like Rich markup, which Rich would otherwise swallow.
+        """
+        _widen_console(monkeypatch)
+        gz = tmp_path / _ENTITY_FILE
+        with gzip.open(gz, "wb") as f:
+            f.write(
+                b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n"
+                b"<artist>\n  <id>1</id>\n</artist>\n"
+                b"<artist>\n  <id>[b]</id>\n</artist>\n"
+                b"</artists>"
+            )
+        result = runner.invoke(
+            app,
+            [
+                "convert",
+                str(gz),
+                "--format",
+                "jsonl",
+                "--keep-xml",
+                "--no-progress",
+                "--output",
+                str(tmp_path / "out"),
+                "--parse-workers",
+                "2",
+            ],
+        )
+
+        # The same chunk parsed in this process gives the message the CLI must print unchanged.
+        xml = str(gz.with_suffix(""))
+        [(start, end)] = get("artists").find_split_points(xml, 1 << 20)
+        with pytest.raises(ValueError) as info:
+            extract_chunk_to_ipc(ChunkArgs("artists", xml, start, end))
+        message = str(info.value)
+        assert message.startswith(
+            f"Invalid <artist> record in {xml} at chunk line 4 (chunk bytes {start}-{end}, id='[b]'): "
+        )
+        assert result.exit_code == 1
+        assert f"Error: {message}" in _unstyle(result.output).splitlines()
+
+    @pytest.mark.parametrize("variant", ["empty", "missing"])
+    @pytest.mark.parametrize("entity", sorted(_RECORDS_WITHOUT_ID))
+    def test_record_without_id_fails(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, entity: str, variant: str
+    ) -> None:
+        """A record without an id stops `convert` with its line instead of vanishing (#94)."""
+        _widen_console(monkeypatch)
+        good, missing, empty = _RECORDS_WITHOUT_ID[entity]
+        gz = tmp_path / f"discogs_20260301_{entity}.xml.gz"
+        with gzip.open(gz, "wt") as f:
+            f.write(
+                f"<?xml version='1.0' encoding='UTF-8'?>\n<{entity}>\n"
+                f"{good}\n{missing if variant == 'missing' else empty}\n</{entity}>"
+            )
+        result = runner.invoke(
+            app,
+            [
+                "convert",
+                str(gz),
+                "--format",
+                "jsonl",
+                "--no-progress",
+                "--output",
+                str(tmp_path / "out"),
+                "--parse-workers",
+                "1",
+            ],
+        )
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        assert re.search(
+            rf"^Error: Invalid <{entity[:-1]}> record in .* at chunk line 2 .*: missing or empty id$",
+            output,
+            re.MULTILINE,
+        ), output
+
+
 class TestWriterAlwaysClosed:
     """writer.close() must run on every exit path: success, user error, or crash."""
 
@@ -176,7 +292,7 @@ class TestWriterAlwaysClosed:
         ):
             result = runner.invoke(app, ["convert", str(gz), "-f", "parquet"])
         assert result.exit_code == expected_exit_code
-        assert expected_message in click.unstyle(result.output)
+        assert expected_message in _unstyle(result.output)
         close.assert_called_once()
 
     def test_convert_closes_writer_once_on_success(self, tmp_path: Path) -> None:
@@ -188,7 +304,7 @@ class TestWriterAlwaysClosed:
         ):
             result = runner.invoke(app, ["convert", str(gz), "-f", "parquet"])
         assert result.exit_code == 0
-        assert "0 artists converted" in click.unstyle(result.output)
+        assert "0 artists converted" in _unstyle(result.output)
         close.assert_called_once()
 
     @pytest.mark.parametrize(
@@ -211,7 +327,7 @@ class TestWriterAlwaysClosed:
         ):
             result = runner.invoke(app, ["load", str(gz)])
         assert result.exit_code == expected_exit_code
-        assert expected_message in click.unstyle(result.output)
+        assert expected_message in _unstyle(result.output)
         mock_writer.close.assert_called_once()
 
     def test_load_closes_writer_once_on_success(self, tmp_path: Path) -> None:
@@ -224,7 +340,7 @@ class TestWriterAlwaysClosed:
         ):
             result = runner.invoke(app, ["load", str(gz)])
         assert result.exit_code == 0
-        assert "0 artists loaded" in click.unstyle(result.output)
+        assert "0 artists loaded" in _unstyle(result.output)
         mock_writer.close.assert_called_once()
 
 
@@ -244,9 +360,7 @@ class TestUncompressedXmlInput:
         ):
             result = runner.invoke(app, [command, str(gz), str(xml)])
         assert result.exit_code == 1
-        assert "uncompressed .xml input is not supported" in click.unstyle(
-            result.output
-        )
+        assert "uncompressed .xml input is not supported" in _unstyle(result.output)
         run.assert_not_called()
         assert xml.read_bytes() == b"<labels></labels>"
 
@@ -278,8 +392,138 @@ class TestUnrecognizedFileExtension:
         ):
             result = runner.invoke(app, [command, str(gz), str(other)])
         assert result.exit_code == 1
-        assert f"{other}: not a .xml.gz dump" in click.unstyle(result.output)
+        assert f"{other}: not a .xml.gz dump" in _unstyle(result.output)
         run.assert_not_called()
+
+
+# Discogs text is full of BBCode-style tags that Rich reads as markup: an unmatched closer
+# raised MarkupError inside the error handler, and matched tags or a bracketed word vanished.
+# Rich also turns emoji codes into emoji, and markup.escape() doubles a trailing backslash.
+_MARKUP_TEXT = (
+    "[b]Bold[/b] [url=https://example.com]link[/url] stray [/b] in [backup] :cd: C:\\"
+)
+
+
+class TestLiteralText:
+    """Exception and path text prints verbatim, never as Rich markup (#103)."""
+
+    @staticmethod
+    def _assert_clean_error(result: Result, message: str) -> None:
+        """Exit 1 through typer.Exit with ``message`` intact, not a MarkupError from the handler."""
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        assert type(result.exception) is SystemExit, repr(result.exception)
+        assert f"Error: {message}\n" in output
+
+    @pytest.mark.parametrize("command", ["convert", "load"])
+    @pytest.mark.parametrize("exc_type", [OutputExistsError, RuntimeError])
+    def test_pipeline_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        command: str,
+        exc_type: type[Exception],
+    ) -> None:
+        gz = _make_gz(tmp_path)
+        _widen_console(monkeypatch)
+        with (
+            patch("discogskit.cli.pipeline.run", side_effect=exc_type(_MARKUP_TEXT)),
+            patch("discogskit.cli.get_writer"),
+        ):
+            result = runner.invoke(app, [command, str(gz)])
+        self._assert_clean_error(result, _MARKUP_TEXT)
+
+    def test_writer_construction_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        gz = _make_gz(tmp_path)
+        _widen_console(monkeypatch)
+        with (
+            patch("discogskit.cli.pipeline.run") as run,
+            patch("discogskit.cli.get_writer", side_effect=RuntimeError(_MARKUP_TEXT)),
+        ):
+            result = runner.invoke(app, ["load", str(gz)])
+        self._assert_clean_error(result, _MARKUP_TEXT)
+        run.assert_not_called()
+
+    def test_undetectable_entity_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        gz = tmp_path / "discogs_20260301_[backup].xml.gz"
+        gz.write_bytes(b"not a real gz")
+        _widen_console(monkeypatch)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = runner.invoke(app, ["convert", str(gz)])
+        self._assert_clean_error(
+            result,
+            f"Cannot detect entity from '{gz.name}'. Expected format: "
+            "discogs_YYYYMMDD_ENTITY.xml.gz (known entities: artists, labels, masters, releases)",
+        )
+        run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "name, kind, message",
+        [
+            ("", "dir", "no .xml.gz files found in {p}"),
+            ("discogs_20260301_artists.xml.gz", "missing", "file not found: {p}"),
+            (
+                "discogs_20260301_artists.xml",
+                "file",
+                "{p}: uncompressed .xml input is not supported; pass the original .xml.gz dump",
+            ),
+            ("discogs_20260301_artists.xml.bz2", "file", "{p}: not a .xml.gz dump"),
+        ],
+        ids=["empty-dir", "missing-file", "uncompressed-xml", "not-xml-gz"],
+    )
+    def test_path_in_input_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        name: str,
+        kind: str,
+        message: str,
+    ) -> None:
+        parent = tmp_path / "dumps [backup]"
+        parent.mkdir()
+        p = parent / name
+        if kind == "file":
+            p.write_bytes(b"not xml")
+        _widen_console(monkeypatch)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = runner.invoke(app, ["convert", str(p)])
+        self._assert_clean_error(result, message.format(p=p))
+        run.assert_not_called()
+
+    def test_path_in_status_output(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        parent = tmp_path / "dumps [backup]"
+        parent.mkdir()
+        gz = parent / "discogs_20260301 [backup]_artists.xml.gz"
+        with gzip.open(gz, "wb") as f:
+            f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
+            f.write(ARTISTS_XML.encode())
+            f.write(b"</artists>")
+        _widen_console(monkeypatch)
+        result = runner.invoke(
+            app,
+            [
+                "convert",
+                str(gz),
+                "-f",
+                "jsonl",
+                "--output",
+                str(tmp_path / "out"),
+                "--parse-workers",
+                "1",
+                "--no-progress",
+            ],
+        )
+        output = _unstyle(result.output)
+        assert result.exit_code == 0, output
+        lines = output.splitlines()
+        assert f"Artists  {gz.name}" in lines
+        assert f"  {'Source':<14s} {gz}" in lines
 
 
 class TestFormatAndCompressionEnums:
@@ -315,7 +559,7 @@ class TestFormatAndCompressionEnums:
                 app, ["convert", str(gz), "-f", fmt, "--compression", compression]
             )
         assert result.exit_code == 1
-        output = click.unstyle(result.output)
+        output = _unstyle(result.output)
         assert f"unsupported compression '{compression}' for {fmt}" in output
         run.assert_not_called()
 
@@ -349,7 +593,7 @@ class TestFormatAndCompressionEnums:
         with patch("discogskit.cli.pipeline.run") as run:
             result = runner.invoke(app, ["convert", str(gz), "--compression", "bogus"])
         assert result.exit_code == 2
-        assert "'bogus'" in click.unstyle(result.output)
+        assert "'bogus'" in _unstyle(result.output)
         run.assert_not_called()
 
     def test_invalid_format_is_a_usage_error(self, tmp_path: Path) -> None:
@@ -357,7 +601,7 @@ class TestFormatAndCompressionEnums:
         with patch("discogskit.cli.pipeline.run") as run:
             result = runner.invoke(app, ["convert", str(gz), "-f", "bogus"])
         assert result.exit_code == 2
-        output = click.unstyle(result.output)
+        output = _unstyle(result.output)
         assert "'bogus'" in output
         assert "'parquet'" in output
         assert "'jsonl'" in output
@@ -394,7 +638,7 @@ class TestOptionMinimums:
         with patch("discogskit.cli.pipeline.run") as run:
             result = runner.invoke(app, [command, str(gz), option, value])
         assert result.exit_code == 2
-        output = click.unstyle(result.output)
+        output = _unstyle(result.output)
         # Typer colors the error panel when it detects CI (GITHUB_ACTIONS).
         assert option in output
         assert "is not in the range x>=1" in output
@@ -411,7 +655,7 @@ class TestOptionMinimums:
         with patch("discogskit.cli.pipeline.run") as run:
             result = runner.invoke(app, ["load", str(gz), option, "1"])
         assert result.exit_code == 2
-        assert "No such option" in click.unstyle(result.output)
+        assert "No such option" in _unstyle(result.output)
         run.assert_not_called()
 
 
@@ -438,7 +682,7 @@ class TestFkOption:
                 "--no-progress",
             ],
         )
-        assert result.exit_code == 0, click.unstyle(result.output)
+        assert result.exit_code == 0, _unstyle(result.output)
 
         conn = sqlite3.connect(db)
         fks = conn.execute("PRAGMA foreign_key_list(artist_aliases)").fetchall()
@@ -470,7 +714,7 @@ class TestCompressionLevel:
                 *extra_args,
             ],
         )
-        assert result.exit_code == 0, click.unstyle(result.output)
+        assert result.exit_code == 0, _unstyle(result.output)
 
     @pytest.mark.parametrize(
         "fmt, compression, low, high",
@@ -574,7 +818,7 @@ class TestCompressionLevel:
             ],
         )
         assert result.exit_code == 1
-        output = click.unstyle(result.output)
+        output = _unstyle(result.output)
         assert "none does not support --compression-level." in output
 
     def test_rejects_level_for_snappy(self, tmp_path: Path) -> None:
@@ -593,7 +837,7 @@ class TestCompressionLevel:
             ],
         )
         assert result.exit_code == 1
-        output = click.unstyle(result.output)
+        output = _unstyle(result.output)
         assert "snappy does not support --compression-level." in output
 
     @pytest.mark.parametrize(
@@ -637,7 +881,7 @@ class TestCompressionLevel:
             ],
         )
         assert result.exit_code == 1
-        assert "is out of range for" in click.unstyle(result.output)
+        assert "is out of range for" in _unstyle(result.output)
 
     def test_format_compression_mismatch_error_still_wins(self, tmp_path: Path) -> None:
         """An invalid format/compression pairing is rejected before --compression-level is even looked at."""
@@ -657,7 +901,7 @@ class TestCompressionLevel:
                 ],
             )
         assert result.exit_code == 1
-        output = click.unstyle(result.output)
+        output = _unstyle(result.output)
         assert "unsupported compression 'zstd' for jsonl" in output
         assert "compression-level" not in output
         run.assert_not_called()
@@ -672,7 +916,7 @@ class TestLoadRejectsPostgreSqlOnlyOptionsForSqlite:
         pipeline_result = pipeline.PipelineResult(None, 0.0, 0.0, 0.0, 0.0, 0)
         with patch("discogskit.cli.pipeline.run", return_value=pipeline_result):
             result = runner.invoke(app, ["load", str(gz), "--dsn", str(db)])
-        assert result.exit_code == 0, click.unstyle(result.output)
+        assert result.exit_code == 0, _unstyle(result.output)
 
     @pytest.mark.parametrize(
         "flag, value",
@@ -705,7 +949,7 @@ class TestLoadRejectsPostgreSqlOnlyOptionsForSqlite:
         pipeline_result = pipeline.PipelineResult(None, 0.0, 0.0, 0.0, 0.0, 0)
         with patch("discogskit.cli.pipeline.run", return_value=pipeline_result):
             result = runner.invoke(app, args)
-        output = click.unstyle(result.output)
+        output = _unstyle(result.output)
         assert result.exit_code == 1, output
         assert flag in output
         assert "can only be used with PostgreSQL, not a SQLite DSN." in output
@@ -719,6 +963,25 @@ class TestLoadRejectsPostgreSqlOnlyOptionsForSqlite:
         result = runner.invoke(
             app, ["load", str(gz), "--dsn", str(db), "--pg-bogus-option"]
         )
-        output = click.unstyle(result.output)
+        output = _unstyle(result.output)
         assert result.exit_code == 2, output
         assert "No such option" in output
+
+
+class TestConsoleScriptEntryPoint:
+    def test_loads_in_a_fresh_interpreter(self) -> None:
+        """Tools that load console scripts through importlib.metadata must get the Typer app.
+
+        A fresh interpreter, because importing ``discogskit.cli`` here (as this module does) sets the
+        package's ``cli`` attribute and hides a ``discogskit:cli.app`` entry point that fails elsewhere.
+        """
+        code = (
+            "from importlib.metadata import entry_points\n"
+            "import typer\n"
+            "app = entry_points(group='console_scripts')['discogskit'].load()\n"
+            "assert isinstance(app, typer.Typer), app\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, check=False, text=True
+        )
+        assert result.returncode == 0, result.stderr

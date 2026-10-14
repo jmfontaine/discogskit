@@ -7,15 +7,19 @@ The schema mirrors the XML structure. The chunk worker that drives ``append_reco
 
 from __future__ import annotations
 
-import warnings
-
 import pyarrow as pa
 from lxml import etree
 
-from discogskit.entities import Cols, EntityDef, register
+from discogskit.entities import (
+    Cols,
+    ElementValueError,
+    EntityDef,
+    parse_bool,
+    register,
+)
 
-_ArtistRec = tuple[int | None, str, str | None, str | None]
-_ExtraArtistRec = tuple[int | None, str, str | None, str | None, str | None]
+_ArtistRec = tuple[int | None, str | None, str | None, str | None]
+_ExtraArtistRec = tuple[int | None, str | None, str | None, str | None, str | None]
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Arrow schemas (single source of truth for column definitions; the first table is the root table)
@@ -192,15 +196,14 @@ def _parse_artist_children(
             if t == "id":
                 aid = int(ch.text) if ch.text else None
             elif t == "name":
-                name = ch.text
+                name = ch.text or ""
             elif t == "anv":
                 anv = ch.text or ""
             elif t == "join":
                 join_text = ch.text or ""
             elif unknown is not None:
                 unknown.add(f"artist/{t}")
-        if name:
-            result.append((aid, name, anv, join_text))
+        result.append((aid, name, anv, join_text))
     return result
 
 
@@ -221,7 +224,7 @@ def _parse_extraartist_children(
             if t == "id":
                 aid = int(ch.text) if ch.text else None
             elif t == "name":
-                name = ch.text
+                name = ch.text or ""
             elif t == "anv":
                 anv = ch.text or ""
             elif t == "role":
@@ -230,8 +233,7 @@ def _parse_extraartist_children(
                 tracks_text = ch.text or ""
             elif unknown is not None:
                 unknown.add(f"extraartist/{t}")
-        if name:
-            result.append((aid, name, anv, role, tracks_text))
+        result.append((aid, name, anv, role, tracks_text))
     return result
 
 
@@ -275,10 +277,9 @@ def append_record(
     cols: Cols, elem: etree._Element, unknown: set[str] | None = None
 ) -> None:
     """Parse a <release> element and append all data to column accumulators."""
-    id_text = elem.get("id")
+    id_text = record_id(elem)
     if not id_text:
-        warnings.warn("skipping <release> with missing id", stacklevel=2)
-        return
+        raise ValueError("missing or empty id")
     rid = int(id_text)
     status = elem.get("status")
 
@@ -316,9 +317,9 @@ def append_record(
             data_quality = child.text or ""
         elif tag == "master_id":
             master_id = int(child.text) if child.text else None
-            attr = child.get("is_main_release")
-            if attr is not None:
-                is_main_release = attr == "true"
+            is_main_release = parse_bool(
+                "is_main_release", child.get("is_main_release")
+            )
         elif tag == "genres":
             genres = [g.text or "" for g in child.findall("genre")]
         elif tag == "styles":
@@ -375,14 +376,8 @@ def append_record(
         elif tag == "videos":
             for vid in child.findall("video"):
                 dur_str = vid.get("duration")
-                vid_dur = None
-                if dur_str:
-                    try:
-                        vid_dur = int(dur_str)
-                    except ValueError:
-                        vid_dur = 0
-                embed_str = vid.get("embed")
-                vid_embed = embed_str == "true" if embed_str else None
+                vid_dur = None if dur_str is None else int(dur_str)
+                vid_embed = parse_bool("embed", vid.get("embed"))
                 vid_title = None
                 vid_desc = None
                 for vch in vid:
@@ -440,9 +435,16 @@ def append_record(
                     for sub in sub_elem:
                         if sub.tag != "track":
                             continue
-                        s_pos, s_ttl, s_dur, s_art, s_ea, _ = _parse_single_track(
+                        s_pos, s_ttl, s_dur, s_art, s_ea, nested = _parse_single_track(
                             sub, unknown
                         )
+                        if nested is not None:
+                            # Only one level of sub-tracks is parsed, so fail rather than drop the deeper ones. The
+                            # worker adds the nested element's line.
+                            raise ElementValueError(
+                                f"<sub_tracks> nested in sub-track {s_pos!r} of track {pos!r}",
+                                nested,
+                            )
                         r_tracks.append(
                             (track_idx, parent, s_pos, s_ttl, s_dur, s_art, s_ea)
                         )
@@ -557,11 +559,17 @@ def append_record(
             te["role"].append(role)
 
 
+def record_id(elem: etree._Element) -> str | None:
+    """Return a <release> element's id as written in the XML, or None when it has none."""
+    return elem.get("id")
+
+
 register(
     EntityDef(
         append_record=append_record,
         fk_column="release_id",
         name="releases",
+        record_id=record_id,
         root_tag="release",
         schemas=SCHEMAS,
         table_weights=TABLE_WEIGHTS,

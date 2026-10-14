@@ -32,24 +32,21 @@ import re
 # inside a value is never mistaken for the end of the tag.
 _ATTRS = rb"(?:\s+[^\s=/>]+\s*=\s*(?:\"[^\"]*\"|'[^']*'))*\s*"
 
-# Constructs that can contain tag-like text that isn't a real element, each matched whole. Shared between the
-# main scan (where an unterminated one is an error) and the trailing-content check (where any number of them,
-# complete, are allowed after the last record).
+# The constructs allowed around the container's closing tag after the last record, each matched whole. The main
+# scan in ``_compile_pattern`` matches these, CDATA sections and DOCTYPE declarations with its own inline copies.
 _COMMENT = rb"<!--(?:[^-]*(?:-(?!->)[^-]*)*-->)"
-_CDATA = rb"<!\[CDATA\[(?:[^\]]*(?:\](?!\]>)[^\]]*)*\]\]>)"
-_DOCTYPE = rb"<!DOCTYPE(?:[^\[>]*(?:\[[^\]]*\])?\s*>)"
 _PI = rb"<\?(?:[^?]*(?:\?(?!>)[^?]*)*\?>)"
 
 # XML's own whitespace production (S ::= (#x20 | #x9 | #xD | #xA)+), not Python's broader \s (which also matches
 # \f and \v, neither of which XML allows).
 _XML_WS = rb"[\x20\x09\x0d\x0a]"
 
-# Before the closing tag: any mix of whitespace and complete comments/CDATA/PI/DOCTYPE. After it: XML's own
-# ``Misc`` production (comments, PIs, and whitespace — not CDATA or DOCTYPE, which aren't valid there either).
-_MISC = rb"(?:\s+|" + _COMMENT + rb"|" + _PI + rb")*"
-_LEADING_TRAILING_MARKUP = (
-    rb"(?:\s+|" + _COMMENT + rb"|" + _CDATA + rb"|" + _DOCTYPE + rb"|" + _PI + rb")*"
-)
+# What may surround the container's closing tag: whitespace, comments and processing instructions. After the closer
+# that's XML's ``Misc`` production; before it, a CDATA section or DOCTYPE would be content no chunk carries or
+# markup XML doesn't allow there. Each repetition consumes exactly one whitespace byte so no two ways of matching
+# the same bytes exist: with ``\s+`` instead, a failed match tried every way to split a whitespace run, which took
+# exponential time in its length (issue #104).
+_MISC = rb"(?:" + _XML_WS + rb"|" + _COMMENT + rb"|" + _PI + rb")*"
 
 
 def _compile_pattern(tag: bytes) -> re.Pattern[bytes]:
@@ -80,14 +77,21 @@ def _compile_pattern(tag: bytes) -> re.Pattern[bytes]:
     )
 
 
-def _scan_records(mm: mmap.mmap, tag: bytes, container: bytes) -> tuple[int, list[int]]:
-    """Scan the whole file for ``<tag>`` records, tracking nesting depth.
+def _scan_records(
+    mm: mmap.mmap, tag: bytes, container: bytes, target_chunk_bytes: int
+) -> tuple[list[tuple[int, int]], int]:
+    """Scan the whole file for ``<tag>`` records, tracking nesting depth, and split them into byte ranges.
 
-    Returns the byte offset of the first top-level record and the byte offset right after every complete one —
-    a closing tag that brings the depth back to zero, or a self-closing tag found at depth zero. Raises
-    ``ValueError`` for unsupported content before the first record (checked as soon as the scan reaches it, see
-    ``_check_leading_content``), a closing tag with no matching opener, an unclosed element at end of file,
-    malformed or unterminated markup, or no ``<tag>`` elements at all.
+    A complete top-level record ends at a closing tag that brings the depth back to zero, or at a self-closing tag
+    found at depth zero. Each range starts at the first record or where the previous range ended, and ends at the
+    first record end at least ``target_chunk_bytes`` past its start, except the last, which ends after the last
+    record. Only the open range's start is kept, not every record's end: the releases dump has tens of millions
+    of records (issue #122).
+
+    Returns the ranges and the byte offset right after the last record. Raises ``ValueError`` for unsupported
+    content before the first record (checked as soon as the scan reaches it, see ``_check_leading_content``), a
+    closing tag with no matching opener, an unclosed element at end of file, malformed or unterminated markup, or
+    no ``<tag>`` elements at all.
     """
     pattern = _compile_pattern(tag)
     group_index = pattern.groupindex
@@ -97,44 +101,50 @@ def _scan_records(mm: mmap.mmap, tag: bytes, container: bytes) -> tuple[int, lis
     bad_groups = frozenset(v for k, v in group_index.items() if k.startswith("bad_"))
 
     depth = 0
-    data_start = -1
-    boundaries: list[int] = []
+    range_start = -1
+    data_end = -1
+    splits: list[tuple[int, int]] = []
     for m in pattern.finditer(mm):
         g = m.lastindex
-        if data_start < 0:
+        if range_start < 0:
             # Validate what precedes the first record before reading further (issue #79): a releases file is
             # tens of GB, and a record tag inside unsupported content (e.g. a container attribute value) must be
             # reported as that content, not as whatever structural error it causes later.
             if g == open_group or g == empty_group:
-                data_start = m.start()
-                _check_leading_content(mm, data_start, tag, container)
+                range_start = m.start()
+                _check_leading_content(mm, range_start, tag, container)
             elif (g == close_group or g in bad_groups) and m.start() > 0:
                 _check_leading_content(mm, m.start(), tag, container)
         if g == open_group:
             depth += 1
-        elif g == close_group:
+            continue
+        if g == close_group:
             depth -= 1
-            if depth == 0:
-                boundaries.append(m.end())
-            elif depth < 0:
+            if depth < 0:
                 raise ValueError(
                     f"</{tag.decode()}> at byte {m.start()} has no matching <{tag.decode()}>"
                 )
-        elif g == empty_group:
-            if depth == 0:
-                boundaries.append(m.end())
-        elif g in bad_groups:
-            raise ValueError(
-                f"Malformed or unterminated markup at byte {m.start()}: "
-                f"{mm[m.start() : m.start() + 40]!r}"
-            )
-        # A comment, CDATA section, processing instruction or DOCTYPE matched whole: no depth change.
+        elif g != empty_group:
+            if g in bad_groups:
+                raise ValueError(
+                    f"Malformed or unterminated markup at byte {m.start()}: "
+                    f"{mm[m.start() : m.start() + 40]!r}"
+                )
+            # A comment, CDATA section, processing instruction or DOCTYPE matched whole: no depth change.
+            continue
+        if depth == 0:
+            data_end = m.end()
+            if data_end - range_start >= target_chunk_bytes:
+                splits.append((range_start, data_end))
+                range_start = data_end
 
     if depth != 0:
         raise ValueError(f"{depth} unclosed <{tag.decode()}> element(s) at end of file")
-    if data_start < 0:
+    if range_start < 0:
         raise ValueError(f"No <{tag.decode()}> elements found")
-    return data_start, boundaries
+    if range_start < data_end:
+        splits.append((range_start, data_end))
+    return splits, data_end
 
 
 # What the worker's injected envelope reproduces exactly before the first record (issue #79): XML whitespace, at most
@@ -224,16 +234,9 @@ def _check_leading_content(
 
 def _trailing_content_pattern(container: bytes) -> re.Pattern[bytes]:
     """Compile a pattern for exactly what may follow the last record: the container's own closing tag — not any
-    tag, not duplicated, not missing — preceded and followed by whatever markup is actually valid there.
+    tag, not duplicated, not missing — preceded and followed by whitespace, comments and processing instructions.
     """
-    return re.compile(
-        _LEADING_TRAILING_MARKUP
-        + rb"</"
-        + re.escape(container)
-        + _XML_WS
-        + rb"*>"
-        + _MISC
-    )
+    return re.compile(_MISC + rb"</" + re.escape(container) + _XML_WS + rb"*>" + _MISC)
 
 
 def _check_trailing_content(
@@ -265,7 +268,7 @@ def find_split_points(
     ``container`` is the enclosing element (``<container>...<tag/>...</container>``): its closing tag is the
     only thing that may follow the last record.
     """
-    # A negative size makes the search below step backwards forever.
+    # Zero or less would silently put every record in a range of its own.
     if target_chunk_bytes <= 0:
         raise ValueError(
             f"target_chunk_bytes must be positive, got {target_chunk_bytes}"
@@ -276,17 +279,10 @@ def find_split_points(
         with open(file_path, "rb") as f:
             mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
             try:
-                data_start, boundaries = _scan_records(mm, tag_bytes, container_bytes)
-                data_end = boundaries[-1]
+                splits, data_end = _scan_records(
+                    mm, tag_bytes, container_bytes, target_chunk_bytes
+                )
                 _check_trailing_content(mm, data_end, tag_bytes, container_bytes)
-                splits = []
-                pos = data_start
-                for boundary in boundaries:
-                    if boundary - pos >= target_chunk_bytes:
-                        splits.append((pos, boundary))
-                        pos = boundary
-                if pos < data_end:
-                    splits.append((pos, data_end))
                 return splits
             finally:
                 mm.close()

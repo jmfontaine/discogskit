@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
+
+import pytest
 
 from discogskit.entities import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
@@ -46,6 +49,97 @@ class TestReleasesParsing:
         assert ea.num_rows == 1
         assert ea.column("role").to_pylist() == ["Producer"]
         assert ea.column("tracks").to_pylist() == ["A1"]
+
+    def test_artists_without_name_kept(self, tmp_path):
+        """Artists with no <name> keep their row with a NULL name, and <name/> gives "" (#82)."""
+        xml = (
+            '<release id="1" status="Accepted">\n'
+            "  <artists>\n"
+            "    <artist><id>50</id><anv>A</anv><join>&amp;</join></artist>\n"
+            "    <artist><id>51</id><name/><anv/><join>,</join></artist>\n"
+            "  </artists>\n"
+            "  <extraartists>\n"
+            "    <artist><id>60</id><anv>E</anv><role>Mix</role><tracks>A1</tracks></artist>\n"
+            "    <artist><id>61</id><name></name><role>Producer</role></artist>\n"
+            "  </extraartists>\n"
+            "  <tracklist>\n"
+            "    <track><position>1</position>\n"
+            "      <artists><artist><id>70</id><join>x</join></artist></artists>\n"
+            "      <extraartists><artist><id>71</id><name/><role>Vocals</role></artist></extraartists>\n"
+            "      <sub_tracks><track><position>1a</position>\n"
+            "        <artists><artist><id>72</id><name/></artist></artists>\n"
+            "        <extraartists><artist><id>73</id><role>Bass</role></artist></extraartists>\n"
+            "      </track></sub_tracks>\n"
+            "    </track>\n"
+            "  </tracklist>\n"
+            "</release>\n"
+        )
+        f = tmp_path / "nameless_artists.xml"
+        f.write_text(xml)
+
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("releases", str(f), 0, os.path.getsize(f))
+        )
+        tables = ipc_to_tables(ipc_dict, SCHEMAS)
+
+        assert tables["release_artists"].to_pylist() == [
+            {"release_id": 1, "artist_id": 50, "anv": "A", "join": "&", "name": None},
+            {"release_id": 1, "artist_id": 51, "anv": "", "join": ",", "name": ""},
+        ]
+        assert tables["release_extraartists"].to_pylist() == [
+            {
+                "release_id": 1,
+                "artist_id": 60,
+                "anv": "E",
+                "name": None,
+                "role": "Mix",
+                "tracks": "A1",
+            },
+            {
+                "release_id": 1,
+                "artist_id": 61,
+                "anv": None,
+                "name": "",
+                "role": "Producer",
+                "tracks": None,
+            },
+        ]
+        assert tables["release_track_artists"].to_pylist() == [
+            {
+                "release_id": 1,
+                "track_idx": 0,
+                "artist_id": 70,
+                "anv": None,
+                "join": "x",
+                "name": None,
+            },
+            {
+                "release_id": 1,
+                "track_idx": 1,
+                "artist_id": 72,
+                "anv": None,
+                "join": None,
+                "name": "",
+            },
+        ]
+        assert tables["release_track_extraartists"].to_pylist() == [
+            {
+                "release_id": 1,
+                "track_idx": 0,
+                "artist_id": 71,
+                "anv": None,
+                "name": "",
+                "role": "Vocals",
+            },
+            {
+                "release_id": 1,
+                "track_idx": 1,
+                "artist_id": 73,
+                "anv": None,
+                "name": None,
+                "role": "Bass",
+            },
+        ]
 
     def test_labels(self, releases_xml_file):
         tables = self._parse(releases_xml_file)
@@ -98,6 +192,51 @@ class TestReleasesParsing:
         assert t.column("position").to_pylist() == ["A1", "A1.1"]
         assert t.column("title").to_pylist() == ["Track One", "Sub Track"]
 
+    def test_sub_tracks_nested_in_a_sub_track_fail(self, tmp_path):
+        """A <sub_tracks> inside a sub-track fails instead of vanishing with everything below it (#96)."""
+        xml = (
+            '<release id="7" status="Accepted">\n'
+            "  <tracklist>\n"
+            "    <track><position>1</position>\n"
+            "      <sub_tracks>\n"
+            "        <track><position>1a</position>\n"
+            "          <sub_tracks>\n"
+            "            <track><position>1a.i</position></track>\n"
+            "          </sub_tracks>\n"
+            "        </track>\n"
+            "      </sub_tracks>\n"
+            "    </track>\n"
+            "  </tracklist>\n"
+            "</release>\n"
+        )
+        f = tmp_path / "nested_sub_tracks.xml"
+        f.write_text(xml)
+
+        with pytest.raises(
+            ValueError,
+            match=r"^Invalid <release> record in .* at chunk line 1 \(chunk bytes \d+-\d+, id='7'\):"
+            r" <sub_tracks> nested in sub-track '1a' of track '1' at chunk line 6$",
+        ):
+            extract_chunk_to_ipc(ChunkArgs("releases", str(f), 0, os.path.getsize(f)))
+
+    def test_nested_sub_tracks_line_past_libxml2_limit(self, tmp_path):
+        """The nested <sub_tracks> line is its own past line 65535, where lxml reports its parent's line 1 (#96)."""
+        xml = (
+            '<release id="7" status="Accepted"><tracklist><track><position>1</position>'
+            "<sub_tracks><track><position>1a</position><title>"
+            + "\n" * 70_000
+            + "</title><sub_tracks/></track></sub_tracks></track></tracklist></release>\n"
+        )
+        f = tmp_path / "nested_sub_tracks.xml"
+        f.write_text(xml)
+
+        with pytest.raises(
+            ValueError,
+            match=r"^Invalid <release> record in .* at chunk line 1 \(chunk bytes \d+-\d+, id='7'\):"
+            r" <sub_tracks> nested in sub-track '1a' of track '1' at chunk line 70001$",
+        ):
+            extract_chunk_to_ipc(ChunkArgs("releases", str(f), 0, os.path.getsize(f)))
+
     def test_track_artists(self, releases_xml_file):
         tables = self._parse(releases_xml_file)
         ta = tables["release_track_artists"]
@@ -121,23 +260,21 @@ class TestReleasesParsing:
         for name, table in tables.items():
             assert table.schema == SCHEMAS[name]
 
-    def test_missing_id_skipped(self, tmp_path):
-        """Release without id attribute is skipped with a warning."""
-        xml = '<release status="Accepted"><title>No ID</title></release>\n'
+    @pytest.mark.parametrize("id_attr", ["", ' id=""'])
+    def test_missing_id_fails(self, tmp_path, id_attr):
+        """A release without an id fails with its line instead of vanishing (#94)."""
+        xml = (
+            '<release id="1" status="Accepted"><title>A</title></release>\n'
+            f'<release{id_attr} status="Accepted"><title>No ID</title></release>\n'
+        )
         f = tmp_path / "no_id.xml"
         f.write_text(xml)
 
-        import warnings
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            ipc_dict = extract_chunk_to_ipc(
-                ChunkArgs("releases", str(f), 0, os.path.getsize(f))
-            )
-            tables = ipc_to_tables(ipc_dict, SCHEMAS)
-
-        assert tables["releases"].num_rows == 0
-        assert any("missing id" in str(warning.message) for warning in w)
+        with pytest.raises(
+            ValueError,
+            match=r"^Invalid <release> record in .* at chunk line 2 .*: missing or empty id$",
+        ):
+            extract_chunk_to_ipc(ChunkArgs("releases", str(f), 0, os.path.getsize(f)))
 
     def test_missing_is_null_and_empty_is_empty_string(self, tmp_path):
         """Absent elements/attributes are NULL; present but empty ones are "" (#21)."""
@@ -175,29 +312,6 @@ class TestReleasesParsing:
         video = tables["release_videos"].to_pylist()[0]
         assert (video["title"], video["description"]) == ("", None)
         assert (video["duration"], video["embed"]) == (None, None)
-
-    def test_invalid_video_duration_fallback(self, tmp_path):
-        """Video with non-integer duration falls back to 0."""
-        xml = (
-            '<release id="1" status="Accepted">\n'
-            "  <title>Test</title>\n"
-            "  <data_quality>Correct</data_quality>\n"
-            "  <videos>\n"
-            '    <video src="http://x" duration="abc" embed="true">\n'
-            "      <title>V</title><description>D</description>\n"
-            "    </video>\n"
-            "  </videos>\n"
-            "</release>\n"
-        )
-        f = tmp_path / "bad_dur.xml"
-        f.write_text(xml)
-
-        ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("releases", str(f), 0, os.path.getsize(f))
-        )
-        tables = ipc_to_tables(ipc_dict, SCHEMAS)
-
-        assert tables["release_videos"].column("duration").to_pylist() == [0]
 
     def test_non_matching_tags_skipped(self, tmp_path):
         """Non-matching sibling tags in artists, extraartists, companies, tracklist, sub_tracks are skipped."""
@@ -242,3 +356,74 @@ class TestReleasesParsing:
         assert tables["release_extraartists"].num_rows == 1
         assert tables["release_companies"].num_rows == 1
         assert tables["release_tracks"].num_rows == 2  # 1 parent + 1 sub
+
+
+class TestReleaseTypedValues:
+    """Video duration, embed and is_main_release are stored typed, missing is NULL, and anything else fails (#95)."""
+
+    @staticmethod
+    def _release(tmp_path, master_id_attrs: str, video_attrs: str) -> dict:
+        f = tmp_path / "release.xml"
+        f.write_text(
+            f'<release id="1" status="Accepted"><master_id{master_id_attrs}>5</master_id>'
+            f'<videos><video src="http://x"{video_attrs}/></videos></release>\n'
+        )
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("releases", str(f), 0, os.path.getsize(f))
+        )
+        return ipc_to_tables(ipc_dict, SCHEMAS)
+
+    @pytest.mark.parametrize(
+        "attr, expected",
+        [(' duration="0"', 0), (' duration="245"', 245), ("", None)],
+        ids=["zero", "positive", "missing"],
+    )
+    def test_duration(self, tmp_path, attr, expected):
+        tables = self._release(tmp_path, "", attr)
+        assert tables["release_videos"].column("duration").to_pylist() == [expected]
+
+    @pytest.mark.parametrize(
+        "attr, expected",
+        [(' embed="true"', True), (' embed="false"', False), ("", None)],
+        ids=["true", "false", "missing"],
+    )
+    def test_embed(self, tmp_path, attr, expected):
+        tables = self._release(tmp_path, "", attr)
+        assert tables["release_videos"].column("embed").to_pylist() == [expected]
+
+    @pytest.mark.parametrize("value", ["abc", "", "1.5"])
+    def test_invalid_duration_fails(self, tmp_path, value):
+        with pytest.raises(
+            ValueError,
+            match=rf"^Invalid <release> record .*: invalid literal for int\(\) with base 10: {re.escape(repr(value))}$",
+        ):
+            self._release(tmp_path, "", f' duration="{value}"')
+
+    @pytest.mark.parametrize("value", ["True", "1", "yes", ""])
+    def test_invalid_embed_fails(self, tmp_path, value):
+        with pytest.raises(
+            ValueError,
+            match=rf"^Invalid <release> record .*: invalid embed {re.escape(repr(value))}, expected 'true' or 'false'$",
+        ):
+            self._release(tmp_path, "", f' embed="{value}"')
+
+    @pytest.mark.parametrize("value", ["True", "1", "yes", ""])
+    def test_invalid_is_main_release_fails(self, tmp_path, value):
+        with pytest.raises(
+            ValueError,
+            match=rf"^Invalid <release> record .*: invalid is_main_release {re.escape(repr(value))}, expected 'true' or 'false'$",
+        ):
+            self._release(tmp_path, f' is_main_release="{value}"', "")
+
+    @pytest.mark.parametrize(
+        "attr, expected",
+        [
+            (' is_main_release="true"', True),
+            (' is_main_release="false"', False),
+            ("", None),
+        ],
+        ids=["true", "false", "missing"],
+    )
+    def test_is_main_release(self, tmp_path, attr, expected):
+        tables = self._release(tmp_path, attr, "")
+        assert tables["releases"].column("is_main_release").to_pylist() == [expected]

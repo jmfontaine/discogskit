@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
+
+import pytest
 
 from discogskit.entities import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
@@ -87,23 +90,21 @@ class TestMastersParsing:
         for name, table in tables.items():
             assert table.schema == SCHEMAS[name]
 
-    def test_missing_id_skipped(self, tmp_path):
-        """Master element without id attribute is skipped with a warning."""
-        xml = "<master><title>No ID</title><data_quality>Correct</data_quality></master>\n"
+    @pytest.mark.parametrize("id_attr", ["", ' id=""'])
+    def test_missing_id_fails(self, tmp_path, id_attr):
+        """A master without an id fails with its line instead of vanishing (#94)."""
+        xml = (
+            '<master id="1"><title>A</title></master>\n'
+            f"<master{id_attr}><title>No ID</title></master>\n"
+        )
         f = tmp_path / "no_id.xml"
         f.write_text(xml)
 
-        import warnings
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            ipc_dict = extract_chunk_to_ipc(
-                ChunkArgs("masters", str(f), 0, os.path.getsize(f))
-            )
-            tables = ipc_to_tables(ipc_dict, SCHEMAS)
-
-        assert tables["masters"].num_rows == 0
-        assert any("missing id" in str(warning.message) for warning in w)
+        with pytest.raises(
+            ValueError,
+            match=r"^Invalid <master> record in .* at chunk line 2 .*: missing or empty id$",
+        ):
+            extract_chunk_to_ipc(ChunkArgs("masters", str(f), 0, os.path.getsize(f)))
 
     def test_non_matching_tags_skipped(self, tmp_path):
         """Non-<artist> siblings in <artists> and non-<video> in <videos> are skipped."""
@@ -133,3 +134,50 @@ class TestMastersParsing:
 
         assert tables["master_artists"].num_rows == 1
         assert tables["master_videos"].num_rows == 1
+
+
+class TestMasterVideoTypedValues:
+    """A video's duration and embed are stored typed, missing is NULL, and anything else fails (#95)."""
+
+    @staticmethod
+    def _video(tmp_path, attrs: str) -> dict:
+        f = tmp_path / "video.xml"
+        f.write_text(
+            f'<master id="1"><videos><video src="http://x"{attrs}/></videos></master>\n'
+        )
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("masters", str(f), 0, os.path.getsize(f))
+        )
+        return ipc_to_tables(ipc_dict, SCHEMAS)["master_videos"].to_pylist()[0]
+
+    @pytest.mark.parametrize(
+        "attr, expected",
+        [(' duration="0"', 0), (' duration="245"', 245), ("", None)],
+        ids=["zero", "positive", "missing"],
+    )
+    def test_duration(self, tmp_path, attr, expected):
+        assert self._video(tmp_path, attr)["duration"] == expected
+
+    @pytest.mark.parametrize(
+        "attr, expected",
+        [(' embed="true"', True), (' embed="false"', False), ("", None)],
+        ids=["true", "false", "missing"],
+    )
+    def test_embed(self, tmp_path, attr, expected):
+        assert self._video(tmp_path, attr)["embed"] is expected
+
+    @pytest.mark.parametrize("value", ["abc", "", "1.5"])
+    def test_invalid_duration_fails(self, tmp_path, value):
+        with pytest.raises(
+            ValueError,
+            match=rf"^Invalid <master> record .*: invalid literal for int\(\) with base 10: {re.escape(repr(value))}$",
+        ):
+            self._video(tmp_path, f' duration="{value}"')
+
+    @pytest.mark.parametrize("value", ["True", "1", "yes", ""])
+    def test_invalid_embed_fails(self, tmp_path, value):
+        with pytest.raises(
+            ValueError,
+            match=rf"^Invalid <master> record .*: invalid embed {re.escape(repr(value))}, expected 'true' or 'false'$",
+        ):
+            self._video(tmp_path, f' embed="{value}"')
