@@ -48,6 +48,10 @@ class JSONLWriter:
         compression_level: int | None = None,
         overwrite: bool = False,
     ) -> None:
+        if compression != "none" and compression not in _COMPRESSED_EXT:
+            raise ValueError(
+                f"Unsupported JSONL compression {compression!r}: expected bzip2, gzip, none."
+            )
         self._output_dir = Path(output_dir)
         self._compression = compression
         self._compression_level = compression_level

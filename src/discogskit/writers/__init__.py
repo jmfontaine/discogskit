@@ -86,7 +86,8 @@ def get_writer(
             write_workers=write_workers,
         )
 
-    if dsn.startswith("sqlite:///") or dsn.endswith((".db", ".sqlite", ".sqlite3")):
+    sqlite_path = _sqlite_path(dsn)
+    if sqlite_path is not None:
         passed = {
             "create_schema": create_schema,
             "index_workers": index_workers,
@@ -106,13 +107,40 @@ def get_writer(
 
         from discogskit.writers.sqlite import SQLiteWriter
 
-        path = dsn.removeprefix("sqlite:///") if dsn.startswith("sqlite:///") else dsn
-        return SQLiteWriter(path, fk=fk, overwrite=overwrite)
+        return SQLiteWriter(sqlite_path, fk=fk, overwrite=overwrite)
 
     raise ValueError(
         f"Unsupported database DSN: {_redact_dsn(dsn)!r}. "
-        f"Expected postgresql://, postgres:// or a SQLite path (.db/.sqlite/.sqlite3)."
+        f"Expected postgresql://, postgres:// or a SQLite path ({'/'.join(_SQLITE_SUFFIXES)})."
     )
+
+
+_SQLITE_PREFIX = "sqlite:///"
+_SQLITE_SUFFIXES = (".db", ".sqlite", ".sqlite3")
+
+
+def _sqlite_path(dsn: str) -> str | None:
+    """The file a SQLite DSN names, or None if ``dsn`` isn't one. Raises ValueError, before any file exists, if it's
+    malformed: SQLite would otherwise create a file with an unintended name, or fail opaquely.
+    """
+    if dsn[: len("sqlite:")].lower() == "sqlite:":
+        if dsn[: len(_SQLITE_PREFIX)].lower() != _SQLITE_PREFIX:
+            raise ValueError(
+                f"Invalid SQLite DSN: {_redact_dsn(dsn)!r}. Use sqlite:///<path>: sqlite:///discogs.db for a "
+                "relative path, sqlite:////data/discogs.db for an absolute one."
+            )
+        path = dsn[len(_SQLITE_PREFIX) :]
+    elif re.match(_URL_SCHEME, dsn) or not dsn.endswith(_SQLITE_SUFFIXES):
+        return None
+    else:
+        path = dsn
+    if not path:
+        raise ValueError(f"Invalid SQLite DSN: {dsn!r} has no path.")
+    if "?" in path:
+        raise ValueError(
+            f"Invalid SQLite DSN: {_redact_dsn(dsn)!r}. The path contains '?': query parameters aren't supported."
+        )
+    return path
 
 
 # A URL's scheme, at the start: "://" inside a keyword/value DSN (e.g. in a password) doesn't make it a URL.

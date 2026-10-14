@@ -43,6 +43,39 @@ class TestGetWriter:
         assert isinstance(writer, SQLiteWriter)
         writer.close()
 
+    def test_sqlite_dsn_relative_path(self, monkeypatch, tmp_path):
+        """``sqlite:///out.db`` is relative to the working directory, as in SQLAlchemy."""
+        monkeypatch.chdir(tmp_path)
+        get_writer("sqlite:///out.db").close()
+        assert [p.name for p in tmp_path.iterdir()] == ["out.db"]
+
+    @pytest.mark.parametrize(
+        "dsn, reason",
+        [
+            ("sqlite:out.db", "Use sqlite:///<path>"),
+            ("sqlite://out.db", "Use sqlite:///<path>"),
+            ("SQLite://out.db", "Use sqlite:///<path>"),
+            ("sqlite:///", "no path"),
+            ("sqlite:///out.db?mode=ro", "contains '?'"),
+            ("out.db?mode=ro.db", "contains '?'"),
+        ],
+    )
+    def test_malformed_sqlite_dsn_creates_no_file(
+        self, monkeypatch, tmp_path, dsn, reason
+    ):
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ValueError, match="Invalid SQLite DSN") as excinfo:
+            get_writer(dsn)
+        assert reason in str(excinfo.value)
+        assert list(tmp_path.iterdir()) == []
+
+    def test_other_url_with_sqlite_suffix_is_unsupported(self, monkeypatch, tmp_path):
+        """A URL isn't a SQLite path just because it ends in .db."""
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ValueError, match="Unsupported database DSN"):
+            get_writer("mysql://localhost/discogs.db")
+        assert list(tmp_path.iterdir()) == []
+
     def test_sqlite_accepts_cli_defaults_for_pg_only_options(self, tmp_path):
         """CLI defaults the user never touched must not trigger the PostgreSQL-only check."""
         db_path = str(tmp_path / "test.db")

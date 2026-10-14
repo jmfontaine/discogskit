@@ -210,8 +210,10 @@ still not rolled back.
 | SQLite | 3.x |
 | PostgreSQL | 14+ |
 
-`--dsn` accepts `postgresql://` or `postgres://` (both work identically) for PostgreSQL, or a `sqlite:///` DSN
-or a path ending in `.db`, `.sqlite`, or `.sqlite3` for SQLite.
+`--dsn` accepts `postgresql://` or `postgres://` (both work identically) for PostgreSQL. For SQLite, it accepts
+`sqlite:///<path>` (`sqlite:///discogs.db` is relative to the current directory, `sqlite:////data/discogs.db` is
+absolute) or a plain path ending in `.db`, `.sqlite`, or `.sqlite3`. Other `sqlite:` forms and paths containing `?`
+(SQLite URI parameters such as `?mode=ro` aren't supported) are rejected before any file is created.
 
 <details>
 <summary>Full command help</summary>
