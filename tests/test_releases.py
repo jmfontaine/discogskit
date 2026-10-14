@@ -50,6 +50,97 @@ class TestReleasesParsing:
         assert ea.column("role").to_pylist() == ["Producer"]
         assert ea.column("tracks").to_pylist() == ["A1"]
 
+    def test_artists_without_name_kept(self, tmp_path):
+        """Artists with no <name> keep their row with a NULL name, and <name/> gives "" (#82)."""
+        xml = (
+            '<release id="1" status="Accepted">\n'
+            "  <artists>\n"
+            "    <artist><id>50</id><anv>A</anv><join>&amp;</join></artist>\n"
+            "    <artist><id>51</id><name/><anv/><join>,</join></artist>\n"
+            "  </artists>\n"
+            "  <extraartists>\n"
+            "    <artist><id>60</id><anv>E</anv><role>Mix</role><tracks>A1</tracks></artist>\n"
+            "    <artist><id>61</id><name></name><role>Producer</role></artist>\n"
+            "  </extraartists>\n"
+            "  <tracklist>\n"
+            "    <track><position>1</position>\n"
+            "      <artists><artist><id>70</id><join>x</join></artist></artists>\n"
+            "      <extraartists><artist><id>71</id><name/><role>Vocals</role></artist></extraartists>\n"
+            "      <sub_tracks><track><position>1a</position>\n"
+            "        <artists><artist><id>72</id><name/></artist></artists>\n"
+            "        <extraartists><artist><id>73</id><role>Bass</role></artist></extraartists>\n"
+            "      </track></sub_tracks>\n"
+            "    </track>\n"
+            "  </tracklist>\n"
+            "</release>\n"
+        )
+        f = tmp_path / "nameless_artists.xml"
+        f.write_text(xml)
+
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs("releases", str(f), 0, os.path.getsize(f))
+        )
+        tables = ipc_to_tables(ipc_dict, SCHEMAS)
+
+        assert tables["release_artists"].to_pylist() == [
+            {"release_id": 1, "artist_id": 50, "anv": "A", "join": "&", "name": None},
+            {"release_id": 1, "artist_id": 51, "anv": "", "join": ",", "name": ""},
+        ]
+        assert tables["release_extraartists"].to_pylist() == [
+            {
+                "release_id": 1,
+                "artist_id": 60,
+                "anv": "E",
+                "name": None,
+                "role": "Mix",
+                "tracks": "A1",
+            },
+            {
+                "release_id": 1,
+                "artist_id": 61,
+                "anv": None,
+                "name": "",
+                "role": "Producer",
+                "tracks": None,
+            },
+        ]
+        assert tables["release_track_artists"].to_pylist() == [
+            {
+                "release_id": 1,
+                "track_idx": 0,
+                "artist_id": 70,
+                "anv": None,
+                "join": "x",
+                "name": None,
+            },
+            {
+                "release_id": 1,
+                "track_idx": 1,
+                "artist_id": 72,
+                "anv": None,
+                "join": None,
+                "name": "",
+            },
+        ]
+        assert tables["release_track_extraartists"].to_pylist() == [
+            {
+                "release_id": 1,
+                "track_idx": 0,
+                "artist_id": 71,
+                "anv": None,
+                "name": "",
+                "role": "Vocals",
+            },
+            {
+                "release_id": 1,
+                "track_idx": 1,
+                "artist_id": 73,
+                "anv": None,
+                "name": None,
+                "role": "Bass",
+            },
+        ]
+
     def test_labels(self, releases_xml_file):
         tables = self._parse(releases_xml_file)
         lb = tables["release_labels"]
