@@ -10,7 +10,7 @@ from typing import NoReturn
 import pyarrow as pa
 import pytest
 
-from discogskit.entities import ChunkArgs
+from discogskit.entities import ChunkArgs, get
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers import _staging
 from discogskit.writers._ipc import deserialize_batch
@@ -257,6 +257,44 @@ RELEASES_XML = """\
 </release>
 """
 
+# Non-ASCII text in every form the XML can carry it: raw UTF-8 (including a 4-byte emoji), predefined entities,
+# decimal and hex character references, and CDATA holding markup characters.
+UNICODE_ARTISTS_XML = """\
+<artist>
+  <id>1</id>
+  <name>Björk &amp; 坂本龍一 🎵</name>
+  <realname>Bj&#246;rk Gu&#xF0;mundsd&#243;ttir</realname>
+  <profile><![CDATA[Sings <i>"Jóga"</i> & more]]> &#x2014; &lt;©&gt;</profile>
+  <data_quality>Correct</data_quality>
+  <namevariations>
+    <name>ビョーク</name>
+    <name><![CDATA[<Björk>]]></name>
+  </namevariations>
+  <urls>
+    <url>https://example.com/bj%C3%B6rk?a=1&amp;b=Ω</url>
+  </urls>
+  <aliases>
+    <name id="10">Sugarcubes &#x1F3B5;</name>
+  </aliases>
+</artist>
+"""
+
+# The rows UNICODE_ARTISTS_XML must produce, by table; the other artists tables are empty.
+UNICODE_ARTISTS_ROWS: dict[str, list[dict]] = {
+    "artist_aliases": [{"alias_id": 10, "artist_id": 1, "name": "Sugarcubes 🎵"}],
+    "artists": [
+        {
+            "data_quality": "Correct",
+            "id": 1,
+            "name": "Björk & 坂本龍一 🎵",
+            "namevariations": ["ビョーク", "<Björk>"],
+            "profile": 'Sings <i>"Jóga"</i> & more — <©>',
+            "realname": "Björk Guðmundsdóttir",
+            "urls": ["https://example.com/bj%C3%B6rk?a=1&b=Ω"],
+        }
+    ],
+}
+
 
 # ------------------------------------------------------------------------------------------------------------------------
 # XML file fixtures (write to tmp_path with proper envelope)
@@ -290,6 +328,29 @@ def releases_xml_file(tmp_path):
     p = tmp_path / "releases.xml"
     p.write_text(RELEASES_XML)
     return p
+
+
+@pytest.fixture()
+def unicode_artists_xml_file(tmp_path):
+    p = tmp_path / "unicode_artists.xml"
+    p.write_text(UNICODE_ARTISTS_XML, encoding="utf-8")
+    return p
+
+
+# ------------------------------------------------------------------------------------------------------------------------
+# Writer test fixtures: the artists entity and an IPC chunk of ARTISTS_XML
+# ------------------------------------------------------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def entity():
+    return get("artists")
+
+
+@pytest.fixture()
+def ipc_dict(artists_xml_file):
+    size = os.path.getsize(artists_xml_file)
+    return extract_chunk_to_ipc(ChunkArgs("artists", str(artists_xml_file), 0, size))
 
 
 # ------------------------------------------------------------------------------------------------------------------------
