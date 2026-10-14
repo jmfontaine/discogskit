@@ -200,7 +200,12 @@ In PostgreSQL, tables are created in the current schema — the first existing s
 `public`), or the schema given with `--pg-schema` (which must already exist, unless `--pg-create-schema` is also
 passed). Without `--overwrite`, the load stops if any of its tables already exist there. With `--overwrite`, the
 existing tables are dropped and recreated, all in one transaction; if your own views or foreign keys depend on them,
-the load stops and lists those objects instead of dropping them.
+the load stops and lists those objects instead of dropping them. The write connections open before anything is
+dropped, so a load that can't open them (for example, when the server reaches `max_connections`) leaves the existing
+tables as they were.
+
+`--pg-write-workers` splits each entity's tables into groups, one per worker, and writes each group on its own
+connection. An entity with fewer tables than workers gets one worker per table.
 
 In SQLite, the tables are likewise dropped and recreated in one transaction: if a drop fails (e.g. with `--fk`, a
 table of your own references `artists` and has rows), the load stops and every table stays as it was. During the
@@ -217,9 +222,9 @@ After a failed or interrupted `load` (crash, Ctrl+C, lost connection), re-run it
 aren't consistent until a load finishes. Chunks commit as they go, so earlier chunks stay in the tables after a
 failure. With PostgreSQL and `--pg-write-workers` above its default of 1, each table group commits on its own
 connection, so the chunk that was in progress when the failure happened can itself end up partially written — some
-of its tables committed, others not. With `--pg-write-workers 1` (the default) and with SQLite, a chunk commits in a
-single transaction on one connection, so it's never partially written, but earlier, already-committed chunks are
-still not rolled back.
+of its tables committed, others not. When one group fails, the load waits for the other groups to finish before it
+reports the error. With `--pg-write-workers 1` (the default) and with SQLite, a chunk commits in a single transaction
+on one connection, so it's never partially written, but earlier, already-committed chunks are still not rolled back.
 
 | Database | Versions |
 |----------|----------|
