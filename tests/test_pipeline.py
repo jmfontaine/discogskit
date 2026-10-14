@@ -1051,6 +1051,12 @@ class TestPipelineRunParseWorkers:
             def submit(self, fn, /, *args, **kwargs):
                 future = super().submit(fn, *args, **kwargs)
                 if fn is not threading.current_thread:
+                    # Interrupt only once the writer thread has taken the write: one still queued is dropped
+                    # by the shutdown, and then there's nothing to cancel.
+                    deadline = time.monotonic() + 10
+                    while not future.running() and not future.done():
+                        assert time.monotonic() < deadline
+                        time.sleep(0.001)
                     raise KeyboardInterrupt
                 return future
 
