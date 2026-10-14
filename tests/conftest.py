@@ -40,7 +40,9 @@ def ipc_to_record_batches(ipc_dict: dict[str, bytes]) -> dict[str, pa.RecordBatc
 
 def empty_ipc(entity: str) -> dict[str, bytes]:
     """IPC dict for a chunk with no records, from an empty byte range of any file."""
-    return extract_chunk_to_ipc(ChunkArgs(entity, __file__, 0, 0)).tables
+    return extract_chunk_to_ipc(
+        ChunkArgs(end=0, entity=entity, file_path=__file__, start=0)
+    ).tables
 
 
 # Root ignores directory permissions, and Windows doesn't apply POSIX modes to directories.
@@ -352,7 +354,7 @@ def entity():
 def ipc_dict(artists_xml_file):
     size = os.path.getsize(artists_xml_file)
     return extract_chunk_to_ipc(
-        ChunkArgs("artists", str(artists_xml_file), 0, size)
+        ChunkArgs(end=size, entity="artists", file_path=str(artists_xml_file), start=0)
     ).tables
 
 

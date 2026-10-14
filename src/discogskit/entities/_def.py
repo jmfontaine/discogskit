@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 Cols = dict[str, dict[str, list[Any]]]
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ChunkArgs:
     """Arguments passed to each parse worker for one XML chunk.
 
@@ -31,10 +31,10 @@ class ChunkArgs:
     in ``ENTITIES``.
     """
 
+    end: int
     entity: str
     file_path: str
     start: int
-    end: int
     strict: bool = False
 
 
@@ -49,7 +49,7 @@ class ElementValueError(ValueError):
         self.element = element
 
 
-@dataclass
+@dataclass(kw_only=True)
 class EntityDef:
     """Definition for one Discogs entity type.
 
@@ -59,13 +59,13 @@ class EntityDef:
     returns a record element's id as written in the XML, or ``None`` when it has none.
     """
 
+    append_record: Callable[[Cols, etree._Element, set[str] | None], None]
+    fk_column: str
     name: str
+    record_id: Callable[[etree._Element], str | None]
     root_tag: str
     schemas: dict[str, pa.Schema]
     table_weights: dict[str, float]
-    append_record: Callable[[Cols, etree._Element, set[str] | None], None]
-    record_id: Callable[[etree._Element], str | None]
-    fk_column: str
 
     @cached_property
     def table_order(self) -> list[str]:

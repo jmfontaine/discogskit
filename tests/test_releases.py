@@ -17,7 +17,9 @@ class TestReleasesParsing:
     def _parse(self, releases_xml_file):
         size = os.path.getsize(releases_xml_file)
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("releases", str(releases_xml_file), 0, size)
+            ChunkArgs(
+                end=size, entity="releases", file_path=str(releases_xml_file), start=0
+            )
         ).tables
         return ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -78,7 +80,9 @@ class TestReleasesParsing:
         f.write_text(xml)
 
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("releases", str(f), 0, os.path.getsize(f))
+            ChunkArgs(
+                end=os.path.getsize(f), entity="releases", file_path=str(f), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -217,7 +221,11 @@ class TestReleasesParsing:
             match=r"^Invalid <release> record in .* at chunk line 1 \(chunk bytes \d+-\d+, id='7'\):"
             r" <sub_tracks> nested in sub-track '1a' of track '1' at chunk line 6$",
         ):
-            extract_chunk_to_ipc(ChunkArgs("releases", str(f), 0, os.path.getsize(f)))
+            extract_chunk_to_ipc(
+                ChunkArgs(
+                    end=os.path.getsize(f), entity="releases", file_path=str(f), start=0
+                )
+            )
 
     def test_nested_sub_tracks_line_past_libxml2_limit(self, tmp_path):
         """The nested <sub_tracks> line is its own past line 65535, where lxml reports its parent's line 1 (#96)."""
@@ -235,7 +243,11 @@ class TestReleasesParsing:
             match=r"^Invalid <release> record in .* at chunk line 1 \(chunk bytes \d+-\d+, id='7'\):"
             r" <sub_tracks> nested in sub-track '1a' of track '1' at chunk line 70001$",
         ):
-            extract_chunk_to_ipc(ChunkArgs("releases", str(f), 0, os.path.getsize(f)))
+            extract_chunk_to_ipc(
+                ChunkArgs(
+                    end=os.path.getsize(f), entity="releases", file_path=str(f), start=0
+                )
+            )
 
     def test_track_artists(self, releases_xml_file):
         tables = self._parse(releases_xml_file)
@@ -274,7 +286,11 @@ class TestReleasesParsing:
             ValueError,
             match=r"^Invalid <release> record in .* at chunk line 2 .*: missing or empty id$",
         ):
-            extract_chunk_to_ipc(ChunkArgs("releases", str(f), 0, os.path.getsize(f)))
+            extract_chunk_to_ipc(
+                ChunkArgs(
+                    end=os.path.getsize(f), entity="releases", file_path=str(f), start=0
+                )
+            )
 
     def test_missing_is_null_and_empty_is_empty_string(self, tmp_path):
         """Absent elements/attributes are NULL; present but empty ones are "" (#21)."""
@@ -294,7 +310,9 @@ class TestReleasesParsing:
         f.write_text(xml)
 
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("releases", str(f), 0, os.path.getsize(f))
+            ChunkArgs(
+                end=os.path.getsize(f), entity="releases", file_path=str(f), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -348,7 +366,9 @@ class TestReleasesParsing:
         f.write_text(xml)
 
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("releases", str(f), 0, os.path.getsize(f))
+            ChunkArgs(
+                end=os.path.getsize(f), entity="releases", file_path=str(f), start=0
+            )
         ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
@@ -369,7 +389,9 @@ class TestReleaseTypedValues:
             f'<videos><video src="http://x"{video_attrs}/></videos></release>\n'
         )
         ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs("releases", str(f), 0, os.path.getsize(f))
+            ChunkArgs(
+                end=os.path.getsize(f), entity="releases", file_path=str(f), start=0
+            )
         ).tables
         return ipc_to_tables(ipc_dict, SCHEMAS)
 

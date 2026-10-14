@@ -178,7 +178,9 @@ def _assert_splits_recover_all_labels(
 
     total = 0
     for start, end in splits:
-        ipc_dict = extract_chunk_to_ipc(ChunkArgs("labels", str(f), start, end)).tables
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs(end=end, entity="labels", file_path=str(f), start=start)
+        ).tables
         tables = ipc_to_tables(ipc_dict, LABELS_SCHEMAS)
         total += tables["labels"].num_rows
     assert total == expected_records
