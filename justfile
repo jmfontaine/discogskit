@@ -65,7 +65,14 @@ qa: dead-code deps-unused format-check lint type-check verify-types
 release:
     #!/usr/bin/env bash
     set -euo pipefail
-    version=$(uv run python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+    # uv prints the normalized version (0.2.0.DEV0 -> 0.2.0.dev0), as the release workflow's tag check reads it.
+    version=$(uv version --short)
+    case "$version" in
+        *dev* | *rc*)
+            echo "Error: $version is a development or release-candidate version; set the release version in pyproject.toml first"
+            exit 1
+            ;;
+    esac
     tag="v${version}"
     if git rev-parse "$tag" >/dev/null 2>&1; then
         echo "Error: tag $tag already exists"
