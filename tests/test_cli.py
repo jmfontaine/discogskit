@@ -20,6 +20,8 @@ from discogskit import pipeline
 from discogskit._console import console
 from discogskit.cli import app
 from discogskit.decompress import DecompressError
+from discogskit.entities import ChunkArgs, get
+from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers import OutputExistsError
 from tests.conftest import ARTISTS_XML
 
@@ -159,6 +161,52 @@ class TestNoTracebacks:
         ):
             result = runner.invoke(app, ["load", str(gz)])
         assert "disk full" in result.output
+
+
+class TestRecordErrorOutput:
+    def test_record_error_reaches_output_intact(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A record error keeps its file, chunk and line through the process pool and Rich (#93).
+
+        The id looks like Rich markup, which Rich would otherwise swallow.
+        """
+        _widen_console(monkeypatch)
+        gz = tmp_path / _ENTITY_FILE
+        with gzip.open(gz, "wb") as f:
+            f.write(
+                b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n"
+                b"<artist>\n  <id>1</id>\n</artist>\n"
+                b"<artist>\n  <id>[b]</id>\n</artist>\n"
+                b"</artists>"
+            )
+        result = runner.invoke(
+            app,
+            [
+                "convert",
+                str(gz),
+                "--format",
+                "jsonl",
+                "--keep-xml",
+                "--no-progress",
+                "--output",
+                str(tmp_path / "out"),
+                "--parse-workers",
+                "2",
+            ],
+        )
+
+        # The same chunk parsed in this process gives the message the CLI must print unchanged.
+        xml = str(gz.with_suffix(""))
+        [(start, end)] = get("artists").find_split_points(xml, 1 << 20)
+        with pytest.raises(ValueError) as info:
+            extract_chunk_to_ipc(ChunkArgs("artists", xml, start, end))
+        message = str(info.value)
+        assert message.startswith(
+            f"Invalid <artist> record in {xml} at chunk line 4 (chunk bytes {start}-{end}, id='[b]'): "
+        )
+        assert result.exit_code == 1
+        assert f"Error: {message}" in _unstyle(result.output).splitlines()
 
 
 class TestWriterAlwaysClosed:
