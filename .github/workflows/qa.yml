@@ -13,13 +13,21 @@ on:
         type: boolean
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 # Linux job names must stay as they are: the main ruleset requires them by name.
 # Naming a job after matrix values also stops GitHub appending "(ubuntu-latest)".
+#
+# Every job sets UV_PYTHON: uv otherwise takes the version from the tracked .python-version, which
+# outranks any interpreter a job installs.
 
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.14"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -27,7 +35,7 @@ jobs:
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
       - name: Set up Python
-        run: uv python install 3.14
+        run: uv python install "$UV_PYTHON"
 
       - name: Install dependencies
         run: uv sync --locked
@@ -44,10 +52,15 @@ jobs:
       - name: Check for unused dependencies
         run: uv run deptry src
 
+      - name: Lint GitHub Actions workflows
+        run: uv run prek run actionlint --all-files
+
   # KLUDGE: Separate job because deadcode uses ast.Str which was removed in Python 3.14
   dead-code:
     name: Dead code
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.13"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -55,7 +68,7 @@ jobs:
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
       - name: Set up Python
-        run: uv python install 3.13
+        run: uv python install "$UV_PYTHON"
 
       - name: Install dependencies
         run: uv sync --locked
@@ -71,6 +84,8 @@ jobs:
       fail-fast: false
       matrix:
         os: ${{ inputs.macos && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
+    env:
+      UV_PYTHON: "3.14"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -78,13 +93,16 @@ jobs:
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
       - name: Set up Python
-        run: uv python install 3.14
+        run: uv python install "$UV_PYTHON"
 
       - name: Install dependencies
         run: uv sync --locked
 
       - name: Type check
         run: uv run ty check
+
+      - name: Verify public API types
+        run: uv run pyright --ignoreexternal --verifytypes discogskit
 
   test:
     name: Test (Python ${{ matrix.python-version }}${{ matrix.os == 'macos-latest' && ', macOS' || '' }})
@@ -94,6 +112,8 @@ jobs:
       matrix:
         os: ${{ inputs.macos && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -101,7 +121,7 @@ jobs:
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
       - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+        run: uv python install "$UV_PYTHON"
 
       - name: Install dependencies
         run: uv sync --locked

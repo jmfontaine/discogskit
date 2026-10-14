@@ -5,6 +5,9 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   # Linux and macOS; nothing is built or published unless every check passes.
   qa:
