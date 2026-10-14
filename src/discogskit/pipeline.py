@@ -3,7 +3,8 @@
 Architecture
 ============
 
-The pipeline has 5 stages.  Stages 1-3 overlap via a bounded backlog of pending writes::
+The pipeline has 5 stages.  Parsing and writing (stage 3) overlap, with a
+bounded number of chunks in flight::
 
     .xml.gz file
         |  [Stage 1: Decompress]  rapidgzip (parallel)
@@ -13,12 +14,12 @@ The pipeline has 5 stages.  Stages 1-3 overlap via a bounded backlog of pending 
         v
     N byte-range chunks
         |
-        +---> [Stage 3a: Parse workers]  multiprocessing.Pool
+        +---> [Stage 3a: Parse workers]  ProcessPoolExecutor (spawn)
         |         Each worker reads its byte range, wraps in an XML
         |         envelope, parses with lxml iterparse, and produces
         |         Arrow IPC buffers (one per normalized table).
         |              |
-        |              v  bounded backlog of pending writes (backpressure)
+        |              v  at most parse_workers + write_queue chunks in flight
         |              |
         +---> [Stage 3b: Writer thread]  one-worker ThreadPoolExecutor
                   Deserializes IPC, calls writer.write_chunk() which
@@ -37,30 +38,45 @@ Key design decisions
 --------------------
 - **Multiprocessing for parse**: lxml is CPU-bound and holds the GIL during
   parsing.  Threads would serialize. Workers communicate results via Arrow
-  IPC byte buffers which cross process boundaries efficiently.
+  IPC byte buffers which cross process boundaries efficiently. Workers are
+  spawned, never forked: by the time they start, this process runs Rich's
+  refresh thread and the writer thread and holds database connections, none
+  of which a forked child can safely inherit.
 - **Arrow IPC as inter-process format**: compact (columnar, no copies on
-  deserialization), avoids pickling overhead. Buffers are ~150 MB per chunk;
-  the bounded backlog (default depth 2) caps memory at ~300 MB.
+  deserialization), avoids pickling overhead. Buffers are ~150 MB per chunk
+  at the default ``--chunk-mb``.
+- **Bounded chunks in flight**: a chunk counts against a budget of
+  ``parse_workers + write_queue`` from its submission to a parse worker until
+  its write completes, and the main thread submits a chunk only while under
+  budget.  If the writer falls behind, parsed chunks wait for it and the
+  workers go idle, so the main process never holds more than that many
+  parsed chunks, however slow the writer is.
 - **Writer thread**: decouples parsing from database writes.  Without it,
   the main process would sequentially consume an IPC dict and flush it,
-  leaving parse workers idle during flushes. The bounded backlog provides
-  backpressure: if the writer falls behind, the main thread waits on the
-  oldest pending write and parse workers naturally pause.
-- **Write futures**: each chunk write is a ``Future``, so a writer error
-  reaches the main thread as soon as the oldest write fails. Writes queued
-  behind a failed one are skipped. Any failure (writer, parser, Ctrl+C)
-  terminates the pool, cancels queued writes and waits for the in-flight
-  one, so the writer is idle before the caller closes it.
+  leaving parse workers idle during flushes.
+- **Futures for both stages**: a parse error, a dead worker
+  (``BrokenProcessPool``) or a writer error reaches the main thread as soon
+  as its future completes. Writes queued behind a failed one are skipped.
+  Any failure (writer, parser, dead worker, Ctrl+C) cancels queued chunks
+  and writes, then waits for the chunks already being parsed and the
+  in-flight write, so the writer is idle before the caller closes it.
 """
 
 from __future__ import annotations
 
+import multiprocessing
 import signal
 import time
 from collections import deque
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Future,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    wait,
+)
+from contextlib import nullcontext
 from dataclasses import dataclass
-from multiprocessing import Pool
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -103,22 +119,44 @@ def _fmt_time(seconds: float) -> str:
 
 if TYPE_CHECKING:
     import pyarrow as pa
-    from rich.progress import TaskID
 
 
 class _ProgressBar:
-    """Thin wrapper around ``rich.progress.Progress`` for the writer thread.
+    """The Rich progress display for one load, shown from ``__enter__`` until ``stop()`` or ``__exit__``.
 
     The bar advances per chunk (the unit of pipeline work) but displays
     throughput, which is more meaningful to users than chunk counts.
-    The rich Progress object is thread-safe.
+    ``update()`` runs on the writer thread; the rich Progress object is
+    thread-safe.
     """
 
-    def __init__(self, progress: Progress, task_id: TaskID, total: int) -> None:
-        self._progress = progress
-        self._task_id = task_id
-        self._total = total
+    def __enter__(self) -> None:
+        self._progress.start()
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.stop()
+
+    def __init__(self, total: int) -> None:
+        # redirect_stdout/stderr keeps print() calls and warnings from this
+        # process (writer setup/finalize, for example) above the bar.
+        self._progress = Progress(
+            TextColumn("  [bold]{task.fields[label]:<14s}[/]"),
+            BarColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            TextColumn("[dim]·[/]"),
+            _ElapsedEstTotalColumn(),
+            console=console,
+            redirect_stderr=True,
+            redirect_stdout=True,
+            transient=True,
+        )
         self._started = False
+        self._task_id = self._progress.add_task("", label="Load", total=None)
+        self._total = total
+
+    def stop(self) -> None:
+        """Remove the display and restore stdout, stderr and the cursor; later calls do nothing."""
+        self._progress.stop()
 
     def update(self, avg_rate: float) -> None:
         if not self._started:
@@ -273,6 +311,115 @@ class _ChunkWriter:
             )
 
 
+def _parse_and_write(
+    chunks: list[ChunkArgs],
+    chunk_writer: _ChunkWriter,
+    *,
+    parse_workers: int,
+    profile: bool,
+    progress_bar: _ProgressBar | None,
+    write_queue: int,
+) -> float:
+    """Parse ``chunks`` in worker processes and write each one on the writer thread.
+
+    A chunk counts against a budget of ``parse_workers + write_queue`` from its
+    submission to a parse worker until its write completes; a chunk is
+    submitted only while under budget, and only to an otherwise idle worker.
+    A slow writer therefore idles the workers instead of letting parsed chunks
+    pile up in memory.
+
+    Returns ``put_blocked``: how long parse workers sat idle because the
+    writer held the whole budget (measured only with ``profile``).  High
+    put_blocked = write-bound pipeline.  See --profile output.
+    """
+    budget = parse_workers + write_queue
+    queued = deque(chunks)
+    parsing: set[Future[dict[str, bytes]]] = set()
+    put_blocked = 0.0
+    # Unfinished writes in submission order, which is the order they finish in.
+    writes: deque[Future[None]] = deque()
+
+    write_executor = ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="discogskit-writer"
+    )
+    parse_executor: ProcessPoolExecutor | None = None
+    try:
+        # Start the writer thread before the first real write. The executor
+        # tracks its thread only once submit() has started it, and that write
+        # can begin first: a Ctrl+C landing in between would leave it running
+        # where shutdown() can't wait for it.
+        write_executor.submit(int).result()
+        # Workers ignore SIGINT so they don't dump tracebacks on Ctrl+C; the
+        # parent handles the interrupt and stops them.
+        parse_executor = ProcessPoolExecutor(
+            initargs=(signal.SIGINT, signal.SIG_IGN),
+            initializer=signal.signal,
+            max_workers=parse_workers,
+            mp_context=multiprocessing.get_context("spawn"),
+        )
+        while True:
+            # At most one chunk per worker: the executor marks a submitted chunk
+            # as running once it's queued for a worker, and a running chunk
+            # can't be cancelled, so a deeper queue would all get parsed after
+            # a failure or Ctrl+C.
+            while (
+                queued
+                and len(parsing) < parse_workers
+                and len(parsing) + len(writes) < budget
+            ):
+                parsing.add(
+                    parse_executor.submit(extract_chunk_to_ipc, queued.popleft())
+                )
+            if not parsing and not writes:
+                break
+            # Chunks still queued with a worker idle means the budget is full
+            # and the writer is what holds it.
+            writer_behind = bool(queued) and len(parsing) < parse_workers
+            t_wait = time.perf_counter()
+            done, _ = wait([*parsing, *writes], return_when=FIRST_COMPLETED)
+            if profile and writer_behind:
+                put_blocked += time.perf_counter() - t_wait
+            # result() re-raises a writer error, a parse error, or
+            # BrokenProcessPool when a worker died and took its chunk with it.
+            while writes and writes[0].done():
+                writes.popleft().result()
+            parsed = parsing & done
+            parsing -= parsed
+            # pop() leaves no name bound to a handed-off future, which holds its
+            # chunk's IPC buffers until released; the write keeps its own
+            # reference only until the write is done.
+            while parsed:
+                writes.append(
+                    write_executor.submit(chunk_writer.write, parsed.pop().result())
+                )
+        parse_executor.shutdown()
+        write_executor.shutdown()
+    except BaseException as exc:
+        # Restore the terminal before anything below waits.
+        if progress_bar is not None:
+            progress_bar.stop()
+        if isinstance(exc, KeyboardInterrupt):
+            # Neither the in-flight write nor chunks being parsed can be
+            # interrupted; say why we pause.
+            console.print(
+                "\n  [yellow]Interrupted — waiting for in-flight chunks to finish …[/]"
+            )
+        # Drop queued writes now, so none starts while the workers stop.
+        write_executor.shutdown(cancel_futures=True, wait=False)
+        if parse_executor is not None:
+            # Drop queued chunks and wait for those being parsed (about one per
+            # worker). Not terminate_workers() (3.14+): a worker killed while
+            # sending its result leaves a partial message in the result pipe,
+            # and the executor's manager thread then blocks on it forever,
+            # hanging interpreter exit.
+            parse_executor.shutdown(cancel_futures=True)
+        # Wait for the in-flight write, so the writer is idle before the
+        # caller closes it.
+        write_executor.shutdown()
+        raise
+    return put_blocked
+
+
 def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
     """Execute the full ingest pipeline."""
     entity = get_entity(config.entity)
@@ -284,12 +431,6 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
 
     # Profiling requires verbose per-chunk output, so disable progress bar
     use_progress = config.progress and not config.profile
-
-    if not use_progress:
-        status("Workers", str(parse_workers))
-        status("Chunk size", f"{config.chunk_mb} MB")
-        status("Write queue", str(config.write_queue))
-        status("Source", str(gz_path))
 
     # Stage 1: Decompress. The lease keeps other runs from deleting or
     # rewriting the XML while this run reads it.
@@ -317,96 +458,22 @@ def run(config: PipelineConfig, writer: Writer) -> PipelineResult:
         writer.setup(entity)
 
         # Stage 3: Parallel parse + write
-        #
-        # Main thread: drains pool.imap_unordered → submits each IPC dict to a
-        # one-worker writer executor and keeps the Future in `pending`.
-        # Writer thread: runs the writes in submission order → flushes to the target.
-        #
-        # Backpressure: once more than write_queue chunks wait behind the in-flight
-        # write, the main thread blocks on the oldest Future, which stops it from
-        # consuming pool results, which stops workers from starting new chunks.
-        # This naturally limits memory to ~write_queue × ~150 MB of IPC data.
-        # Waiting on a Future also re-raises a writer error in the main thread.
         t1 = time.perf_counter()
-
-        # Set up progress bar (if enabled).
-        # redirect_stdout/stderr ensures that any print() calls from writer
-        # setup/finalize or subprocess warnings render above the bar cleanly.
-        progress_bar: _ProgressBar | None = None
-        progress_ctx: Progress | None = None
-        if use_progress:
-            progress_ctx = Progress(
-                TextColumn("  [bold]{task.fields[label]:<14s}[/]"),
-                BarColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                TextColumn("[dim]·[/]"),
-                _ElapsedEstTotalColumn(),
-                console=console,
-                redirect_stderr=True,
-                redirect_stdout=True,
-                transient=True,
-            )
-            task_id = progress_ctx.add_task(
-                "",
-                label="Load",
-                total=None,
-            )
-            progress_bar = _ProgressBar(progress_ctx, task_id, total=n_chunks)
-            progress_ctx.start()
-
+        progress_bar = _ProgressBar(n_chunks) if use_progress else None
         chunk_writer = _ChunkWriter(
             writer, entity, n_chunks, profile=config.profile, progress_bar=progress_bar
         )
-        pending: deque[Future[None]] = deque()
-        # put_blocked measures how long the main thread waits for the writer to
-        # catch up. High put_blocked = write-bound pipeline.  See --profile output.
-        put_blocked = 0.0
-        write_executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="discogskit-writer"
-        )
-        # Workers ignore SIGINT so they don't dump tracebacks on Ctrl+C;
-        # the parent handles the interrupt and terminates workers cleanly.
-        pool = Pool(
-            parse_workers,
-            initargs=(signal.SIGINT, signal.SIG_IGN),
-            initializer=signal.signal,
-        )
-        try:
-            for ipc_dict in pool.imap_unordered(extract_chunk_to_ipc, worker_args):
-                pending.append(write_executor.submit(chunk_writer.write, ipc_dict))
-                # Writes finish in order; reap finished ones so errors surface early.
-                while pending and pending[0].done():
-                    pending.popleft().result()
-                if config.profile:
-                    t_put = time.perf_counter()
-                while len(pending) > config.write_queue + 1:
-                    pending.popleft().result()  # blocks until the writer catches up
-                if config.profile:
-                    put_blocked += time.perf_counter() - t_put
-            while pending:
-                pending.popleft().result()
-        except BaseException as exc:
-            # Stop the progress bar first to restore terminal state
-            if progress_ctx is not None:
-                progress_ctx.stop()
-            pool.terminate()
-            pool.join()
-            if isinstance(exc, KeyboardInterrupt):
-                # The in-flight write can't be interrupted; say why we pause.
-                console.print(
-                    "\n  [yellow]Interrupted — waiting for the in-flight write to finish …[/]"
-                )
-            # Drop queued writes and wait for the in-flight one, so the writer is
-            # idle before the caller closes it.
-            write_executor.shutdown(cancel_futures=True)
-            raise
-        else:
-            pool.close()
-            pool.join()
-            write_executor.shutdown()
-        finally:
-            if progress_ctx is not None:
-                progress_ctx.stop()
+        # One boundary for the display and the executors: whatever fails, even
+        # starting the parse workers, removes the bar and restores the terminal.
+        with progress_bar or nullcontext():
+            put_blocked = _parse_and_write(
+                worker_args,
+                chunk_writer,
+                parse_workers=parse_workers,
+                profile=config.profile,
+                progress_bar=progress_bar,
+                write_queue=config.write_queue,
+            )
 
         total = chunk_writer.total
         # Load time covers splitting and parse + write, but not writer setup.
