@@ -8,6 +8,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
@@ -19,7 +20,6 @@ from rich.text import Text
 from typer.testing import CliRunner, Result
 
 from discogskit import pipeline
-from discogskit._console import console
 from discogskit.cli import app
 from discogskit.decompress import DecompressError
 from discogskit.entities import ChunkArgs, get
@@ -110,9 +110,10 @@ def _unstyle(output: str) -> str:
 def _widen_console(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stop Rich wrapping a long path mid-name, so assertions can match it whole.
 
-    The shared console is created at import time, so CliRunner's ``terminal_width`` and ``COLUMNS`` don't reach it.
+    The shared console reads ``COLUMNS`` each time it prints; ``tests/__init__.py`` drops an inherited one, which it
+    would keep instead.
     """
-    monkeypatch.setattr(console, "_width", 1000)
+    monkeypatch.setenv("COLUMNS", "1000")
 
 
 _WRITER_CLOSE_FAILURES = [
@@ -1199,3 +1200,61 @@ class TestConsoleScriptEntryPoint:
             [sys.executable, "-c", code], capture_output=True, check=False, text=True
         )
         assert result.returncode == 0, result.stderr
+
+
+# The real CLI in a fresh interpreter whose stdout is a pipe, with every chunk write slowed down.
+_SLOW_WRITE_CLI = """\
+import sys
+import time
+
+from discogskit.cli import app
+from discogskit.writers.jsonl import JSONLWriter
+
+real_write_chunk = JSONLWriter.write_chunk
+
+
+def slow_write_chunk(self, tables):
+    time.sleep(0.5)
+    return real_write_chunk(self, tables)
+
+
+JSONLWriter.write_chunk = slow_write_chunk
+app(sys.argv[1:], prog_name="discogskit")
+"""
+
+
+class TestPipedOutput:
+    def test_chunk_lines_arrive_as_each_chunk_is_written(self, tmp_path: Path) -> None:
+        """Off a terminal, the default run prints per-chunk lines, each as its chunk is written, not all at exit
+        (#105)."""
+        gz = tmp_path / _ENTITY_FILE
+        with gzip.open(gz, "wb", compresslevel=1) as f:
+            f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
+            for i in range(1, 50_001):
+                f.write(
+                    b"<artist><id>%d</id><name>Artist %d</name></artist>\n" % (i, i)
+                )
+            f.write(b"</artists>")
+        args = ["convert", str(gz), "-f", "jsonl", "--output", str(tmp_path / "out")]
+        args += ["--chunk-mb", "1", "--parse-workers", "1"]
+
+        arrivals = []
+        with subprocess.Popen(
+            [sys.executable, "-c", _SLOW_WRITE_CLI, *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        ) as proc:
+            assert proc.stdout is not None
+            output = []
+            for line in proc.stdout:
+                output.append(line)
+                if line.startswith("  chunk "):
+                    arrivals.append((time.monotonic(), proc.poll()))
+        assert proc.returncode == 0, "".join(output)
+
+        # Each chunk write takes 0.5 s, so lines that arrive as written are spread out, the first while the run
+        # is still going.
+        assert len(arrivals) >= 3, "".join(output)
+        assert arrivals[0][1] is None
+        assert arrivals[-1][0] - arrivals[0][0] >= 0.4 * (len(arrivals) - 1)

@@ -44,7 +44,7 @@ class TestPostgreSQLWriter:
         size = os.path.getsize(artists_xml_file)
         return extract_chunk_to_ipc(
             ChunkArgs("artists", str(artists_xml_file), 0, size)
-        )
+        ).tables
 
     def test_full_lifecycle(self, pg_dsn, entity, ipc_dict):
         from discogskit.writers.postgresql import PostgreSQLWriter
@@ -292,7 +292,7 @@ class TestOverwriteSafety:
         size = os.path.getsize(artists_xml_file)
         return extract_chunk_to_ipc(
             ChunkArgs("artists", str(artists_xml_file), 0, size)
-        )
+        ).tables
 
     @pytest.fixture()
     def schemas(self, pg_dsn):
@@ -484,7 +484,7 @@ class TestWriteGroupFailure:
         size = os.path.getsize(artists_xml_file)
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("artists", str(artists_xml_file), 0, size)
-        )
+        ).tables
         errors = []
         writer = PostgreSQLWriter(pg_dsn, overwrite=True, write_workers=2)
 
@@ -1013,7 +1013,7 @@ class TestPgSchema:
         size = os.path.getsize(artists_xml_file)
         return extract_chunk_to_ipc(
             ChunkArgs("artists", str(artists_xml_file), 0, size)
-        )
+        ).tables
 
     def test_rejects_nonexistent_schema_without_create_flag(self, pg_dsn):
         from discogskit.writers.postgresql import PostgreSQLWriter

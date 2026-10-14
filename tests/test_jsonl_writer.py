@@ -32,7 +32,7 @@ class TestJSONLWriter:
         size = os.path.getsize(artists_xml_file)
         return extract_chunk_to_ipc(
             ChunkArgs("artists", str(artists_xml_file), 0, size)
-        )
+        ).tables
 
     def test_full_lifecycle(self, tmp_path, entity, ipc_dict):
         writer = JSONLWriter(str(tmp_path))

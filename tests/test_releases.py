@@ -18,7 +18,7 @@ class TestReleasesParsing:
         size = os.path.getsize(releases_xml_file)
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("releases", str(releases_xml_file), 0, size)
-        )
+        ).tables
         return ipc_to_tables(ipc_dict, SCHEMAS)
 
     def test_releases_table(self, releases_xml_file):
@@ -79,7 +79,7 @@ class TestReleasesParsing:
 
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("releases", str(f), 0, os.path.getsize(f))
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         assert tables["release_artists"].to_pylist() == [
@@ -295,7 +295,7 @@ class TestReleasesParsing:
 
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("releases", str(f), 0, os.path.getsize(f))
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         rel = tables["releases"].to_pylist()[0]
@@ -349,7 +349,7 @@ class TestReleasesParsing:
 
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("releases", str(f), 0, os.path.getsize(f))
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         assert tables["release_artists"].num_rows == 1
@@ -370,7 +370,7 @@ class TestReleaseTypedValues:
         )
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("releases", str(f), 0, os.path.getsize(f))
-        )
+        ).tables
         return ipc_to_tables(ipc_dict, SCHEMAS)
 
     @pytest.mark.parametrize(

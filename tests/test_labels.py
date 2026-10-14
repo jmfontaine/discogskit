@@ -17,7 +17,7 @@ class TestLabelsParsing:
         size = os.path.getsize(labels_xml_file)
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("labels", str(labels_xml_file), 0, size)
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         labels = tables["labels"]
@@ -37,7 +37,7 @@ class TestLabelsParsing:
         size = os.path.getsize(labels_xml_file)
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("labels", str(labels_xml_file), 0, size)
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         subs = tables["label_sublabels"]
@@ -50,7 +50,7 @@ class TestLabelsParsing:
         size = os.path.getsize(labels_xml_file)
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("labels", str(labels_xml_file), 0, size)
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         for name, table in tables.items():

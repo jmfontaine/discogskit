@@ -254,7 +254,9 @@ def _run_jobs(
     ``writer`` once the whole run is done, whether it succeeded, failed, or was
     interrupted.
     """
-    verbose = not progress or profile
+    # The pipeline shows a progress bar only on a terminal; elsewhere it prints
+    # per-chunk lines, as with --no-progress.
+    verbose = not (progress and console.is_terminal) or profile
     try:
         for _, entity_name in jobs:
             writer.check(get_entity(entity_name))
@@ -267,7 +269,8 @@ def _run_jobs(
                     (gz_path.name, "dim"),
                 )
             )
-            # Without a progress bar (--no-progress or --profile), echo the run's settings.
+            # Without a progress bar (--no-progress, --profile, or output that
+            # isn't a terminal), echo the run's settings.
             if verbose:
                 status("Workers", str(parse_workers))
                 status("Chunk size", f"{chunk_mb} MB")

@@ -18,7 +18,7 @@ class TestMastersParsing:
         size = os.path.getsize(masters_xml_file)
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("masters", str(masters_xml_file), 0, size)
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         masters = tables["masters"]
@@ -34,7 +34,7 @@ class TestMastersParsing:
         size = os.path.getsize(masters_xml_file)
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("masters", str(masters_xml_file), 0, size)
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         artists = tables["master_artists"]
@@ -49,7 +49,7 @@ class TestMastersParsing:
         size = os.path.getsize(masters_xml_file)
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("masters", str(masters_xml_file), 0, size)
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         masters = tables["masters"]
@@ -59,7 +59,7 @@ class TestMastersParsing:
         size = os.path.getsize(masters_xml_file)
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("masters", str(masters_xml_file), 0, size)
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         masters = tables["masters"]
@@ -69,7 +69,7 @@ class TestMastersParsing:
         size = os.path.getsize(masters_xml_file)
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("masters", str(masters_xml_file), 0, size)
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         videos = tables["master_videos"]
@@ -84,7 +84,7 @@ class TestMastersParsing:
         size = os.path.getsize(masters_xml_file)
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("masters", str(masters_xml_file), 0, size)
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         for name, table in tables.items():
@@ -129,7 +129,7 @@ class TestMastersParsing:
 
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("masters", str(f), 0, os.path.getsize(f))
-        )
+        ).tables
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         assert tables["master_artists"].num_rows == 1
@@ -147,7 +147,7 @@ class TestMasterVideoTypedValues:
         )
         ipc_dict = extract_chunk_to_ipc(
             ChunkArgs("masters", str(f), 0, os.path.getsize(f))
-        )
+        ).tables
         return ipc_to_tables(ipc_dict, SCHEMAS)["master_videos"].to_pylist()[0]
 
     @pytest.mark.parametrize(
