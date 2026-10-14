@@ -49,6 +49,8 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> dict[str, bytes]:
     footer = b"\n</" + container + b">"
     # One copy of the chunk; header + data + footer would copy it twice.
     xml_data = b"".join((header, data, footer))
+    # Free the chunk itself now rather than holding both copies for the whole parse (issue #122).
+    del data
     cols: Cols = {
         name: {col_name: [] for col_name in schema.names}
         for name, schema in entity.schemas.items()
