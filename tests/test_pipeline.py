@@ -14,6 +14,7 @@ import threading
 import time
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -182,6 +183,36 @@ def _dying_once_extract(args):
         return extract_chunk_to_ipc(args)
     os.kill(os.getpid(), signal.SIGKILL)
     raise AssertionError("SIGKILL returned")
+
+
+# A result far bigger than a pipe's buffer, so the worker sends it in many writes.
+_MID_SEND_BYTES = 64 * 1024 * 1024
+
+
+def _dying_mid_send_extract(args):
+    """The real parse step, except the first call returns a large result and SIGKILLs its own worker halfway through
+    sending it, as the OOM killer would when pickling the result doubles the worker's memory (#157)."""
+    from multiprocessing.connection import Connection
+
+    # Connection._send is private and undeclared in the stubs. Pipes and sockets alike send each part of a message
+    # through it.
+    connection = cast("Any", Connection)
+
+    try:
+        (Path(args.file_path).parent / "worker-died").touch(exist_ok=False)
+    except FileExistsError:
+        return extract_chunk_to_ipc(args)
+    send = connection._send
+
+    def send_half_then_die(self, buf, *rest):
+        if len(buf) > _MID_SEND_BYTES:  # the result, not its length header
+            send(self, memoryview(buf)[: len(buf) // 2], *rest)
+            os.kill(os.getpid(), signal.SIGKILL)
+        send(self, buf, *rest)
+
+    connection._send = send_half_then_die
+    result = extract_chunk_to_ipc(args)
+    return result._replace(tables={**result.tables, "padding": bytes(_MID_SEND_BYTES)})
 
 
 class _StubWriter:
@@ -418,6 +449,29 @@ class TestPipelineRunInputValidation:
         rows = conn.execute("SELECT id, name FROM artists ORDER BY id").fetchall()
         conn.close()
         assert rows == [(1, "Test"), (2, "Other")]
+
+    @pytest.mark.parametrize("parse_workers", [0, -1])
+    def test_no_parse_workers_fails_before_touching_anything(
+        self, tmp_path, artists_gz, parse_workers
+    ):
+        """Without a parse worker nothing would be parsed: the run must fail, not report an empty load."""
+
+        class SetupTrackingWriter(_StubWriter):
+            set_up = False
+
+            def setup(self, entity):
+                self.set_up = True
+
+        config = dataclasses.replace(
+            _single_chunk_config(artists_gz), parse_workers=parse_workers
+        )
+        writer = SetupTrackingWriter()
+
+        with pytest.raises(ValueError, match="parse_workers must be at least 1"):
+            _run_and_close(config, writer)
+
+        assert not writer.set_up
+        assert not artists_gz.with_suffix("").exists()
 
 
 class TestPipelineRunXmlCleanup:
@@ -910,15 +964,21 @@ class TestPipelineRunParseWorkers:
         assert writer.written > 2 * bound
         assert 0 < writer.max_unwritten <= bound
 
+    @pytest.mark.parametrize(
+        "extract",
+        [_dying_once_extract, _dying_mid_send_extract],
+        ids=["while-parsing", "mid-send"],
+    )
     def test_dead_worker_fails_the_run_and_releases_the_xml(
-        self, monkeypatch, tmp_path
+        self, monkeypatch, tmp_path, extract
     ):
-        """A SIGKILLed worker loses its chunk; the run must fail promptly instead of waiting for it forever."""
+        """A SIGKILLed worker loses its chunk; the run must fail promptly instead of waiting for it forever, even when
+        the worker dies halfway through sending its result (#157)."""
         from discogskit import pipeline
         from discogskit.writers.jsonl import JSONLWriter
 
         gz_path = _many_artists_gz(tmp_path / "artists.xml.gz")
-        monkeypatch.setattr(pipeline, "extract_chunk_to_ipc", _dying_once_extract)
+        monkeypatch.setattr(pipeline, "extract_chunk_to_ipc", extract)
         writer = JSONLWriter(str(tmp_path / "out"))
 
         with pytest.raises(BrokenProcessPool):
@@ -927,6 +987,8 @@ class TestPipelineRunParseWorkers:
             finally:
                 writer.close()
 
+        assert (tmp_path / "worker-died").exists()
+        assert multiprocessing.active_children() == []
         xml_path = gz_path.with_suffix("")
         assert xml_path.exists()
         lock = ReadWriteLock(
@@ -1120,25 +1182,33 @@ class TestPipelineRunParseWorkers:
         assert writer.cancels >= 2
         assert writer.active_at_close == 0
 
-    def test_executor_construction_failure_restores_the_terminal(
-        self, monkeypatch, tmp_path, artists_gz
-    ):
-        """A parse executor that fails to start must not leave the progress display running."""
-        from discogskit import pipeline
+    def test_worker_start_failure_restores_the_terminal(self, monkeypatch, tmp_path):
+        """A parse worker that fails to start must not leave the progress display running, nor the workers already
+        started."""
         from discogskit.writers.jsonl import JSONLWriter
 
-        def fail_to_start(*args, **kwargs):
-            raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
+        process_class = multiprocessing.get_context("spawn").Process
+        start = process_class.start
+        starts = []
+
+        def fail_second_start(self):
+            starts.append(self)
+            if len(starts) == 2:
+                raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
+            start(self)
 
         # Progress redirects stdout/stderr only on a terminal.
         monkeypatch.setattr(console, "_force_terminal", True)
-        monkeypatch.setattr(pipeline, "ProcessPoolExecutor", fail_to_start)
+        monkeypatch.setattr(process_class, "start", fail_second_start)
         stdout, stderr = sys.stdout, sys.stderr
-        config = dataclasses.replace(_single_chunk_config(artists_gz), progress=True)
+        gz_path = _many_artists_gz(tmp_path / "artists.xml.gz")
+        config = dataclasses.replace(_multi_chunk_config(gz_path), progress=True)
 
         with pytest.raises(OSError, match="Resource temporarily unavailable"):
             _run_and_close(config, JSONLWriter(str(tmp_path / "out")))
 
+        assert len(starts) == 2
+        assert multiprocessing.active_children() == []
         assert sys.stdout is stdout
         assert sys.stderr is stderr
         for thread in threading.enumerate():
