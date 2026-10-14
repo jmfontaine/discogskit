@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import os
 import re
 
 import pyarrow.parquet as pq
 import pytest
 
-from discogskit.entities import ChunkArgs, get
-from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers.parquet import ParquetWriter
 from tests.conftest import (
     empty_ipc,
@@ -20,17 +17,6 @@ from tests.conftest import (
 
 
 class TestParquetWriter:
-    @pytest.fixture()
-    def entity(self):
-        return get("artists")
-
-    @pytest.fixture()
-    def ipc_dict(self, artists_xml_file):
-        size = os.path.getsize(artists_xml_file)
-        return extract_chunk_to_ipc(
-            ChunkArgs("artists", str(artists_xml_file), 0, size)
-        )
-
     def test_full_lifecycle(self, tmp_path, entity, ipc_dict):
         writer = ParquetWriter(str(tmp_path))
         try:
@@ -51,10 +37,10 @@ class TestParquetWriter:
         assert artists_table.column("id").to_pylist() == [1, 2]
         assert artists_table.column("name").to_pylist() == ["DJ Test", "Minimal Artist"]
 
-        # Verify schema round-trips correctly
+        # Every table's schema, nullability included, round-trips
         for table_name in entity.table_order:
             read_table = pq.read_table(str(entity_dir / f"{table_name}.parquet"))
-            assert read_table.num_rows > 0 or table_name != entity.table_order[0]
+            assert read_table.schema.equals(entity.schemas[table_name]), table_name
 
     def test_write_chunk_records_table_timings(self, tmp_path, entity, ipc_dict):
         """write_chunk returns per-table flush timing."""

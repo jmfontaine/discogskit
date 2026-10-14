@@ -68,17 +68,6 @@ def test_every_entity_loads(tmp_path, entity_name, xml, fk):
 
 
 class TestSQLiteWriter:
-    @pytest.fixture()
-    def entity(self):
-        return get("artists")
-
-    @pytest.fixture()
-    def ipc_dict(self, artists_xml_file):
-        size = os.path.getsize(artists_xml_file)
-        return extract_chunk_to_ipc(
-            ChunkArgs("artists", str(artists_xml_file), 0, size)
-        )
-
     def test_full_lifecycle(self, tmp_path, entity, ipc_dict):
         db_path = str(tmp_path / "test.db")
         writer = SQLiteWriter(db_path)

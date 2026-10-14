@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 import random
 import re
 import sqlite3
@@ -25,7 +26,7 @@ from discogskit.decompress import DecompressError
 from discogskit.entities import ChunkArgs, get
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers import OutputExistsError
-from tests.conftest import ARTISTS_XML
+from tests.conftest import ARTISTS_XML, UNICODE_ARTISTS_ROWS, UNICODE_ARTISTS_XML
 
 runner = CliRunner()
 
@@ -729,6 +730,42 @@ class TestFkOption:
         fks = conn.execute("PRAGMA foreign_key_list(artist_aliases)").fetchall()
         conn.close()
         assert len(fks) > 0
+
+
+class TestUnicodeConvert:
+    def test_gzip_jsonl_round_trips_unicode_text(self, tmp_path: Path) -> None:
+        """Non-ASCII text, entity references and CDATA reach gzip-compressed JSONL intact."""
+        gz = tmp_path / _ENTITY_FILE
+        with gzip.open(gz, "wt", encoding="utf-8") as f:
+            f.write("<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
+            f.write(UNICODE_ARTISTS_XML)
+            f.write("</artists>")
+        out = tmp_path / "out"
+
+        result = runner.invoke(
+            app,
+            [
+                "convert",
+                str(gz),
+                "--compression",
+                "gzip",
+                "-f",
+                "jsonl",
+                "--no-progress",
+                "--output",
+                str(out),
+                "--parse-workers",
+                "1",
+            ],
+        )
+
+        assert result.exit_code == 0, _unstyle(result.output)
+        for table_name in get("artists").table_order:
+            with gzip.open(
+                out / "artists" / f"{table_name}.jsonl.gz", "rt", encoding="utf-8"
+            ) as f:
+                rows = [json.loads(line) for line in f]
+            assert rows == UNICODE_ARTISTS_ROWS.get(table_name, []), table_name
 
 
 class TestCompressionLevel:

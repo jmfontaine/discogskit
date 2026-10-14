@@ -777,33 +777,42 @@ class TestPipelineRun:
             (1, 11),
         ]
 
-    def test_writer_error_does_not_hang(self, tmp_path):
-        """A writer failing on chunk 1 of more chunks than the backlog holds re-raises."""
+    def test_writer_error_does_not_hang(self, monkeypatch, tmp_path):
+        """A writer failing on chunk 1 while later chunks are queued behind it re-raises."""
+        from discogskit import pipeline
 
-        class FailingWriter:
+        queued = threading.Event()
+        submitted_writes = []
+
+        class SignallingExecutor(pipeline.ThreadPoolExecutor):
+            """Sets ``queued`` once a second chunk write is submitted behind the first."""
+
+            def submit(self, fn, /, *args, **kwargs):
+                future = super().submit(fn, *args, **kwargs)
+                if args:  # a chunk write, not the pipeline's warm-up submit(int)
+                    submitted_writes.append(future)
+                    if len(submitted_writes) == 2:
+                        queued.set()
+                return future
+
+        class FailingWriter(_StubWriter):
             def __init__(self):
                 self.calls = 0
-
-            def close(self):
-                pass
-
-            def finalize(self, entity):
-                pass
-
-            def setup(self, entity):
-                pass
+                self.saw_queued_write = False
 
             def write_chunk(self, tables):
                 self.calls += 1
-                time.sleep(0.3)  # let later chunks queue behind this write
+                self.saw_queued_write = queued.wait(timeout=10)
                 raise RuntimeError("disk full")
 
+        monkeypatch.setattr(pipeline, "ThreadPoolExecutor", SignallingExecutor)
         gz_path = _many_artists_gz(tmp_path / "artists.xml.gz")
         writer = FailingWriter()
 
         with pytest.raises(RuntimeError, match="disk full"):
             _run_or_fail_on_hang(_multi_chunk_config(gz_path), writer)
 
+        assert writer.saw_queued_write
         # Chunks queued behind the failed write must not be written.
         assert writer.calls == 1
 

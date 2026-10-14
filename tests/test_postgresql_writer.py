@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import gzip
 import os
 import signal
@@ -35,17 +36,6 @@ def _load(dsn, entity, ipc_dict, **options):
 
 @pytest.mark.integration
 class TestPostgreSQLWriter:
-    @pytest.fixture()
-    def entity(self):
-        return get("artists")
-
-    @pytest.fixture()
-    def ipc_dict(self, artists_xml_file):
-        size = os.path.getsize(artists_xml_file)
-        return extract_chunk_to_ipc(
-            ChunkArgs("artists", str(artists_xml_file), 0, size)
-        )
-
     def test_full_lifecycle(self, pg_dsn, entity, ipc_dict):
         from discogskit.writers.postgresql import PostgreSQLWriter
 
@@ -282,17 +272,6 @@ class TestPostgreSQLWriter:
 @pytest.mark.integration
 class TestOverwriteSafety:
     """``--overwrite`` replaces only discogskit's own tables, in the schema it loads into."""
-
-    @pytest.fixture()
-    def entity(self):
-        return get("artists")
-
-    @pytest.fixture()
-    def ipc_dict(self, artists_xml_file):
-        size = os.path.getsize(artists_xml_file)
-        return extract_chunk_to_ipc(
-            ChunkArgs("artists", str(artists_xml_file), 0, size)
-        )
 
     @pytest.fixture()
     def schemas(self, pg_dsn):
@@ -821,17 +800,6 @@ class TestIndexAbort:
 class TestPgSchema:
     """``--pg-schema``/``--pg-create-schema``: target a specific schema (#53)."""
 
-    @pytest.fixture()
-    def entity(self):
-        return get("artists")
-
-    @pytest.fixture()
-    def ipc_dict(self, artists_xml_file):
-        size = os.path.getsize(artists_xml_file)
-        return extract_chunk_to_ipc(
-            ChunkArgs("artists", str(artists_xml_file), 0, size)
-        )
-
     def test_rejects_nonexistent_schema_without_create_flag(self, pg_dsn):
         from discogskit.writers.postgresql import PostgreSQLWriter
 
@@ -1156,7 +1124,88 @@ class TestPgSchema:
                 )
 
 
+def _libpq_options(options: str) -> list[str]:
+    """Split a libpq ``options`` value as the server does: whitespace separates arguments, and a
+    backslash makes the next character literal."""
+    args: list[str] = []
+    arg: list[str] | None = None
+    chars = iter(options)
+    for ch in chars:
+        if ch.isspace():
+            if arg is not None:
+                args.append("".join(arg))
+                arg = None
+            continue
+        if arg is None:
+            arg = []
+        arg.append(next(chars) if ch == "\\" else ch)
+    if arg is not None:
+        args.append("".join(arg))
+    return args
+
+
+class TestDsnWithSchema:
+    @pytest.mark.parametrize(
+        "schema",
+        ["discogs", 'say "hi"', "back\\slash", "tab\tand space", 'all "\\ \t'],
+        ids=["plain", "double-quote", "backslash", "whitespace", "everything"],
+    )
+    @pytest.mark.parametrize(
+        "dsn, existing",
+        [
+            ("postgresql://u@h:5432/db", []),
+            (
+                "host=h dbname=db options='-cstatement_timeout=0'",
+                ["-cstatement_timeout=0"],
+            ),
+            (
+                "postgresql://u@h/db?options=-cwork_mem%3D64MB%20-cgeqo%3Doff",
+                ["-cwork_mem=64MB", "-cgeqo=off"],
+            ),
+        ],
+        ids=["url", "key-value-with-options", "url-with-options"],
+    )
+    def test_search_path_is_the_quoted_schema(self, dsn, existing, schema):
+        """The server reads back exactly the quoted identifier, after any options already set."""
+        from psycopg import sql
+        from psycopg.conninfo import conninfo_to_dict
+
+        from discogskit.writers.postgresql import _dsn_with_schema
+
+        params = conninfo_to_dict(_dsn_with_schema(dsn, schema))
+        options = params.pop("options")
+        assert isinstance(options, str)
+
+        assert _libpq_options(options) == [
+            *existing,
+            "-csearch_path=" + sql.Identifier(schema).as_string(None),
+        ]
+        original = conninfo_to_dict(dsn)
+        original.pop("options", None)
+        assert params == original
+
+
 class TestSplitTableGroups:
+    def test_balances_by_weight(self):
+        """Heaviest table first, each into the lightest group: round-robin would pair 4+2 and 3+1."""
+        from discogskit.entities import get
+        from discogskit.writers.postgresql import _split_table_groups
+
+        entity = dataclasses.replace(
+            get("artists"),
+            table_weights={
+                "artist_aliases": 3,
+                "artist_groups": 2,
+                "artist_members": 1,
+                "artists": 4,
+            },
+        )
+
+        assert _split_table_groups(2, entity) == [
+            ["artists", "artist_members"],
+            ["artist_aliases", "artist_groups"],
+        ]
+
     def test_distributes_all_tables(self):
         from discogskit.entities import get
         from discogskit.writers.postgresql import _split_table_groups
@@ -1167,6 +1216,17 @@ class TestSplitTableGroups:
         assert len(groups) == 3
         all_tables = [t for g in groups for t in g]
         assert sorted(all_tables) == sorted(entity.table_order)
+
+    def test_more_groups_than_tables(self):
+        """Each table gets a group of its own; the extra groups stay empty (the writer caps workers
+        at the table count, so it never asks for them)."""
+        from discogskit.entities import get
+        from discogskit.writers.postgresql import _split_table_groups
+
+        entity = get("artists")
+        groups = _split_table_groups(len(entity.table_order) + 2, entity)
+
+        assert sorted(groups) == [[], [], *sorted([t] for t in entity.table_order)]
 
     def test_single_group(self):
         from discogskit.entities import get
