@@ -14,7 +14,7 @@ bounded number of chunks in flight::
         v
     N byte-range chunks
         |
-        +---> [Stage 3a: Parse workers]  ProcessPoolExecutor (spawn)
+        +---> [Stage 3a: Parse workers]  multiprocessing.Process (spawn)
         |         Each worker reads its byte range, wraps in an XML
         |         envelope, parses with lxml iterparse, and produces
         |         Arrow IPC buffers (one per normalized table).
@@ -54,34 +54,37 @@ Key design decisions
 - **Writer thread**: decouples parsing from database writes.  Without it,
   the main process would sequentially consume an IPC dict and flush it,
   leaving parse workers idle during flushes.
-- **Futures for both stages**: a parse error, a dead worker
-  (``BrokenProcessPool``) or a writer error reaches the main thread as soon
-  as its future completes. Writes queued behind a failed one are skipped.
-  Any failure (writer, parser, dead worker, Ctrl+C) cancels queued chunks
-  and writes, then waits for the chunks already being parsed and the
-  in-flight write, so the writer is idle before the caller closes it. On
-  Ctrl+C, the writer's ``cancel()`` first cancels the in-flight write, which
-  may otherwise wait forever on a stalled database server.
+- **Parse worker processes owned by the pipeline**: each worker has pipes
+  of its own, and the main thread waits on the workers' result pipes, their
+  process sentinels and the writes together. A worker holds the only write
+  end of its result pipe, so a worker that dies, even halfway through
+  sending its result, ends the pipe, and the run fails with
+  ``BrokenProcessPool`` instead of waiting forever for the rest of the
+  message. A parse error or a writer error reaches the main thread as soon
+  as it happens. Writes queued behind a failed one are skipped.
+- **Stopping**: any failure (writer, parser, dead worker, Ctrl+C) kills the
+  parse workers, drops queued writes and waits for the in-flight write, so
+  the writer is idle before the caller closes it. On Ctrl+C, the writer's
+  ``cancel()`` first cancels the in-flight write, which may otherwise wait
+  forever on a stalled database server.
 """
 
 from __future__ import annotations
 
 import multiprocessing
 import signal
+import socket
 import threading
 import time
+import traceback
 from collections import deque
-from concurrent.futures import (
-    FIRST_COMPLETED,
-    Future,
-    ProcessPoolExecutor,
-    ThreadPoolExecutor,
-    wait,
-)
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass
+from multiprocessing.connection import wait
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from rich.console import Console
 from rich.progress import (
@@ -124,6 +127,10 @@ def _fmt_time(seconds: float) -> str:
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from multiprocessing.connection import Connection
+    from multiprocessing.process import BaseProcess
+
     import pyarrow as pa
 
 
@@ -182,10 +189,11 @@ class PipelineConfig:
 
     ``entity`` is a key of ``ENTITIES`` and must match the dump at ``gz_path`` (``detect_entity()`` reads it from a
     Discogs dump file name). ``chunk_mb`` sets the rough size, in MB, of the chunks the XML is split into, and
-    ``parse_workers`` the number of parse processes. At most ``parse_workers + write_queue`` chunks are being parsed
-    or waiting to be written at once. ``keep_xml`` keeps the decompressed XML after a successful run. ``profile``
-    fills ``PipelineResult.profile_data`` and prints per-chunk lines instead of a progress bar; ``progress`` shows a
-    progress bar when the console is a terminal. ``strict`` reports the XML elements no parser handled.
+    ``parse_workers`` the number of parse processes, at least 1. At most ``parse_workers + write_queue`` chunks are
+    being parsed or waiting to be written at once. ``keep_xml`` keeps the decompressed XML after a successful run.
+    ``profile`` fills ``PipelineResult.profile_data`` and prints per-chunk lines instead of a progress bar;
+    ``progress`` shows a progress bar when the console is a terminal. ``strict`` reports the XML elements no parser
+    handled.
     """
 
     chunk_mb: int
@@ -381,6 +389,149 @@ def _watch(thread: threading.Thread) -> threading.Event:
     return done
 
 
+class _ParseFailure(NamedTuple):
+    """A worker's reply for a chunk it failed to parse, in place of its ``ChunkResult``."""
+
+    error: BaseException
+    # The error's traceback in the worker, formatted.
+    traceback: str
+
+
+class _RemoteTraceback(Exception):
+    """A parse error's traceback in the worker, chained to the error as its ``__cause__``."""
+
+    def __str__(self) -> str:
+        return self.args[0]
+
+
+@dataclass(eq=False)
+class _ParseWorker:
+    """One parse worker process and the main process's ends of its pipes."""
+
+    # The chunk the worker is parsing, or None while it's idle.
+    chunk: ChunkArgs | None
+    process: BaseProcess
+    # Replies from the worker.
+    results: Connection
+    # Chunks to the worker.
+    tasks: Connection
+
+
+def _format_traceback(error: BaseException) -> str:
+    return "".join(traceback.format_exception(type(error), error, error.__traceback__))
+
+
+def _parse_worker(
+    tasks: Connection, results: Connection, parse: Callable[[ChunkArgs], ChunkResult]
+) -> None:
+    """Main function of a parse worker process: parse each chunk from ``tasks`` and send its ``ChunkResult``, or a
+    ``_ParseFailure``, to ``results``, until the main process closes ``tasks``."""
+    # Ctrl+C reaches the whole process group. The main process handles it and
+    # stops the workers, which would otherwise dump tracebacks.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    while True:
+        try:
+            chunk = tasks.recv()
+        except EOFError:
+            return
+        try:
+            reply: ChunkResult | _ParseFailure = parse(chunk)
+        except Exception as exc:  # noqa: BLE001
+            # The main process re-raises it.
+            reply = _ParseFailure(exc, _format_traceback(exc))
+        try:
+            results.send(reply)
+        except OSError:
+            # The main process is gone: nobody wants the result.
+            return
+        except Exception as exc:  # noqa: BLE001
+            # A reply pickle can't serialize fails before any of it is sent, so
+            # the pipe can still carry the error that stopped it.
+            results.send(_ParseFailure(exc, _format_traceback(exc)))
+        # Otherwise the sent result stays in memory while the next chunk parses.
+        del reply
+
+
+def _start_parse_worker() -> _ParseWorker:
+    """Start one parse worker process, idle until it's sent a chunk."""
+    context = multiprocessing.get_context("spawn")
+    # Pipes rather than one duplex connection, a socket pair, which moved a
+    # 150 MB result about 2.5 times slower than a pipe on macOS.
+    results, child_results = context.Pipe(duplex=False)
+    child_tasks, tasks = context.Pipe(duplex=False)
+    # extract_chunk_to_ipc is looked up when the worker starts, so tests can
+    # replace it.
+    process = context.Process(
+        args=(child_tasks, child_results, extract_chunk_to_ipc),
+        daemon=True,
+        name="discogskit-parse",
+        target=_parse_worker,
+    )
+    try:
+        process.start()
+    except BaseException:
+        results.close()
+        tasks.close()
+        raise
+    finally:
+        # From here on the worker holds the only write end of its results pipe,
+        # so the pipe ends when the worker dies, even mid-message.
+        child_results.close()
+        child_tasks.close()
+    return _ParseWorker(chunk=None, process=process, results=results, tasks=tasks)
+
+
+def _stop_parse_workers(workers: list[_ParseWorker]) -> None:
+    """Kill every worker, busy or not, wait for it to exit and release its resources.
+
+    Each worker leaves ``workers`` once it has exited and before it's closed, so calling this again, even after an
+    interrupted call, never terminates a closed process.
+    """
+    for worker in workers:
+        worker.process.terminate()
+    while workers:
+        workers[-1].process.join()
+        worker = workers.pop()
+        try:
+            worker.process.close()
+        finally:
+            worker.results.close()
+            worker.tasks.close()
+
+
+def _worker_died(worker: _ParseWorker) -> BrokenProcessPool:
+    """The error for a worker that died; ``worker.chunk`` is the chunk it took with it, if any."""
+    # Its pipe or sentinel already shows the worker gone, so this
+    # returns at once; the timeout only bounds the wait if the OS lags.
+    worker.process.join(timeout=1)
+    exit_code = worker.process.exitcode
+    how = "" if exit_code is None else f" with exit code {exit_code}"
+    chunk = worker.chunk
+    where = (
+        ""
+        if chunk is None
+        else f" while parsing {chunk.file_path} (chunk bytes {chunk.start}-{chunk.end})"
+    )
+    return BrokenProcessPool(
+        f"A parse worker died{how}{where}. A worker killed for using too much"
+        " memory dies this way; fewer parse workers or smaller chunks need less."
+    )
+
+
+def _receive(worker: _ParseWorker) -> ChunkResult:
+    """Receive the result of the chunk ``worker`` is parsing; re-raise its parse error, or raise if it died."""
+    try:
+        reply = worker.results.recv()
+    except (EOFError, OSError):
+        # The pipe ended: before the reply (EOFError) or halfway through it (OSError).
+        raise _worker_died(worker) from None
+    worker.chunk = None
+    if isinstance(reply, _ParseFailure):
+        reply.error.__cause__ = _RemoteTraceback(f'\n"""\n{reply.traceback}"""')
+        raise reply.error
+    return reply
+
+
 def _parse_and_write(
     chunks: list[ChunkArgs],
     chunk_writer: _ChunkWriter,
@@ -394,7 +545,7 @@ def _parse_and_write(
 
     A chunk counts against a budget of ``parse_workers + write_queue`` from its
     submission to a parse worker until its write completes; a chunk is
-    submitted only while under budget, and only to an otherwise idle worker.
+    submitted only while under budget, and only to an idle worker.
     A slow writer therefore idles the workers instead of letting parsed chunks
     pile up in memory.
 
@@ -406,11 +557,23 @@ def _parse_and_write(
     """
     budget = parse_workers + write_queue
     queued = deque(chunks)
-    parsing: set[Future[ChunkResult]] = set()
     put_blocked = 0.0
     unknown: set[str] = set()
+    # The writer thread wakes the main thread through this socket pair when a
+    # write completes, so one wait() covers the workers and the writes.
+    wake_r, wake_w = socket.socketpair()
+    # A full socket already holds a wake-up: one is enough, since the main
+    # thread checks every write once woken.
+    wake_w.setblocking(False)
+    workers: list[_ParseWorker] = []
     # Unfinished writes in submission order, which is the order they finish in.
     writes: deque[Future[None]] = deque()
+
+    def wake(_: Future[None]) -> None:
+        # Best effort: a full socket (BlockingIOError) already holds a wake-up,
+        # and a write that ends after the run has nobody to wake.
+        with suppress(OSError):
+            wake_w.send(b"\0")
 
     # The writer thread prints to the run's console: a new thread may not inherit the caller's context.
     write_executor = ThreadPoolExecutor(
@@ -419,7 +582,6 @@ def _parse_and_write(
         max_workers=1,
         thread_name_prefix="discogskit-writer",
     )
-    parse_executor: ProcessPoolExecutor | None = None
     writer_done: threading.Event | None = None
     try:
         # Start the writer thread before the first real write. The executor
@@ -429,63 +591,75 @@ def _parse_and_write(
         # every write runs on; a Ctrl+C before it's watched comes before any
         # write, so there's nothing to cancel.
         writer_done = _watch(write_executor.submit(threading.current_thread).result())
-        # Workers ignore SIGINT so they don't dump tracebacks on Ctrl+C; the
-        # parent handles the interrupt and stops them.
-        parse_executor = ProcessPoolExecutor(
-            initargs=(signal.SIGINT, signal.SIG_IGN),
-            initializer=signal.signal,
-            max_workers=parse_workers,
-            mp_context=multiprocessing.get_context("spawn"),
-        )
+        # No more workers than chunks: the others would start only to be stopped.
+        for _ in range(min(parse_workers, len(chunks))):
+            workers.append(_start_parse_worker())
         while True:
-            # At most one chunk per worker: the executor marks a submitted chunk
-            # as running once it's queued for a worker, and a running chunk
-            # can't be cancelled, so a deeper queue would all get parsed after
-            # a failure or Ctrl+C.
-            while (
-                queued
-                and len(parsing) < parse_workers
-                and len(parsing) + len(writes) < budget
-            ):
-                parsing.add(
-                    parse_executor.submit(extract_chunk_to_ipc, queued.popleft())
-                )
+            idle = [worker for worker in workers if worker.chunk is None]
+            parsing = len(workers) - len(idle)
+            while queued and idle and parsing + len(writes) < budget:
+                worker = idle.pop()
+                chunk = queued.popleft()
+                try:
+                    worker.tasks.send(chunk)
+                except OSError:
+                    # The worker died before its sentinel was seen.
+                    raise _worker_died(worker) from None
+                worker.chunk = chunk
+                parsing += 1
             if not parsing and not writes:
                 break
             # Chunks still queued with a worker idle means the budget is full
             # and the writer is what holds it.
-            writer_behind = bool(queued) and len(parsing) < parse_workers
+            writer_behind = bool(queued) and bool(idle)
             t_wait = time.perf_counter()
-            done, _ = wait([*parsing, *writes], return_when=FIRST_COMPLETED)
+            # A sentinel shows a worker that died, even an idle one.
+            ready = wait(
+                [
+                    wake_r,
+                    *(worker.results for worker in workers if worker.chunk is not None),
+                    *(worker.process.sentinel for worker in workers),
+                ]
+            )
             if profile and writer_behind:
                 put_blocked += time.perf_counter() - t_wait
-            # result() re-raises a writer error, a parse error, or
-            # BrokenProcessPool when a worker died and took its chunk with it.
+            if wake_r in ready:
+                wake_r.recv(4096)
+            # result() re-raises a writer error.
             while writes and writes[0].done():
                 writes.popleft().result()
-            parsed = parsing & done
-            parsing -= parsed
-            # pop() leaves no name bound to a handed-off future, and tables is
-            # deleted once handed off: either would hold the chunk's IPC buffers
-            # until released; the write keeps its own reference only until the
-            # write is done.
-            while parsed:
-                tables, chunk_unknown = parsed.pop().result()
-                unknown.update(chunk_unknown)
-                writes.append(write_executor.submit(chunk_writer.write, tables))
-                del tables
-        parse_executor.shutdown()
+            for worker in workers:
+                if worker.chunk is not None and worker.results in ready:
+                    # tables is deleted once handed off: it would hold the
+                    # chunk's IPC buffers until rebound; the write keeps its
+                    # own reference only until the write is done.
+                    tables, chunk_unknown = _receive(worker)
+                    unknown.update(chunk_unknown)
+                    write = write_executor.submit(chunk_writer.write, tables)
+                    del tables
+                    write.add_done_callback(wake)
+                    writes.append(write)
+                if worker.process.sentinel in ready:
+                    raise _worker_died(worker)
+        _stop_parse_workers(workers)
         write_executor.shutdown()
     except BaseException as exc:
         # Restore the terminal before anything below waits.
         if progress_bar is not None:
             progress_bar.stop()
         if isinstance(exc, KeyboardInterrupt):
-            # Chunks being parsed can't be interrupted; say why we pause.
+            # The in-flight write may not stop at once; say why we pause.
             current().print(
-                "\n  [yellow]Interrupted — waiting for in-flight chunks to finish …[/]"
+                "\n  [yellow]Interrupted — waiting for the in-flight write to stop …[/]"
             )
-        # Drop queued writes now, so none starts while the workers stop.
+        # Nothing will use what the workers are parsing: stop them now. Waiting
+        # for them to exit comes after the in-flight write has stopped, so a
+        # second Ctrl+C can't skip that wait; nor can one landing here, as
+        # _stop_parse_workers() below terminates any worker this misses.
+        with suppress(KeyboardInterrupt):
+            for worker in workers:
+                worker.process.terminate()
+        # Drop queued writes now, so none starts while the in-flight one stops.
         write_executor.shutdown(cancel_futures=True, wait=False)
         if isinstance(exc, KeyboardInterrupt) and writer_done is not None:
             # Cancel the in-flight write, which may otherwise wait forever on a
@@ -493,17 +667,14 @@ def _parse_and_write(
             # run on the main thread. After dropping the queued writes, so the
             # thread exits once that write ends.
             _cancel_until_done(chunk_writer.writer, writer_done)
-        if parse_executor is not None:
-            # Drop queued chunks and wait for those being parsed (about one per
-            # worker). Not terminate_workers() (3.14+): a worker killed while
-            # sending its result leaves a partial message in the result pipe,
-            # and the executor's manager thread then blocks on it forever,
-            # hanging interpreter exit.
-            parse_executor.shutdown(cancel_futures=True)
         # Wait for the in-flight write, so the writer is idle before the
         # caller closes it.
         write_executor.shutdown()
+        _stop_parse_workers(workers)
         raise
+    finally:
+        wake_r.close()
+        wake_w.close()
     return put_blocked, sorted(unknown)
 
 
@@ -524,6 +695,11 @@ def run(
 
 def _run(config: PipelineConfig, writer: Writer) -> PipelineResult:
     entity = ENTITIES[config.entity]
+    # Fail before touching the XML or the output: no worker would parse anything.
+    if config.parse_workers < 1:
+        raise ValueError(
+            f"parse_workers must be at least 1, got {config.parse_workers}"
+        )
 
     gz_path = config.gz_path
     xml_path = gz_path.with_suffix("")

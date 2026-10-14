@@ -30,6 +30,18 @@ uv tool install discogskit
 uvx discogskit
 ```
 
+### AI coding agent skill
+
+Install the skill so your AI coding agent can find and drive discogskit:
+
+```bash
+npx skills add jmfontaine/discogskit
+```
+
+The installed skill is a thin pointer. The usage guide ships inside the package, so it always matches the installed
+version: `discogskit skills get core` prints it, `discogskit skills get core --full` adds every command and option,
+the table schemas, the DDL `load` runs and example queries, and `discogskit skills path` prints where the files are.
+
 ## Usage
 
 ```text
@@ -48,6 +60,7 @@ uvx discogskit
 ╭─ Commands ───────────────────────────────────────────────────────────────────────────────────╮
 │ convert  Convert Discogs XML dumps into flat files (Parquet or JSONL).                       │
 │ load     Load Discogs XML dumps into a database.                                             │
+│ skills   List or print the bundled agent skills: usage guides matching this version.         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
 ```
@@ -172,7 +185,8 @@ JSONL bzip2 1-9, Parquet gzip 1-9, Parquet zstd -131072 to 22. `snappy` and `non
 │                                                                     [default: 256]           │
 │ --parse-workers                            <int range> [x>=1]       Number of parallel parse │
 │                                                                     workers                  │
-│                                                                     [default: 4]             │
+│                                                                     [default: (half the CPU  │
+│                                                                     count, at least 1)]      │
 │ --write-queue                              <int range> [x>=1]       Chunks parsing may run   │
 │                                                                     ahead of writing: at     │
 │                                                                     most --parse-workers     │
@@ -237,7 +251,10 @@ dropped, so a load that can't open them (for example, when the server reaches `m
 tables as they were.
 
 `--pg-write-workers` splits each entity's tables into groups, one per worker, and writes each group on its own
-connection. An entity with fewer tables than workers gets one worker per table.
+connection. An entity with fewer tables than workers gets one worker per table. With more than one worker, each group
+commits separately, so a failed load can leave part of a chunk in some tables: those of the groups that committed, but
+not the others. When one group fails, the load waits for the other groups to finish before it reports the error.
+After any failure, re-run the whole load with `--overwrite`.
 
 In SQLite, the tables are likewise dropped and recreated in one transaction: if a drop fails (e.g. with `--fk`, a
 table of your own references `artists` and has rows), the load stops and every table stays as it was. During the
@@ -252,11 +269,9 @@ compact JSON text with non-ASCII characters as-is, e.g. `["Björk","ビョーク
 
 After a failed or interrupted `load` (crash, Ctrl+C, lost connection), re-run it with `--overwrite`: the tables
 aren't consistent until a load finishes. Chunks commit as they go, so earlier chunks stay in the tables after a
-failure. With PostgreSQL and `--pg-write-workers` above its default of 1, each table group commits on its own
-connection, so the chunk that was in progress when the failure happened can itself end up partially written — some
-of its tables committed, others not. When one group fails, the load waits for the other groups to finish before it
-reports the error. With `--pg-write-workers 1` (the default) and with SQLite, a chunk commits in a single transaction
-on one connection, so it's never partially written, but earlier, already-committed chunks are still not rolled back.
+failure. With `--pg-write-workers 1` (the default) and with SQLite, a chunk commits in a single transaction on one
+connection, so it's never partially written, but earlier, already-committed chunks are still not rolled back. With
+`--pg-write-workers` above 1, the chunk that was in progress can itself end up partially written, as described above.
 
 On Ctrl+C, a PostgreSQL load cancels the write in progress on the server instead of waiting for it, so it stops
 promptly even when that write waits on a lock held by another session. The cancelled transaction commits nothing,
@@ -296,7 +311,8 @@ absolute) or a plain path ending in `.db`, `.sqlite`, or `.sqlite3`. Other `sqli
 │                                                          this size (MB)                      │
 │                                                          [default: 256]                      │
 │ --parse-workers                      <int range> [x>=1]  Number of parallel parse workers    │
-│                                                          [default: 4]                        │
+│                                                          [default: (half the CPU count, at   │
+│                                                          least 1)]                           │
 │ --write-queue                        <int range> [x>=1]  Chunks parsing may run ahead of     │
 │                                                          writing: at most --parse-workers    │
 │                                                          plus this many chunks are parsing   │
@@ -339,7 +355,13 @@ absolute) or a plain path ending in `.db`, `.sqlite`, or `.sqlite3`. Other `sqli
 │                                                                    crash)                    │
 │                                                                    [default: no-pg-unlogged] │
 │ --pg-write-workers                             <int range> [x>=1]  Number of parallel        │
-│                                                                    database write workers    │
+│                                                                    database write workers.   │
+│                                                                    Above 1, each table group │
+│                                                                    commits separately, so a  │
+│                                                                    failed load can leave     │
+│                                                                    part of a chunk in some   │
+│                                                                    tables: re-run the whole  │
+│                                                                    load with --overwrite     │
 │                                                                    [default: 1]              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
@@ -426,6 +448,7 @@ and name may change in any release.
 | `PipelineConfig` | `run()`'s settings: the dump, its entity, and the options `convert` and `load` take |
 | `PipelineResult` | Records loaded and seconds spent per stage |
 | `get_writer(dsn, ...)` | A SQLite or PostgreSQL `Writer` for a DSN, with `load`'s options as keyword arguments |
+| `get_file_writer(output_dir, output_format, ...)` | A Parquet (`"parquet"`) or JSONL (`"jsonl"`) `Writer` that writes under `output_dir`, with `convert`'s `compression`, `compression_level` and `overwrite` options as keyword arguments |
 | `Writer` | The protocol every writer implements |
 | `ENTITIES` | Every entity (`artists`, `labels`, `masters`, `releases`) by name, as an `EntityDef` |
 | `EntityDef` | One entity's tables and Arrow schemas |
@@ -433,7 +456,9 @@ and name may change in any release.
 | `OutputExistsError` | Raised when the output exists and the writer doesn't overwrite it |
 | `DecompressError` | Raised when a `.xml.gz` is truncated, corrupt or not gzip |
 
-Other failures raise other exceptions, e.g. `ValueError` for a value discogskit can't store.
+`get_writer()` and `get_file_writer()` raise `ValueError` for an option they can't use, such as a codec the format
+doesn't support or a compression level out of the codec's range, before creating any file. Other failures raise other
+exceptions, e.g. `ValueError` for a value discogskit can't store.
 
 ```python
 from pathlib import Path
@@ -455,7 +480,9 @@ if __name__ == "__main__":
         strict=False,
         write_queue=2,
     )
-    writer = discogskit.get_writer("discogs.db", overwrite=True)
+    # Writes output/artists/*.parquet. Pass "jsonl" for JSONL files instead, or use
+    # discogskit.get_writer("discogs.db") to load a SQLite database.
+    writer = discogskit.get_file_writer("output", "parquet", overwrite=True)
     try:
         result = discogskit.run(config, writer, console=Console(quiet=True))
     finally:

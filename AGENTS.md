@@ -24,6 +24,7 @@ just verify-types       # Public API type coverage (pyright)
 just qa                 # All quality checks
 just dead-code          # Find unused code
 just deps-unused        # Find unused/undeclared deps
+just skill-references   # Regenerate the agent skill's command, schema and DDL references
 ```
 
 ## Architecture
@@ -34,8 +35,8 @@ The core is a multi-process pipeline in `src/discogskit/pipeline.py`:
 
 1. **Decompress** — `rapidgzip` parallel decompression of .xml.gz, run in a child process (spawn start method) so that rapidgzip aborting or hanging on truncated input ends in `DecompressError`: the parent raises it when the child dies without reporting a result or reads no chunk for `_STALL_TIMEOUT`, and kills the child on every failure; a `filelock.ReadWriteLock` on `<name>.xml.lock` lets concurrent runs share the XML (write lock to decompress/delete, read lock to read), and a `<name>.xml.discogskit` marker recording the source .gz marks the XML as discogskit's own, the only kind it reuses or deletes
 2. **Split** — Memory-mapped scanning for XML element boundaries, producing byte-range chunks (`entities/_split.py`)
-3. **Parse** — `concurrent.futures.ProcessPoolExecutor` workers (spawn start method) run the shared `entities/_worker.py` worker on each chunk with lxml and emit Arrow IPC buffers, plus, with `--strict`, the paths of the elements no parser handled; workers print nothing, and the main process reports each path once per entity
-4. **Write** — Single writer thread (one-worker `ThreadPoolExecutor`) deserializes IPC and writes to target format. A chunk counts against a budget of `parse_workers + write_queue` from parse submission until its write completes, and the main thread submits chunks only while under it, so a slow writer idles the workers instead of piling parsed chunks up in memory. Parse errors, a dead worker (`BrokenProcessPool`) and writer errors re-raise as soon as their future completes. On Ctrl+C the main thread calls the writer's `cancel()`, because ADBC cancels a statement on SIGINT only on the main thread
+3. **Parse** — Worker processes the pipeline starts itself (`multiprocessing`, spawn start method), each with a connection of its own, run the shared `entities/_worker.py` worker on each chunk with lxml and emit Arrow IPC buffers, plus, with `--strict`, the paths of the elements no parser handled; workers print nothing, and the main process reports each path once per entity
+4. **Write** — Single writer thread (one-worker `ThreadPoolExecutor`) deserializes IPC and writes to target format. A chunk counts against a budget of `parse_workers + write_queue` from parse submission until its write completes, and the main thread submits chunks only while under it, so a slow writer idles the workers instead of piling parsed chunks up in memory. The main thread waits on the workers' connections, their process sentinels and the writes together (`multiprocessing.connection.wait`), so parse errors, a dead worker (`BrokenProcessPool`, even one killed halfway through sending its result) and writer errors re-raise as soon as they happen. Any failure kills the parse workers. On Ctrl+C the main thread calls the writer's `cancel()`, because ADBC cancels a statement on SIGINT only on the main thread
 5. **Index/Cleanup** — Parallel index creation for DB targets, optional XML cleanup
 
 Multiprocessing is used because lxml is CPU-bound and holds the GIL. Arrow IPC is the inter-process format (no pickling overhead).
@@ -43,8 +44,9 @@ Multiprocessing is used because lxml is CPU-bound and holds the GIL. Arrow IPC i
 ### Key modules
 
 - **`entities/`** — One module per Discogs entity (artists, labels, masters, releases) with its table schemas and record parser, plus the definitions they share (`_def.py`: `EntityDef`, `ChunkArgs`, `Cols`), the shared splitter (`_split.py`) and chunk worker (`_worker.py`). `entities/__init__.py` builds `ENTITIES` from an explicit tuple of the modules' `ENTITY` definitions. Writers generate SQL DDL from the schemas. Releases is the most complex (12 normalized tables).
-- **`writers/`** — Output format implementations (parquet, jsonl, sqlite, postgresql). `get_writer` in `__init__.py` picks the database writer from a DSN.
-- **`cli.py`** — Typer CLI with `convert` and `load` commands.
+- **`writers/`** — Output format implementations (parquet, jsonl, sqlite, postgresql). In `__init__.py`, `get_writer` picks the database writer from a DSN and `get_file_writer` the file writer from a format; `convert` and `load` build their writers through them, and both reject an unusable option with `ValueError` before any file exists.
+- **`cli.py`** — Typer CLI with `convert`, `load` and `skills` commands.
+- **`_skills.py` and `skills/`** — `discogskit skills` serves the agent guide bundled in `skills/core/` (`SKILL.md` and `references/*.md`); `skills/discogskit/SKILL.md` at the repository root is only the discovery stub agents install. `references/commands.md`, `schemas.md` and `ddl.md` are generated by `scripts/skill_references.py` from the CLI, the entity schemas and the writers' DDL: run `just skill-references` after changing any of them (`tests/test_skills.py` fails until you do). `SKILL.md` and `references/queries.md` are hand-written; the SQLite queries are run by the tests.
 - **`decompress.py`** — Gzip decompression wrapper using rapidgzip; `ensure_xml` returns an `XmlLease` the pipeline holds while it reads the XML.
 - **`__init__.py`** — The supported Python API is the package's `__all__`, documented in the README's "Python API" section; `pipeline`, `writers` and `entities` declare their share in their own `__all__`. Changing it means updating the README too.
 - **`_console.py`** — All output goes through `status()`, `error()` and `current()`, never `print()`: `pipeline.run()` points `current()` at the caller's console for the run, including the writer thread.

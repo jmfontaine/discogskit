@@ -1,8 +1,8 @@
 """Shared chunk worker: XML byte range -> normalized Arrow tables -> IPC bytes.
 
-``extract_chunk_to_ipc`` runs in a separate PROCESS (via ``ProcessPoolExecutor``). It must stay a module-level function
-(not a closure or method) so that pickle can send it to the workers, and it receives ``ChunkArgs`` with the entity name
-rather than the ``EntityDef`` itself.
+``extract_chunk_to_ipc`` runs in a separate PROCESS (a parse worker the pipeline starts). It must stay a module-level
+function (not a closure or method) so that pickle can send it to the workers, and it receives ``ChunkArgs`` with the
+entity name rather than the ``EntityDef`` itself.
 
 Workers build up columns as Python lists (one list per column per table), then convert them to Arrow RecordBatches at
 the end of each chunk. This is faster than appending to Arrow arrays incrementally because:

@@ -217,7 +217,7 @@ def _extract_error(tmp_path, entity: str, chunk: bytes) -> tuple[str, int, int, 
         extract_chunk_to_ipc(
             ChunkArgs(end=end, entity=entity, file_path=str(f), start=start)
         )
-    # The pool pickles the error to send it to the parent; the message must survive.
+    # The parse worker pickles the error to send it to the main process; the message must survive.
     message = str(pickle.loads(pickle.dumps(info.value)))
     assert message == str(info.value)
     return str(f), start, end, message
