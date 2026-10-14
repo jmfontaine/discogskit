@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from rich.markup import escape
 from rich.table import Table
 
 from discogskit import pipeline
@@ -267,9 +268,10 @@ def _run_jobs(
     except KeyboardInterrupt:
         console.print("\n  [yellow]Interrupted — cleaning up …[/]")
         raise typer.Exit(130) from None
-    # Top-level error boundary: any failure becomes a one-line error and exit 1.
+    # Top-level error boundary: any failure becomes a one-line error and exit 1. Parse errors quote values from the
+    # dump, which Rich would otherwise read as markup, e.g. an id of "[b]".
     except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]Error:[/] {exc}")
+        console.print(f"[red]Error:[/] {escape(str(exc))}")
         raise typer.Exit(1) from None
     finally:
         writer.close()

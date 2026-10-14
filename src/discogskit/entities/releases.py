@@ -275,7 +275,7 @@ def append_record(
     cols: Cols, elem: etree._Element, unknown: set[str] | None = None
 ) -> None:
     """Parse a <release> element and append all data to column accumulators."""
-    id_text = elem.get("id")
+    id_text = record_id(elem)
     if not id_text:
         warnings.warn("skipping <release> with missing id", stacklevel=2)
         return
@@ -557,11 +557,17 @@ def append_record(
             te["role"].append(role)
 
 
+def record_id(elem: etree._Element) -> str | None:
+    """Return a <release> element's id as written in the XML, or None when it has none."""
+    return elem.get("id")
+
+
 register(
     EntityDef(
         append_record=append_record,
         fk_column="release_id",
         name="releases",
+        record_id=record_id,
         root_tag="release",
         schemas=SCHEMAS,
         table_weights=TABLE_WEIGHTS,
