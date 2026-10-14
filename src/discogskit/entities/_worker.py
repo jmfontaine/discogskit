@@ -58,8 +58,19 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> dict[str, bytes]:
     unknown: set[str] | None = set() if args.strict else None
 
     try:
+        # Comments and processing instructions aren't elements; kept, their callable .tag would reach the parsers'
+        # unknown-element checks. The other options are lxml's hardening, passed explicitly because the defaults vary
+        # by lxml version (6.0.x still resolves entities).
         for _, elem in etree.iterparse(
-            BytesIO(xml_data), events=("end",), tag=entity.root_tag
+            BytesIO(xml_data),
+            events=("end",),
+            huge_tree=False,
+            load_dtd=False,
+            no_network=True,
+            remove_comments=True,
+            remove_pis=True,
+            resolve_entities=False,
+            tag=entity.root_tag,
         ):
             # Only records directly under the container are records; e.g. <label> also appears inside <sublabels>.
             parent = elem.getparent()
