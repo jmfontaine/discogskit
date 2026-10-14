@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import random
+import re
 import sqlite3
 import subprocess
 import sys
@@ -45,6 +46,30 @@ _PARQUET_LEVEL_DEFAULT = {
 
 # A valid-looking .xml.gz filename so detect_entity() succeeds.
 _ENTITY_FILE = "discogs_20260301_artists.xml.gz"
+
+# entity -> (a record with an id, one without, one with an empty id)
+_RECORDS_WITHOUT_ID = {
+    "artists": (
+        "<artist><id>1</id></artist>",
+        "<artist><name>A</name></artist>",
+        "<artist><id/></artist>",
+    ),
+    "labels": (
+        "<label><id>1</id></label>",
+        "<label><name>A</name></label>",
+        "<label><id/></label>",
+    ),
+    "masters": (
+        '<master id="1"/>',
+        "<master><title>A</title></master>",
+        '<master id=""/>',
+    ),
+    "releases": (
+        '<release id="1" status="Accepted"/>',
+        '<release status="Accepted"/>',
+        '<release id="" status="Accepted"/>',
+    ),
+}
 
 
 def _make_gz(tmp_path: Path) -> Path:
@@ -207,6 +232,42 @@ class TestRecordErrorOutput:
         )
         assert result.exit_code == 1
         assert f"Error: {message}" in _unstyle(result.output).splitlines()
+
+    @pytest.mark.parametrize("variant", ["empty", "missing"])
+    @pytest.mark.parametrize("entity", sorted(_RECORDS_WITHOUT_ID))
+    def test_record_without_id_fails(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, entity: str, variant: str
+    ) -> None:
+        """A record without an id stops `convert` with its line instead of vanishing (#94)."""
+        _widen_console(monkeypatch)
+        good, missing, empty = _RECORDS_WITHOUT_ID[entity]
+        gz = tmp_path / f"discogs_20260301_{entity}.xml.gz"
+        with gzip.open(gz, "wt") as f:
+            f.write(
+                f"<?xml version='1.0' encoding='UTF-8'?>\n<{entity}>\n"
+                f"{good}\n{missing if variant == 'missing' else empty}\n</{entity}>"
+            )
+        result = runner.invoke(
+            app,
+            [
+                "convert",
+                str(gz),
+                "--format",
+                "jsonl",
+                "--no-progress",
+                "--output",
+                str(tmp_path / "out"),
+                "--parse-workers",
+                "1",
+            ],
+        )
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        assert re.search(
+            rf"^Error: Invalid <{entity[:-1]}> record in .* at chunk line 2 .*: missing or empty id$",
+            output,
+            re.MULTILINE,
+        ), output
 
 
 class TestWriterAlwaysClosed:
