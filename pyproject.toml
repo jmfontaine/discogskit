@@ -81,6 +81,7 @@ ignore_names = [
   "_callback",           # Typer app.callback()
   "convert",             # Typer app.command()
   "fetch_command",       # Typer app.command()
+  "get_skill",           # Typer app.command()
   "handle_starttag",     # HTMLParser override
   "load",                # Typer app.command()
   "main",                # Typer app.command()
@@ -88,4 +89,5 @@ ignore_names = [
   "readable",            # RawIOBase override
   "resolve_command",     # Typer app.command()
   "return_value",        # mock attribute setup
+  "skill_path",          # Typer app.command()
 ]
