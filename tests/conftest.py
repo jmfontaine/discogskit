@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import os
 import sys
+from typing import NoReturn
 
 import pyarrow as pa
 import pytest
@@ -296,10 +297,20 @@ def releases_xml_file(tmp_path):
 # ------------------------------------------------------------------------------------------------------------------------
 
 
+def _docker_unavailable(reason: str) -> NoReturn:
+    """Skip a PostgreSQL test, or fail it when ``DISCOGSKIT_REQUIRE_DOCKER=1`` (set in CI)."""
+    if os.environ.get("DISCOGSKIT_REQUIRE_DOCKER") == "1":
+        pytest.fail(f"{reason}, but DISCOGSKIT_REQUIRE_DOCKER=1 requires it")
+    pytest.skip(reason)
+
+
 @pytest.fixture(scope="session")
 def pg_container():
-    pytest.importorskip("testcontainers")
+    import importlib.util
     import subprocess
+
+    if importlib.util.find_spec("testcontainers") is None:
+        _docker_unavailable("testcontainers not installed")
 
     # Check Docker is available
     try:
@@ -314,7 +325,7 @@ def pg_container():
         subprocess.CalledProcessError,
         subprocess.TimeoutExpired,
     ):
-        pytest.skip("Docker not available")
+        _docker_unavailable("Docker not available")
 
     from testcontainers.postgres import PostgresContainer
 

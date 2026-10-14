@@ -61,7 +61,7 @@ analysis.allowed-unresolved-imports = [ "rapidgzip" ]
 [tool.pytest]
 ini_options.testpaths = [ "tests" ]
 ini_options.markers = [
-  "integration: integration tests (SQLite lifecycle, PostgreSQL via testcontainers)",
+  "integration: tests that need a PostgreSQL container (testcontainers, Docker)",
 ]
 ini_options.filterwarnings = [
   "error::ResourceWarning",

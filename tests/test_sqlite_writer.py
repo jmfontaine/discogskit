@@ -1,4 +1,4 @@
-"""Integration tests for SQLiteWriter full lifecycle."""
+"""Tests for SQLiteWriter full lifecycle."""
 
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ from tests.conftest import (
 )
 
 
-@pytest.mark.integration
 @pytest.mark.parametrize("fk", [False, True], ids=["no-fk", "fk"])
 @pytest.mark.parametrize(
     "entity_name, xml",
@@ -67,7 +66,6 @@ def test_every_entity_loads(tmp_path, entity_name, xml, fk):
     assert any(expected[name] for name in entity.table_order[1:])
 
 
-@pytest.mark.integration
 class TestSQLiteWriter:
     @pytest.fixture()
     def entity(self):

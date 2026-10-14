@@ -1,4 +1,4 @@
-"""Integration tests for JSONLWriter full lifecycle."""
+"""Tests for JSONLWriter full lifecycle."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ from tests.conftest import (
 )
 
 
-@pytest.mark.integration
 class TestJSONLWriter:
     @pytest.fixture()
     def entity(self):
