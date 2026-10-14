@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import pyarrow as pa
 import pytest
 from rich.text import Text
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 
 from discogskit import pipeline
 from discogskit._console import console
@@ -394,6 +394,136 @@ class TestUnrecognizedFileExtension:
         assert result.exit_code == 1
         assert f"{other}: not a .xml.gz dump" in _unstyle(result.output)
         run.assert_not_called()
+
+
+# Discogs text is full of BBCode-style tags that Rich reads as markup: an unmatched closer
+# raised MarkupError inside the error handler, and matched tags or a bracketed word vanished.
+# Rich also turns emoji codes into emoji, and markup.escape() doubles a trailing backslash.
+_MARKUP_TEXT = (
+    "[b]Bold[/b] [url=https://example.com]link[/url] stray [/b] in [backup] :cd: C:\\"
+)
+
+
+class TestLiteralText:
+    """Exception and path text prints verbatim, never as Rich markup (#103)."""
+
+    @staticmethod
+    def _assert_clean_error(result: Result, message: str) -> None:
+        """Exit 1 through typer.Exit with ``message`` intact, not a MarkupError from the handler."""
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        assert type(result.exception) is SystemExit, repr(result.exception)
+        assert f"Error: {message}\n" in output
+
+    @pytest.mark.parametrize("command", ["convert", "load"])
+    @pytest.mark.parametrize("exc_type", [OutputExistsError, RuntimeError])
+    def test_pipeline_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        command: str,
+        exc_type: type[Exception],
+    ) -> None:
+        gz = _make_gz(tmp_path)
+        _widen_console(monkeypatch)
+        with (
+            patch("discogskit.cli.pipeline.run", side_effect=exc_type(_MARKUP_TEXT)),
+            patch("discogskit.cli.get_writer"),
+        ):
+            result = runner.invoke(app, [command, str(gz)])
+        self._assert_clean_error(result, _MARKUP_TEXT)
+
+    def test_writer_construction_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        gz = _make_gz(tmp_path)
+        _widen_console(monkeypatch)
+        with (
+            patch("discogskit.cli.pipeline.run") as run,
+            patch("discogskit.cli.get_writer", side_effect=RuntimeError(_MARKUP_TEXT)),
+        ):
+            result = runner.invoke(app, ["load", str(gz)])
+        self._assert_clean_error(result, _MARKUP_TEXT)
+        run.assert_not_called()
+
+    def test_undetectable_entity_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        gz = tmp_path / "discogs_20260301_[backup].xml.gz"
+        gz.write_bytes(b"not a real gz")
+        _widen_console(monkeypatch)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = runner.invoke(app, ["convert", str(gz)])
+        self._assert_clean_error(
+            result,
+            f"Cannot detect entity from '{gz.name}'. Expected format: "
+            "discogs_YYYYMMDD_ENTITY.xml.gz (known entities: artists, labels, masters, releases)",
+        )
+        run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "name, kind, message",
+        [
+            ("", "dir", "no .xml.gz files found in {p}"),
+            ("discogs_20260301_artists.xml.gz", "missing", "file not found: {p}"),
+            (
+                "discogs_20260301_artists.xml",
+                "file",
+                "{p}: uncompressed .xml input is not supported; pass the original .xml.gz dump",
+            ),
+            ("discogs_20260301_artists.xml.bz2", "file", "{p}: not a .xml.gz dump"),
+        ],
+        ids=["empty-dir", "missing-file", "uncompressed-xml", "not-xml-gz"],
+    )
+    def test_path_in_input_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        name: str,
+        kind: str,
+        message: str,
+    ) -> None:
+        parent = tmp_path / "dumps [backup]"
+        parent.mkdir()
+        p = parent / name
+        if kind == "file":
+            p.write_bytes(b"not xml")
+        _widen_console(monkeypatch)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = runner.invoke(app, ["convert", str(p)])
+        self._assert_clean_error(result, message.format(p=p))
+        run.assert_not_called()
+
+    def test_path_in_status_output(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        parent = tmp_path / "dumps [backup]"
+        parent.mkdir()
+        gz = parent / "discogs_20260301 [backup]_artists.xml.gz"
+        with gzip.open(gz, "wb") as f:
+            f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
+            f.write(ARTISTS_XML.encode())
+            f.write(b"</artists>")
+        _widen_console(monkeypatch)
+        result = runner.invoke(
+            app,
+            [
+                "convert",
+                str(gz),
+                "-f",
+                "jsonl",
+                "--output",
+                str(tmp_path / "out"),
+                "--parse-workers",
+                "1",
+                "--no-progress",
+            ],
+        )
+        output = _unstyle(result.output)
+        assert result.exit_code == 0, output
+        lines = output.splitlines()
+        assert f"Artists  {gz.name}" in lines
+        assert f"  {'Source':<14s} {gz}" in lines
 
 
 class TestFormatAndCompressionEnums:
