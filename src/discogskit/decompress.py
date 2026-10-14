@@ -249,6 +249,7 @@ def _decompress(
     source = _source_identity(gz_path)
     t0 = time.perf_counter()
     try:
+        gz_bits = gz_path.stat().st_size * 8
         with (
             rapidgzip.open(str(gz_path), parallelization=workers) as fin,
             open(partial_path, "wb") as fout,
@@ -258,6 +259,19 @@ def _decompress(
                 if not chunk:
                     break
                 fout.write(chunk)
+            # rapidgzip's ISA-L decoder, built into its Linux wheels but not its
+            # macOS ones, takes a deflate stream that runs out of input for its
+            # end: reads stop early with no error.  A complete .gz is decoded to
+            # its last byte (trailing bytes are already an error), so stopping
+            # anywhere else is truncation.  One cut this can't see: a later
+            # gzip member that ends right after its header, where rapidgzip
+            # with ISA-L stops at the end of the file without decoding it.
+            consumed_bits = fin.tell_compressed()
+            if consumed_bits != gz_bits:
+                raise ValueError(
+                    f"decompression ended at byte {consumed_bits // 8:,}"
+                    f" of {gz_bits // 8:,}"
+                )
             fout.flush()
             # Without this, a power loss can persist the rename below before
             # the data, leaving a complete-looking but corrupt .xml.
@@ -269,7 +283,8 @@ def _decompress(
         raise
     except (RuntimeError, ValueError) as exc:
         # rapidgzip raises ValueError for corrupt or non-gzip input and a bare
-        # RuntimeError('std::exception') for truncated input.
+        # RuntimeError('std::exception') for truncated input; the check above
+        # raises ValueError for truncation rapidgzip doesn't report.
         partial_path.unlink(missing_ok=True)
         raise DecompressError(gz_path) from exc
     try:

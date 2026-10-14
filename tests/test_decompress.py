@@ -42,11 +42,24 @@ def _record_opens(monkeypatch):
     return opened
 
 
-class _GatedReader(io.BytesIO):
-    """Stands in for ``rapidgzip.open``: the first read signals, then blocks."""
+class _CompleteGzipReader(io.BytesIO):
+    """Stands in for ``rapidgzip.open`` on a complete .gz at ``path``: yields
+    ``_XML`` and, like rapidgzip, reports every compressed bit as consumed.
+    """
 
-    def __init__(self, go, started):
+    def __init__(self, path):
         super().__init__(_XML)
+        self._path = path
+
+    def tell_compressed(self):
+        return os.path.getsize(self._path) * 8
+
+
+class _GatedReader(_CompleteGzipReader):
+    """The first read signals ``started``, then blocks until ``go``."""
+
+    def __init__(self, path, go, started):
+        super().__init__(path)
         self._go = go
         self._read_once = False
         self._started = started
@@ -84,7 +97,7 @@ def _ensure_xml_in_child(xml_path, blocked, go, results, started):
         mp.setattr(
             decompress.rapidgzip,
             "open",
-            lambda path, parallelization: _GatedReader(go, started),
+            lambda path, parallelization: _GatedReader(path, go, started),
         )
         try:
             lease = ensure_xml(xml_path.with_name("test.xml.gz"), xml_path, workers=1)
@@ -216,12 +229,36 @@ class TestPartialFile:
         assert not xml_path.exists()
         assert not (tmp_path / "test.xml.partial").exists()
 
+    @pytest.mark.parametrize(
+        "cut",
+        [
+            lambda gz: gz[:10],
+            lambda gz: gz + gz[:-20],
+        ],
+        ids=["header_only", "second_member_cut"],
+    )
+    def test_truncation_rapidgzip_misses_raises_decompress_error(self, tmp_path, cut):
+        """rapidgzip reads these as a clean end of data (with ISA-L: its Linux
+        wheels), so only the check that every byte was decoded catches them.
+        """
+        gz_path = tmp_path / "test.xml.gz"
+        gz_path.write_bytes(cut(gzip.compress(_XML * 1000)))
+        xml_path = tmp_path / "test.xml"
+
+        with pytest.raises(
+            DecompressError, match=r"truncated, corrupt, or not a gzip file"
+        ):
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        assert not xml_path.exists()
+        assert not (tmp_path / "test.xml.partial").exists()
+
     def test_xml_appears_only_after_decompression(self, monkeypatch, tmp_path):
         gz_path = _write_gz(tmp_path / "test.xml.gz")
         xml_path = tmp_path / "test.xml"
         xml_seen_during_reads: list[bool] = []
 
-        class RecordingReader(io.BytesIO):
+        class RecordingReader(_CompleteGzipReader):
             def read(self, size=-1):
                 xml_seen_during_reads.append(xml_path.exists())
                 return super().read(1)  # one byte per read: several reads
@@ -229,7 +266,7 @@ class TestPartialFile:
         monkeypatch.setattr(
             decompress.rapidgzip,
             "open",
-            lambda path, parallelization: RecordingReader(_XML),
+            lambda path, parallelization: RecordingReader(path),
         )
 
         ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
