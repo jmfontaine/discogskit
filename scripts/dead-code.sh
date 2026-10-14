@@ -8,7 +8,7 @@
 set -uo pipefail
 
 status=0
-output=$(uv run --python 3.13 deadcode src tests 2>&1) || status=$?
+output=$(uv run --python 3.13 deadcode src tests benchmarks 2>&1) || status=$?
 printf '%s\n' "$output"
 
 if [ "$status" -ne 0 ]; then
