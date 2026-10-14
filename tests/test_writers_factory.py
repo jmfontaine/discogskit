@@ -1,11 +1,17 @@
-"""Tests for get_writer() DSN routing."""
+"""Tests for the writer factories: get_writer() DSN routing and get_file_writer()."""
 
 from __future__ import annotations
 
+import bz2
+import gzip
+import json
 from unittest.mock import patch
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
+import discogskit
 from discogskit.writers import get_writer
 
 
@@ -192,3 +198,163 @@ class TestGetWriter:
         with pytest.raises(ValueError) as excinfo:
             get_writer(dsn)
         assert f"Unsupported database DSN: {shown!r}." in str(excinfo.value)
+
+
+_ARTISTS_XML = (
+    b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n"
+    b"<artist>\n  <id>1</id>\n  <name>Test</name>\n  <data_quality>Correct</data_quality>\n</artist>\n"
+    b"<artist>\n  <id>2</id>\n  <name>Other</name>\n  <data_quality>Correct</data_quality>\n</artist>\n"
+    b"</artists>"
+)
+
+# Output file and reader per format and codec, for reading converted output back.
+_ARTISTS_OUTPUT = {
+    ("jsonl", "bzip2"): "artists/artists.jsonl.bz2",
+    ("jsonl", "gzip"): "artists/artists.jsonl.gz",
+    ("jsonl", "none"): "artists/artists.jsonl",
+    ("parquet", "gzip"): "artists/artists.parquet",
+    ("parquet", "none"): "artists/artists.parquet",
+    ("parquet", "snappy"): "artists/artists.parquet",
+    ("parquet", "zstd"): "artists/artists.parquet",
+}
+
+
+def _read_rows(path, output_format, compression):
+    if output_format == "parquet":
+        return pq.read_table(path).to_pylist()
+    opener = {"bzip2": bz2.open, "gzip": gzip.open, "none": open}[compression]
+    with opener(path, "rt", encoding="utf-8") as f:
+        return [json.loads(line) for line in f]
+
+
+def _convert(tmp_path, output_format, **writer_kwargs):
+    """Convert a two-artist dump with ``get_file_writer()``; return the run's result and output directory."""
+    gz_path = tmp_path / "discogs_20260301_artists.xml.gz"
+    gz_path.write_bytes(gzip.compress(_ARTISTS_XML))
+    out = tmp_path / "out"
+    config = discogskit.PipelineConfig(
+        chunk_mb=1,
+        entity=discogskit.detect_entity(gz_path.name),
+        gz_path=gz_path,
+        keep_xml=False,
+        parse_workers=1,
+        profile=False,
+        progress=False,
+        strict=False,
+        write_queue=2,
+    )
+    writer = discogskit.get_file_writer(out, output_format, **writer_kwargs)
+    try:
+        result = discogskit.run(config, writer)
+    finally:
+        writer.close()
+    return result, out
+
+
+class TestGetFileWriter:
+    """get_file_writer() through the declared API only: names exported by ``discogskit``."""
+
+    @pytest.mark.parametrize(
+        "output_format, compression",
+        sorted(_ARTISTS_OUTPUT),
+        ids=[f"{fmt}-{codec}" for fmt, codec in sorted(_ARTISTS_OUTPUT)],
+    )
+    def test_converts_a_dump(self, tmp_path, output_format, compression):
+        result, out = _convert(tmp_path, output_format, compression=compression)
+
+        assert result.total_records == 2
+        rows = _read_rows(
+            out / _ARTISTS_OUTPUT[(output_format, compression)],
+            output_format,
+            compression,
+        )
+        assert [(row["id"], row["name"]) for row in rows] == [
+            (1, "Test"),
+            (2, "Other"),
+        ]
+
+    def test_jsonl_defaults_to_uncompressed(self, tmp_path):
+        _, out = _convert(tmp_path, "jsonl")
+        rows = _read_rows(out / "artists" / "artists.jsonl", "jsonl", "none")
+        assert [row["id"] for row in rows] == [1, 2]
+
+    def test_parquet_defaults_to_zstd(self, tmp_path):
+        _, out = _convert(tmp_path, "parquet")
+        metadata = pq.ParquetFile(out / "artists" / "artists.parquet").metadata
+        assert metadata.row_group(0).column(0).compression == "ZSTD"
+
+    @pytest.mark.parametrize(
+        "output_format, compression, match",
+        [
+            ("jsonl", "snappy", "unsupported compression 'snappy' for jsonl"),
+            ("jsonl", "zstd", "unsupported compression 'zstd' for jsonl"),
+            ("parquet", "bzip2", "unsupported compression 'bzip2' for parquet"),
+            ("parquet", "brotli", "unsupported compression 'brotli' for parquet"),
+            ("parquet", "bogus", "unsupported compression 'bogus' for parquet"),
+        ],
+    )
+    def test_rejects_codec_the_format_cannot_use(
+        self, tmp_path, output_format, compression, match
+    ):
+        out = tmp_path / "out"
+        with pytest.raises(ValueError, match=match):
+            discogskit.get_file_writer(out, output_format, compression=compression)
+        assert not out.exists()
+
+    @pytest.mark.parametrize(
+        "output_format, compression, level, match",
+        [
+            (
+                "jsonl",
+                "bzip2",
+                0,
+                r"compression level 0 is out of range for bzip2 \(1 to 9\)",
+            ),
+            ("jsonl", "bzip2", 10, "out of range for bzip2"),
+            (
+                "jsonl",
+                "gzip",
+                -1,
+                r"compression level -1 is out of range for gzip \(0 to 9\)",
+            ),
+            ("jsonl", "gzip", 10, "out of range for gzip"),
+            ("jsonl", "none", 5, "none does not support a compression level"),
+            (
+                "parquet",
+                "gzip",
+                pa.Codec.maximum_compression_level("gzip") + 1,
+                "out of range for gzip",
+            ),
+            (
+                "parquet",
+                "zstd",
+                pa.Codec.minimum_compression_level("zstd") - 1,
+                "out of range for zstd",
+            ),
+            (
+                "parquet",
+                "zstd",
+                pa.Codec.maximum_compression_level("zstd") + 1,
+                "out of range for zstd",
+            ),
+            ("parquet", "none", 5, "none does not support a compression level"),
+            ("parquet", "snappy", 5, "snappy does not support a compression level"),
+        ],
+    )
+    def test_rejects_level_the_codec_cannot_use(
+        self, tmp_path, output_format, compression, level, match
+    ):
+        out = tmp_path / "out"
+        with pytest.raises(ValueError, match=match):
+            discogskit.get_file_writer(
+                out, output_format, compression=compression, compression_level=level
+            )
+        assert not out.exists()
+
+    def test_rejects_unknown_format(self, tmp_path):
+        out = tmp_path / "out"
+        with pytest.raises(
+            ValueError, match="unsupported output format 'csv'. Valid: jsonl, parquet."
+        ):
+            discogskit.get_file_writer(out, "csv")
+        assert not out.exists()

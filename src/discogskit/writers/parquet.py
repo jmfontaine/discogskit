@@ -11,15 +11,34 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from discogskit._console import status
+from discogskit.writers._compression import check_compression, check_compression_level
 from discogskit.writers._staging import StagedFiles
 
 if TYPE_CHECKING:
-    import pyarrow as pa
+    import os
 
     from discogskit.entities import EntityDef
+
+
+_COMPRESSIONS = ("gzip", "none", "snappy", "zstd")
+
+
+def _level_range(compression: str) -> tuple[int, int] | None:
+    """(min, max) compression level pyarrow's Codec accepts for this codec, or None if it has none.
+
+    Asks pyarrow directly rather than hard-coding ranges, since they're codec- (and pyarrow-version-)
+    specific: pyarrow's gzip range differs from Python's gzip module, and zstd's is nothing like 0-9.
+    """
+    if compression == "none" or not pa.Codec.supports_compression_level(compression):
+        return None
+    return (
+        pa.Codec.minimum_compression_level(compression),
+        pa.Codec.maximum_compression_level(compression),
+    )
 
 
 class ParquetWriter:
@@ -27,12 +46,18 @@ class ParquetWriter:
 
     def __init__(
         self,
-        output_dir: str,
+        output_dir: str | os.PathLike[str],
         *,
-        compression: str = "zstd",
+        compression: str | None = None,
         compression_level: int | None = None,
         overwrite: bool = False,
     ) -> None:
+        """``compression`` None means zstd. Raises ``ValueError`` for a codec or level Parquet output can't use."""
+        compression = "zstd" if compression is None else compression
+        check_compression("parquet", compression, _COMPRESSIONS)
+        check_compression_level(
+            compression, compression_level, _level_range(compression)
+        )
         self._output_dir = Path(output_dir)
         self._compression = compression
         self._compression_level = compression_level

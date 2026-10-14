@@ -73,6 +73,7 @@ run.source = [ "discogskit" ]
 
 [tool.deadcode]
 exclude = [ "benchmarks/alternatives" ]  # competitor checkouts from `just bench-setup`
+ignore_bodies_if_inherits_from = [ "Enum" ]  # CLI choice enums: Typer reads their members
 ignore_names = [
   "DefaultHandler",      # expat parser callback
   "EndElementHandler",   # expat parser callback

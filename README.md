@@ -423,6 +423,7 @@ and name may change in any release.
 | `PipelineConfig` | `run()`'s settings: the dump, its entity, and the options `convert` and `load` take |
 | `PipelineResult` | Records loaded and seconds spent per stage |
 | `get_writer(dsn, ...)` | A SQLite or PostgreSQL `Writer` for a DSN, with `load`'s options as keyword arguments |
+| `get_file_writer(output_dir, output_format, ...)` | A Parquet (`"parquet"`) or JSONL (`"jsonl"`) `Writer` that writes under `output_dir`, with `convert`'s `compression`, `compression_level` and `overwrite` options as keyword arguments |
 | `Writer` | The protocol every writer implements |
 | `ENTITIES` | Every entity (`artists`, `labels`, `masters`, `releases`) by name, as an `EntityDef` |
 | `EntityDef` | One entity's tables and Arrow schemas |
@@ -430,7 +431,9 @@ and name may change in any release.
 | `OutputExistsError` | Raised when the output exists and the writer doesn't overwrite it |
 | `DecompressError` | Raised when a `.xml.gz` is truncated, corrupt or not gzip |
 
-Other failures raise other exceptions, e.g. `ValueError` for a value discogskit can't store.
+`get_writer()` and `get_file_writer()` raise `ValueError` for an option they can't use, such as a codec the format
+doesn't support or a compression level out of the codec's range, before creating any file. Other failures raise other
+exceptions, e.g. `ValueError` for a value discogskit can't store.
 
 ```python
 from pathlib import Path
@@ -452,7 +455,9 @@ if __name__ == "__main__":
         strict=False,
         write_queue=2,
     )
-    writer = discogskit.get_writer("discogs.db", overwrite=True)
+    # Writes output/artists/*.parquet. Pass "jsonl" for JSONL files instead, or use
+    # discogskit.get_writer("discogs.db") to load a SQLite database.
+    writer = discogskit.get_file_writer("output", "parquet", overwrite=True)
     try:
         result = discogskit.run(config, writer, console=Console(quiet=True))
     finally:
