@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import signal
+import time
 from functools import partial
 
 import pytest
@@ -75,6 +77,19 @@ class TestSplitFinder:
 
         for i in range(len(splits) - 1):
             assert splits[i][1] == splits[i + 1][0], "Chunks must be contiguous"
+
+    @pytest.mark.parametrize("target_chunk_bytes", [1, 50, 100, 1000])
+    def test_every_chunk_but_the_last_reaches_the_target(
+        self, tmp_path, find_splits, target_chunk_bytes
+    ):
+        """A chunk ends at the first record boundary at or past the target size, so only the last can be smaller."""
+        items = b"".join(f"<item>{'x' * (i % 7)}</item>\n".encode() for i in range(100))
+        f = tmp_path / "test.xml"
+        f.write_bytes(b"<?xml version='1.0'?>\n<items>\n" + items + b"</items>")
+
+        splits = find_splits(str(f), target_chunk_bytes)
+
+        assert all(end - start >= target_chunk_bytes for start, end in splits[:-1])
 
     def test_each_chunk_ends_at_closing_tag(self, tmp_path, find_splits):
         """Each chunk boundary must fall on a closing tag."""
@@ -497,6 +512,132 @@ class TestSplitFinderStrictValidation:
         splits = find_splits(str(f), 64)
 
         assert len(splits) > 1
+
+    @pytest.mark.parametrize(
+        "tail", [b"", b"</wrong>\n"], ids=["missing-closer", "wrong-closer"]
+    )
+    def test_long_whitespace_run_before_bad_tail_fails_fast(
+        self, tmp_path, find_splits, tail
+    ):
+        """Whitespace after the last record followed by anything but the container's closer (a truncated or
+        concatenated dump) must be rejected in linear time. Letting each repetition match a whole whitespace run
+        made the regex try every way to split that run before failing: 50 newlines never finished (#104).
+        """
+        f = tmp_path / "test.xml"
+        f.write_bytes(b"<items>\n<item>1</item>" + b"\n" * 10_000 + tail)
+
+        def on_alarm(signum, frame):
+            raise TimeoutError
+
+        # The regex engine checks for signals while it matches, so a regression fails here instead of hanging.
+        previous_handler = signal.signal(signal.SIGALRM, on_alarm)
+        started = time.monotonic()
+        previous_delay, previous_interval = signal.setitimer(signal.ITIMER_REAL, 1.0)
+        try:
+            with pytest.raises(ValueError, match="Expected </items>"):
+                find_splits(str(f), 64)
+        except TimeoutError:
+            pytest.fail("the trailing-content check took over 1 s")
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
+            if previous_delay:
+                # Re-arm a timer someone else set; one that expired meanwhile fires right away instead of never.
+                remaining = previous_delay - (time.monotonic() - started)
+                signal.setitimer(
+                    signal.ITIMER_REAL, max(remaining, 1e-6), previous_interval
+                )
+
+    @pytest.mark.parametrize(
+        "tail",
+        [
+            b"</items>",
+            b"\r\n\t </items>\r\n",
+            b"\n<!-- end -->\n<?pi x?>\n</items>\n<!-- generated -->\n<?done?>\n",
+        ],
+        ids=["closer-only", "xml-whitespace", "comments-and-pis"],
+    )
+    def test_valid_tail_is_accepted(self, tmp_path, find_splits, tail):
+        content = b"<items><item>1</item>" + tail
+        f = tmp_path / "test.xml"
+        f.write_bytes(content)
+
+        [(start, end)] = find_splits(str(f), 64)
+
+        assert content[start:end] == b"<item>1</item>"
+
+    @pytest.mark.parametrize(
+        "tail",
+        [
+            b"<!DOCTYPE items [<!ENTITY e 'x'>]></items>",
+            b"<![CDATA[x]]></items>",
+            b"\f</items>",
+            b"</items>\f",
+            b"</items>\n\v",
+        ],
+        ids=[
+            "doctype",
+            "cdata",
+            "form-feed-before-closer",
+            "form-feed-after-closer",
+            "vertical-tab-after-closer",
+        ],
+    )
+    def test_invalid_markup_around_closer_raises(self, tmp_path, find_splits, tail):
+        """A DOCTYPE is only legal in the prolog, a CDATA section is character data no chunk would carry, and form
+        feed and vertical tab aren't XML whitespace. None of them may be silently excluded from every chunk (#104).
+        """
+        f = tmp_path / "test.xml"
+        f.write_bytes(b"<items><item>1</item>" + tail)
+
+        with pytest.raises(ValueError, match="Expected </items>"):
+            find_splits(str(f), 64)
+
+    @pytest.mark.parametrize(
+        "content, bad",
+        [
+            (b"<items>\n<item>1</item>\n<item foo>2</item>\n</items>\n", b"<item foo"),
+            (b"<items>\n<item>1</item foo>\n</items>\n", b"</item foo"),
+            (b"<items>\n<item>1</item>\n<!-- x\n<item>2</item>\n</items>\n", b"<!--"),
+            (b"<items>\n<item><![CDATA[1</item>\n</items>\n", b"<![CDATA["),
+            (
+                b"<items>\n<item>1</item>\n<!DOCTYPE items [\n<item>2</item>\n</items>\n",
+                b"<!DOCTYPE",
+            ),
+            (b"<items>\n<item>1</item>\n<?pi\n<item>2</item>\n</items>\n", b"<?pi"),
+            (
+                b"<?xml version='1.0'?>\n<items>\n<!-- x\n<item>1</item>\n</items>\n",
+                b"<!--",
+            ),
+            (b"<!-- x\n<items>\n<item>1</item>\n</items>\n", b"<!--"),
+        ],
+        ids=[
+            "start-tag",
+            "end-tag",
+            "comment",
+            "cdata",
+            "doctype",
+            "pi",
+            "right-after-prolog",
+            "at-byte-0",
+        ],
+    )
+    def test_malformed_markup_raises_with_offset(
+        self, tmp_path, find_splits, content, bad
+    ):
+        """A construct that starts but doesn't close is rejected where it starts, including right after a valid
+        prolog, where the leading-content check passes and nothing else reports it.
+        """
+        f = tmp_path / "test.xml"
+        f.write_bytes(content)
+
+        with pytest.raises(ValueError) as info:
+            find_splits(str(f), 64)
+
+        assert (
+            f"Malformed or unterminated markup at byte {content.index(bad)}: "
+            in str(info.value)
+        )
 
 
 # Two records; a chunk ends at the last record's closing tag, so the trailing newline isn't part of it.

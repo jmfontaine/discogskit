@@ -135,6 +135,36 @@ class TestArtistsParsing:
         assert len(unhandled) == 1
         assert "brand_new_tag" in str(unhandled[0].message)
 
+    def test_strict_ignores_comments_and_pis(self, tmp_path):
+        """Comments and processing instructions inside a record aren't elements: strict mode reports only the unknown
+        element, and the text around a comment is kept whole."""
+        import warnings
+
+        xml = (
+            "<artist>\n"
+            "  <id>1</id>\n"
+            "  <!-- a comment -->\n"
+            "  <?some-pi data?>\n"
+            "  <name>Te<!-- split -->st</name>\n"
+            "  <data_quality>Correct</data_quality>\n"
+            "  <brand_new_tag>surprise</brand_new_tag>\n"
+            "</artist>\n"
+        )
+        f = tmp_path / "comments.xml"
+        f.write_text(xml)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            ipc_dict = extract_chunk_to_ipc(
+                ChunkArgs("artists", str(f), 0, os.path.getsize(f), strict=True)
+            )
+            tables = ipc_to_tables(ipc_dict, SCHEMAS)
+
+        unhandled = [x for x in w if "unhandled" in str(x.message)]
+        assert len(unhandled) == 1
+        assert "brand_new_tag" in str(unhandled[0].message)
+        assert tables["artists"].column("name").to_pylist() == ["Test"]
+
     def test_no_warnings_without_strict(self, tmp_path):
         """Without strict mode, unknown elements produce no warnings."""
         import warnings
