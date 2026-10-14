@@ -1,4 +1,4 @@
-"""Integration tests for SQLiteWriter full lifecycle."""
+"""Tests for SQLiteWriter full lifecycle."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 
+import pyarrow as pa
 import pytest
 
 from discogskit.entities import ChunkArgs, get
@@ -23,7 +24,6 @@ from tests.conftest import (
 )
 
 
-@pytest.mark.integration
 @pytest.mark.parametrize("fk", [False, True], ids=["no-fk", "fk"])
 @pytest.mark.parametrize(
     "entity_name, xml",
@@ -67,19 +67,7 @@ def test_every_entity_loads(tmp_path, entity_name, xml, fk):
     assert any(expected[name] for name in entity.table_order[1:])
 
 
-@pytest.mark.integration
 class TestSQLiteWriter:
-    @pytest.fixture()
-    def entity(self):
-        return get("artists")
-
-    @pytest.fixture()
-    def ipc_dict(self, artists_xml_file):
-        size = os.path.getsize(artists_xml_file)
-        return extract_chunk_to_ipc(
-            ChunkArgs("artists", str(artists_xml_file), 0, size)
-        )
-
     def test_full_lifecycle(self, tmp_path, entity, ipc_dict):
         db_path = str(tmp_path / "test.db")
         writer = SQLiteWriter(db_path)
@@ -222,6 +210,34 @@ class TestSQLiteWriter:
             fk_list = conn.execute(f"PRAGMA foreign_key_list({t})").fetchall()
             assert len(fk_list) > 0, f"No FK on {t}"
             assert fk_list[0][2] == entity.table_order[0]  # references root table
+        conn.close()
+
+    @pytest.mark.parametrize("fk", [False, True], ids=["no-fk", "fk"])
+    def test_fk_rejects_orphan_child_row(self, tmp_path, entity, fk):
+        """--fk enforces the keys, not just declares them: SQLite ignores REFERENCES without
+        ``PRAGMA foreign_keys=ON``, and ``PRAGMA foreign_key_list`` lists them either way."""
+        tables = ipc_to_record_batches(empty_ipc("artists"))
+        tables["artist_aliases"] = pa.RecordBatch.from_pylist(
+            [{"alias_id": 1, "artist_id": 999, "name": "Orphan"}],
+            schema=entity.schemas["artist_aliases"],
+        )
+        db_path = str(tmp_path / "test.db")
+        writer = SQLiteWriter(db_path, fk=fk)
+        try:
+            writer.setup(entity)
+            if fk:
+                with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+                    writer.write_chunk(tables)
+                return
+            writer.write_chunk(tables)
+            writer.finalize(entity)
+        finally:
+            writer.close()
+
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("SELECT artist_id FROM artist_aliases").fetchall() == [
+            (999,)
+        ]
         conn.close()
 
     def test_overwrite_raises_when_tables_exist(self, tmp_path, entity, ipc_dict):

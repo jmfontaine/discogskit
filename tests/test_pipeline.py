@@ -23,6 +23,7 @@ from rich.live import _RefreshThread
 from discogskit._console import console
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.pipeline import _DuplicateIdTracker, _ElapsedEstTotalColumn, _fmt_time
+from tests.conftest import ARTISTS_XML, LABELS_XML
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Helpers
@@ -712,33 +713,106 @@ class TestPipelineRun:
                 PostgreSQLWriter(pg_dsn, overwrite=True),
             )
 
-    def test_writer_error_does_not_hang(self, tmp_path):
-        """A writer failing on chunk 1 of more chunks than the backlog holds re-raises."""
+    @pytest.mark.parametrize("fmt", ["jsonl", "parquet", "sqlite"])
+    def test_two_entities_share_one_writer(self, tmp_path, fmt):
+        """The CLI loads every input through one writer; per-entity state must not carry over."""
+        import sqlite3
 
-        class FailingWriter:
+        import pyarrow.parquet as pq
+
+        from discogskit import pipeline
+        from discogskit.writers.jsonl import JSONLWriter
+        from discogskit.writers.parquet import ParquetWriter
+        from discogskit.writers.sqlite import SQLiteWriter
+
+        out = tmp_path / "out"
+        writer = {
+            "jsonl": lambda: JSONLWriter(str(out)),
+            "parquet": lambda: ParquetWriter(str(out)),
+            "sqlite": lambda: SQLiteWriter(str(tmp_path / "out.db")),
+        }[fmt]()
+        try:
+            for entity, records in (("artists", ARTISTS_XML), ("labels", LABELS_XML)):
+                gz_path = tmp_path / f"{entity}.xml.gz"
+                with gzip.open(gz_path, "wt", encoding="utf-8") as f:
+                    f.write(
+                        f"<?xml version='1.0' encoding='UTF-8'?>\n<{entity}>\n{records}</{entity}>"
+                    )
+                config = dataclasses.replace(
+                    _single_chunk_config(gz_path), entity=entity
+                )
+                pipeline.run(config, writer)
+        finally:
+            writer.close()
+
+        def rows(entity, table, *columns):
+            if fmt == "jsonl":
+                lines = (out / entity / f"{table}.jsonl").read_text().splitlines()
+                return sorted(
+                    tuple(json.loads(line)[c] for c in columns) for line in lines
+                )
+            if fmt == "parquet":
+                t = pq.read_table(out / entity / f"{table}.parquet")
+                return sorted(zip(*(t.column(c).to_pylist() for c in columns)))
+            conn = sqlite3.connect(tmp_path / "out.db")
+            try:
+                return sorted(conn.execute(f"SELECT {', '.join(columns)} FROM {table}"))
+            finally:
+                conn.close()
+
+        assert rows("artists", "artists", "id", "name") == [
+            (1, "DJ Test"),
+            (2, "Minimal Artist"),
+        ]
+        assert rows("artists", "artist_members", "artist_id", "member_id") == [
+            (1, 30),
+            (1, 31),
+        ]
+        assert rows("labels", "labels", "id", "name") == [
+            (1, "Test Label"),
+            (2, "Minimal Label"),
+        ]
+        assert rows("labels", "label_sublabels", "label_id", "sublabel_id") == [
+            (1, 10),
+            (1, 11),
+        ]
+
+    def test_writer_error_does_not_hang(self, monkeypatch, tmp_path):
+        """A writer failing on chunk 1 while later chunks are queued behind it re-raises."""
+        from discogskit import pipeline
+
+        queued = threading.Event()
+        submitted_writes = []
+
+        class SignallingExecutor(pipeline.ThreadPoolExecutor):
+            """Sets ``queued`` once a second chunk write is submitted behind the first."""
+
+            def submit(self, fn, /, *args, **kwargs):
+                future = super().submit(fn, *args, **kwargs)
+                if args:  # a chunk write, not the pipeline's warm-up submit(int)
+                    submitted_writes.append(future)
+                    if len(submitted_writes) == 2:
+                        queued.set()
+                return future
+
+        class FailingWriter(_StubWriter):
             def __init__(self):
                 self.calls = 0
-
-            def close(self):
-                pass
-
-            def finalize(self, entity):
-                pass
-
-            def setup(self, entity):
-                pass
+                self.saw_queued_write = False
 
             def write_chunk(self, tables):
                 self.calls += 1
-                time.sleep(0.3)  # let later chunks queue behind this write
+                self.saw_queued_write = queued.wait(timeout=10)
                 raise RuntimeError("disk full")
 
+        monkeypatch.setattr(pipeline, "ThreadPoolExecutor", SignallingExecutor)
         gz_path = _many_artists_gz(tmp_path / "artists.xml.gz")
         writer = FailingWriter()
 
         with pytest.raises(RuntimeError, match="disk full"):
             _run_or_fail_on_hang(_multi_chunk_config(gz_path), writer)
 
+        assert writer.saw_queued_write
         # Chunks queued behind the failed write must not be written.
         assert writer.calls == 1
 
