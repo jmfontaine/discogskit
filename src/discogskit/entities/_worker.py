@@ -1,6 +1,6 @@
 """Shared chunk worker: XML byte range -> normalized Arrow tables -> IPC bytes.
 
-``extract_chunk_to_ipc`` runs in a separate PROCESS (via ``multiprocessing.Pool``). It must stay a module-level function
+``extract_chunk_to_ipc`` runs in a separate PROCESS (via ``ProcessPoolExecutor``). It must stay a module-level function
 (not a closure or method) so that pickle can send it to the workers, and it receives ``ChunkArgs`` with the entity name
 rather than the ``EntityDef`` itself.
 
