@@ -96,6 +96,10 @@ setup:
     uv run prek install  # Install pre-commit hooks
     echo "Run 'source .venv/bin/activate' to activate the Python virtual environment"
 
+# Regenerate the agent skill's command, schema and DDL references from the code
+skill-references:
+    uv run python scripts/skill_references.py
+
 # Run all tests
 test *args:
     uv run pytest {{ args }}
