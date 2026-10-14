@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import gzip
 import os
+import signal
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 from urllib.parse import urlsplit
 
@@ -586,6 +588,233 @@ class TestWriteWorkerCap:
             writer.close()
 
         assert adbc_connect.call_count == 2
+
+
+@contextmanager
+def _locked(dsn, tables, *, hold):
+    """Hold ACCESS EXCLUSIVE locks on *tables* from another session for up to *hold* seconds."""
+    import psycopg
+    from psycopg import sql
+
+    locked = threading.Event()
+    release = threading.Event()
+
+    def run():
+        with psycopg.connect(dsn) as conn:
+            conn.execute(
+                sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(
+                    sql.SQL(", ").join(sql.Identifier(t) for t in tables)
+                )
+            )
+            locked.set()
+            release.wait(hold)
+            conn.rollback()
+
+    holder = threading.Thread(target=run)
+    holder.start()
+    try:
+        assert locked.wait(10)
+        yield
+    finally:
+        release.set()
+        holder.join()
+
+
+@pytest.mark.integration
+class TestIndexAbort:
+    """An index error or an interrupt stops parallel index creation promptly (#109).
+
+    Child tables are locked from another session so their CREATE INDEX waits;
+    the lock lifts after ``_HOLD`` seconds, so a finalize() that waits for
+    every index still ends, just late.
+    """
+
+    _HOLD = 15
+
+    @pytest.fixture()
+    def dsn(self, pg_dsn):
+        import psycopg
+        from psycopg import sql
+
+        schema = f"idx_{uuid.uuid4().hex[:8]}"
+        with psycopg.connect(pg_dsn, autocommit=True) as conn:
+            conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        yield f"{pg_dsn}?options=-csearch_path%3D{schema}"
+        with psycopg.connect(pg_dsn, autocommit=True) as conn:
+            conn.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+            )
+
+    @staticmethod
+    def _indexed_tables(dsn):
+        import psycopg
+
+        with psycopg.connect(dsn) as conn:
+            rows = conn.execute(
+                "SELECT tablename FROM pg_indexes WHERE schemaname = current_schema()"
+            ).fetchall()
+        return {r[0] for r in rows}
+
+    def _assert_failed_index_skips_queued_ones(self, dsn, monkeypatch):
+        import psycopg
+        from psycopg import sql
+
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        entity = get("releases")
+        root, failing, *waiting = entity.table_order
+
+        # The failing CREATE INDEX runs only once a sibling is about to start
+        # its own, so there is a running build to cancel.
+        real_execute = psycopg.Connection.execute
+        sibling_started = threading.Event()
+
+        def execute(conn, query, *args, **kwargs):
+            if isinstance(query, sql.Composable):
+                text = query.as_string(conn)
+                if text.startswith("CREATE INDEX"):
+                    if f'"{failing}"' in text:
+                        assert sibling_started.wait(10)
+                    else:
+                        sibling_started.set()
+            return real_execute(conn, query, *args, **kwargs)
+
+        monkeypatch.setattr(psycopg.Connection, "execute", execute)
+        writer = PostgreSQLWriter(dsn, overwrite=True, index_workers=2)
+        try:
+            writer.setup(entity)
+            with psycopg.connect(dsn, autocommit=True) as conn:
+                conn.execute(sql.SQL("DROP TABLE {}").format(sql.Identifier(failing)))
+            with _locked(dsn, waiting, hold=self._HOLD):
+                t0 = time.monotonic()
+                with pytest.raises(psycopg.errors.UndefinedTable):
+                    writer.finalize(entity)
+                elapsed = time.monotonic() - t0
+        finally:
+            writer.close()
+
+        assert elapsed < self._HOLD / 2
+        # Only the primary key exists: queued indexes never ran, and the ones
+        # waiting on the lock were cancelled.
+        assert self._indexed_tables(dsn) == {root}
+
+    def test_failed_index_skips_queued_ones(self, dsn, monkeypatch):
+        self._assert_failed_index_skips_queued_ones(dsn, monkeypatch)
+
+    def test_interrupt_during_cancel_neither_stops_it_nor_replaces_the_error(
+        self, dsn, monkeypatch
+    ):
+        """A second Ctrl+C while cancelling: builds still stop, the first error wins."""
+        import psycopg
+
+        real_cancel = psycopg.Connection.cancel_safe
+        interrupted = []
+
+        def cancel_safe(conn, *args, **kwargs):
+            if not interrupted:
+                interrupted.append(conn)
+                raise KeyboardInterrupt
+            return real_cancel(conn, *args, **kwargs)
+
+        monkeypatch.setattr(psycopg.Connection, "cancel_safe", cancel_safe)
+        self._assert_failed_index_skips_queued_ones(dsn, monkeypatch)
+        assert interrupted
+
+    def test_interrupt_while_submitting_cancels_started_indexes(self, dsn, monkeypatch):
+        """Ctrl+C before every index is queued still cancels the ones already running."""
+        import psycopg
+        from psycopg import sql
+
+        from discogskit.writers import postgresql
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        entity = get("releases")
+        root, *children = entity.table_order
+        workers = 2
+
+        # Each started CREATE INDEX waits on the lock; the interrupt lands on the
+        # submit after the workers' tasks, once both have reached execute.
+        real_execute = psycopg.Connection.execute
+        started = threading.Semaphore(0)
+
+        def execute(conn, query, *args, **kwargs):
+            if isinstance(query, sql.Composable) and query.as_string(conn).startswith(
+                "CREATE INDEX"
+            ):
+                started.release()
+            return real_execute(conn, query, *args, **kwargs)
+
+        class InterruptingExecutor(postgresql.ThreadPoolExecutor):
+            submitted = 0
+
+            def submit(self, *args, **kwargs):
+                if self.submitted == workers:
+                    for _ in range(workers):
+                        assert started.acquire(timeout=10)
+                    raise KeyboardInterrupt
+                self.submitted += 1
+                return super().submit(*args, **kwargs)
+
+        monkeypatch.setattr(psycopg.Connection, "execute", execute)
+        monkeypatch.setattr(postgresql, "ThreadPoolExecutor", InterruptingExecutor)
+        writer = PostgreSQLWriter(dsn, overwrite=True, index_workers=workers)
+        try:
+            writer.setup(entity)
+            with _locked(dsn, children, hold=self._HOLD):
+                t0 = time.monotonic()
+                with pytest.raises(KeyboardInterrupt):
+                    writer.finalize(entity)
+                elapsed = time.monotonic() - t0
+        finally:
+            writer.close()
+
+        assert elapsed < self._HOLD / 2
+        assert self._indexed_tables(dsn) == {root}
+
+    def test_interrupt_cancels_running_index(self, dsn):
+        import psycopg
+
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        entity = get("artists")
+        root, *children = entity.table_order
+        main = threading.main_thread().ident
+        assert main is not None
+        sent = threading.Event()
+
+        def interrupt_once_an_index_waits():
+            deadline = time.monotonic() + self._HOLD
+            with psycopg.connect(dsn, autocommit=True) as conn:
+                while time.monotonic() < deadline:
+                    row = conn.execute(
+                        "SELECT COUNT(*) FROM pg_stat_activity "
+                        "WHERE query LIKE 'CREATE INDEX%' AND wait_event_type = 'Lock'"
+                    ).fetchone()
+                    if row and row[0]:
+                        sent.set()
+                        signal.pthread_kill(main, signal.SIGINT)
+                        return
+                    time.sleep(0.05)
+
+        writer = PostgreSQLWriter(dsn, overwrite=True, index_workers=2)
+        try:
+            writer.setup(entity)
+            with _locked(dsn, children, hold=self._HOLD):
+                interrupter = threading.Thread(target=interrupt_once_an_index_waits)
+                interrupter.start()
+                t0 = time.monotonic()
+                try:
+                    with pytest.raises(KeyboardInterrupt):
+                        writer.finalize(entity)
+                finally:
+                    elapsed = time.monotonic() - t0
+                    interrupter.join()
+        finally:
+            writer.close()
+
+        assert sent.is_set()
+        assert elapsed < self._HOLD / 2
+        assert self._indexed_tables(dsn) == {root}
 
 
 @pytest.mark.integration

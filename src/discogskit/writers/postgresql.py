@@ -24,7 +24,7 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from contextlib import suppress
-from threading import Thread
+from threading import Lock, Thread
 from typing import TYPE_CHECKING, Protocol
 
 import pyarrow as pa
@@ -131,6 +131,80 @@ def _flush_group(
     adbc_conn.commit()
     timings["_commit"] = time.perf_counter() - t_commit
     return timings
+
+
+# ------------------------------------------------------------------------------------------------------------------------
+# Parallel index creation
+#
+# Each index builds on its own connection in a worker thread. Worker threads never see KeyboardInterrupt, and leaving a
+# ``with ThreadPoolExecutor`` block waits for every queued task, so one failed CREATE INDEX or a Ctrl+C would still build
+# every remaining index before reporting. Instead, the first error or interrupt drops the queued tasks, cancels the
+# running statements on the server, and waits for them to stop before re-raising.
+# ------------------------------------------------------------------------------------------------------------------------
+
+# Seconds between cancel requests while aborted index builds stop. The server ignores a cancel that reaches a
+# connection before its CREATE INDEX starts, so the request repeats until every build has stopped.
+_CANCEL_INTERVAL = 0.5
+
+
+def _create_indexes(dsn: str, tables: list[str], column: str, workers: int) -> None:
+    """Index *column* on each of *tables*, *workers* at a time, each on its own connection."""
+    import psycopg
+
+    aborted = False
+    lock = Lock()
+    running: set[psycopg.Connection] = set()
+
+    def create(table: str) -> None:
+        conn = psycopg.connect(dsn, autocommit=True)
+        try:
+            with lock:
+                if aborted:
+                    return
+                running.add(conn)
+            conn.execute(
+                sql.SQL("CREATE INDEX ON {} ({})").format(
+                    sql.Identifier(table), sql.Identifier(column)
+                )
+            )
+        finally:
+            # Under the lock, so the connection is never cancelled once closed.
+            with lock:
+                running.discard(conn)
+            conn.close()
+
+    executor = ThreadPoolExecutor(max_workers=workers)
+    futures = []
+    try:
+        try:
+            # Submitting is inside the handler: Ctrl+C here must also cancel the
+            # tasks already running.
+            for t in tables:
+                futures.append(executor.submit(create, t))
+            for f in as_completed(futures):
+                f.result()
+        except BaseException:
+            executor.shutdown(wait=False, cancel_futures=True)
+            with lock:
+                aborted = True
+            # wait() never counts a future cancelled off the queue as done.
+            started = [f for f in futures if not f.cancelled()]
+            while True:
+                # A second Ctrl+C mustn't cut this short: a build the cancels
+                # missed would run to the end, and the first error would be lost.
+                try:
+                    with lock:
+                        for conn in running:
+                            # Re-raise the original error, not a failed cancel.
+                            with suppress(Exception):
+                                conn.cancel_safe()
+                    if not wait(started, timeout=_CANCEL_INTERVAL).not_done:
+                        break
+                except KeyboardInterrupt:
+                    continue
+            raise
+    finally:
+        executor.shutdown()
 
 
 # ------------------------------------------------------------------------------------------------------------------------
@@ -394,8 +468,6 @@ class PostgreSQLWriter:
 
     def finalize(self, entity: EntityDef) -> None:
         """Build PK, indexes, and optional FK constraints."""
-        import psycopg
-
         # Shut down write executor and ADBC connections before index building
         if self._executor is not None:
             self._executor.shutdown()
@@ -430,22 +502,7 @@ class PostgreSQLWriter:
                         )
                     )
             else:
-
-                def _create_index(table_name):
-                    with psycopg.connect(self._dsn, autocommit=True) as idx_conn:
-                        idx_conn.execute(
-                            sql.SQL("CREATE INDEX ON {} ({})").format(
-                                sql.Identifier(table_name), sql.Identifier(fk_col)
-                            )
-                        )
-                    return table_name
-
-                with ThreadPoolExecutor(max_workers=self._index_workers) as executor:
-                    futures = {
-                        executor.submit(_create_index, t): t for t in table_order[1:]
-                    }
-                    for f in as_completed(futures):
-                        f.result()
+                _create_indexes(self._dsn, table_order[1:], fk_col, self._index_workers)
 
             n_idx = len(table_order) - 1
             workers_label = (
