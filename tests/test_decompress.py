@@ -481,7 +481,6 @@ class TestConcurrentRuns:
         ]
 
 
-@pytest.mark.integration
 class TestDecompress:
     def test_decompress_gz_file(self, tmp_path):
         """ensure_xml decompresses a .gz file to .xml."""
