@@ -3,14 +3,25 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import gzip
 import json
+import multiprocessing
+import os
+import signal
+import sys
 import threading
 import time
+from concurrent.futures.process import BrokenProcessPool
+from pathlib import Path
 
 import pyarrow as pa
 import pytest
+from filelock import ReadWriteLock
+from rich.live import _RefreshThread
 
+from discogskit._console import console
+from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.pipeline import _DuplicateIdTracker, _ElapsedEstTotalColumn, _fmt_time
 
 # ------------------------------------------------------------------------------------------------------------------------
@@ -61,14 +72,14 @@ def duplicate_artists_gz(tmp_path):
     return gz_path
 
 
-# Enough artists for several 1 MB chunks, so more chunks exist than the write
-# backlog (write_queue + the in-flight write) can hold.
+# Enough artists for several 1 MB chunks, so more chunks exist than can be in
+# flight at once (parse_workers + write_queue).
 _MANY_ARTISTS = 60_000
 
 
-def _many_artists_gz(gz_path, bad_id_at=None, bad_close_at=None):
-    """Write a multi-chunk artists .xml.gz; ``bad_id_at`` gets a non-numeric id,
-    ``bad_close_at`` a mismatched ``</nam>`` closing tag."""
+def _many_artists_gz(gz_path, bad_id_at=None, bad_close_at=None, n=_MANY_ARTISTS):
+    """Write a multi-chunk artists .xml.gz of ``n`` artists; ``bad_id_at`` gets a
+    non-numeric id, ``bad_close_at`` a mismatched ``</nam>`` closing tag."""
     body = b"".join(
         b"<artist>\n  <id>%s</id>\n  <name>Artist %d</%s>\n"
         b"  <data_quality>Correct</data_quality>\n</artist>\n"
@@ -77,9 +88,9 @@ def _many_artists_gz(gz_path, bad_id_at=None, bad_close_at=None):
             i,
             b"nam" if i == bad_close_at else b"name",
         )
-        for i in range(1, _MANY_ARTISTS + 1)
+        for i in range(1, n + 1)
     )
-    # 1 MB chunks: need more than write_queue (2) + 1 in-flight chunks.
+    # 1 MB chunks: need more than _multi_chunk_config's 2 workers + write_queue 2.
     assert len(body) > 4 * 1024 * 1024
     with gzip.open(gz_path, "wb", compresslevel=1) as f:
         f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
@@ -150,6 +161,39 @@ def _run_and_close(config, writer):
         return pipeline.run(config, writer)
     finally:
         writer.close()
+
+
+def _marking_extract(args):
+    """The real parse step, then one marker file per parsed chunk in ``<xml dir>/parsed``.
+
+    Module-level so spawned parse workers can unpickle it.
+    """
+    result = extract_chunk_to_ipc(args)
+    (Path(args.file_path).parent / "parsed" / str(args.start)).touch()
+    return result
+
+
+def _dying_once_extract(args):
+    """The real parse step, except the first call SIGKILLs its own worker, as the OOM killer would."""
+    try:
+        (Path(args.file_path).parent / "worker-died").touch(exist_ok=False)
+    except FileExistsError:
+        return extract_chunk_to_ipc(args)
+    os.kill(os.getpid(), signal.SIGKILL)
+    raise AssertionError("SIGKILL returned")
+
+
+class _StubWriter:
+    """A writer whose ``write_chunk`` subclasses define; every other method does nothing."""
+
+    def close(self):
+        pass
+
+    def finalize(self, entity):
+        pass
+
+    def setup(self, entity):
+        pass
 
 
 # ------------------------------------------------------------------------------------------------------------------------
@@ -697,3 +741,144 @@ class TestPipelineRun:
 
         # Chunks queued behind the failed write must not be written.
         assert writer.calls == 1
+
+
+class TestPipelineRunParseWorkers:
+    """#92: parse-ahead memory is bounded, and a dead worker, Ctrl+C or a failed start ends the run cleanly."""
+
+    def test_parsed_but_unwritten_chunks_are_bounded(self, monkeypatch, tmp_path):
+        """A writer slower than parsing must pause the workers, not let parsed chunks pile up in memory."""
+        from discogskit import pipeline
+
+        class StalledWriter(_StubWriter):
+            """Stalls the first write so parsing can run ahead, then samples parsed-but-unwritten
+            chunks at the end of each write, when the count peaks."""
+
+            def __init__(self, marker_dir, bound):
+                self.bound = bound
+                self.marker_dir = marker_dir
+                self.max_unwritten = 0
+                self.written = 0
+
+            def _parsed(self):
+                return sum(1 for _ in self.marker_dir.iterdir())
+
+            def write_chunk(self, tables):
+                if self.written == 0:
+                    # An unbounded pipeline parses past the bound within a few chunk parse times;
+                    # a bounded one stalls at it until the deadline.
+                    deadline = time.monotonic() + 2
+                    while self._parsed() <= self.bound and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                else:
+                    time.sleep(0.05)
+                self.max_unwritten = max(
+                    self.max_unwritten, self._parsed() - self.written
+                )
+                self.written += 1
+                return {}
+
+        n = 150_000
+        gz_path = _many_artists_gz(tmp_path / "artists.xml.gz", n=n)
+        marker_dir = tmp_path / "parsed"
+        marker_dir.mkdir()
+        monkeypatch.setattr(pipeline, "extract_chunk_to_ipc", _marking_extract)
+        config = dataclasses.replace(_multi_chunk_config(gz_path), write_queue=1)
+        bound = config.parse_workers + config.write_queue
+        writer = StalledWriter(marker_dir, bound)
+
+        result = _run_and_close(config, writer)
+
+        assert result.total_records == n
+        # Enough chunks to overrun an unbounded pipeline.
+        assert writer.written > 2 * bound
+        assert 0 < writer.max_unwritten <= bound
+
+    def test_dead_worker_fails_the_run_and_releases_the_xml(
+        self, monkeypatch, tmp_path
+    ):
+        """A SIGKILLed worker loses its chunk; the run must fail promptly instead of waiting for it forever."""
+        from discogskit import pipeline
+        from discogskit.writers.jsonl import JSONLWriter
+
+        gz_path = _many_artists_gz(tmp_path / "artists.xml.gz")
+        monkeypatch.setattr(pipeline, "extract_chunk_to_ipc", _dying_once_extract)
+        writer = JSONLWriter(str(tmp_path / "out"))
+
+        with pytest.raises(BrokenProcessPool):
+            try:
+                _run_or_fail_on_hang(_multi_chunk_config(gz_path), writer, timeout=15)
+            finally:
+                writer.close()
+
+        xml_path = gz_path.with_suffix("")
+        assert xml_path.exists()
+        lock = ReadWriteLock(
+            xml_path.with_name(xml_path.name + ".lock"), is_singleton=False
+        )
+        try:
+            # Raises Timeout if the failed run still holds its read lease.
+            lock.acquire_write(blocking=False)
+            lock.release()
+        finally:
+            lock.close()
+
+    @pytest.mark.parametrize("progress", [False, True], ids=["no-progress", "progress"])
+    def test_sigint_waits_for_the_in_flight_write(self, tmp_path, progress):
+        """Ctrl+C reaches the main thread mid-write: the write finishes, queued work is dropped, workers exit."""
+
+        class InterruptingWriter(_StubWriter):
+            """Like a database COPY, the first write can't be cancelled once it has started."""
+
+            def __init__(self):
+                self.active = 0
+                self.calls = 0
+
+            def write_chunk(self, tables):
+                self.active += 1
+                self.calls += 1
+                if self.calls == 1:
+                    os.kill(os.getpid(), signal.SIGINT)
+                    time.sleep(0.5)
+                self.active -= 1
+                return {}
+
+        gz_path = _many_artists_gz(tmp_path / "artists.xml.gz")
+        config = dataclasses.replace(
+            _multi_chunk_config(gz_path), keep_xml=False, progress=progress
+        )
+        writer = InterruptingWriter()
+
+        with pytest.raises(KeyboardInterrupt):
+            _run_and_close(config, writer)
+
+        assert writer.active == 0
+        assert writer.calls == 1
+        assert gz_path.with_suffix("").exists()
+        assert multiprocessing.active_children() == []
+
+    def test_executor_construction_failure_restores_the_terminal(
+        self, monkeypatch, tmp_path, artists_gz
+    ):
+        """A parse executor that fails to start must not leave the progress display running."""
+        from discogskit import pipeline
+        from discogskit.writers.jsonl import JSONLWriter
+
+        def fail_to_start(*args, **kwargs):
+            raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
+
+        # Progress redirects stdout/stderr only on a terminal.
+        monkeypatch.setattr(console, "_force_terminal", True)
+        monkeypatch.setattr(pipeline, "ProcessPoolExecutor", fail_to_start)
+        stdout, stderr = sys.stdout, sys.stderr
+        config = dataclasses.replace(_single_chunk_config(artists_gz), progress=True)
+
+        with pytest.raises(OSError, match="Resource temporarily unavailable"):
+            _run_and_close(config, JSONLWriter(str(tmp_path / "out")))
+
+        assert sys.stdout is stdout
+        assert sys.stderr is stderr
+        for thread in threading.enumerate():
+            if isinstance(thread, _RefreshThread):
+                thread.join(timeout=2)
+                assert not thread.is_alive()
