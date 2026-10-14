@@ -5,8 +5,6 @@ The chunk worker that drives ``append_record`` is shared; see ``_worker.py``.
 
 from __future__ import annotations
 
-import warnings
-
 import pyarrow as pa
 from lxml import etree
 
@@ -48,10 +46,9 @@ def append_record(
     cols: Cols, elem: etree._Element, unknown: set[str] | None = None
 ) -> None:
     """Parse a <label> element and append all data to column accumulators."""
-    id_text = elem.findtext("id")
+    id_text = record_id(elem)
     if not id_text:
-        warnings.warn("skipping <label> with missing id", stacklevel=2)
-        return
+        raise ValueError("missing or empty id")
     label_id = int(id_text)
 
     contact_info = None
@@ -103,11 +100,17 @@ def append_record(
     r["urls"].append(urls)
 
 
+def record_id(elem: etree._Element) -> str | None:
+    """Return a <label> element's id as written in the XML, or None when it has none."""
+    return elem.findtext("id")
+
+
 register(
     EntityDef(
         append_record=append_record,
         fk_column="label_id",
         name="labels",
+        record_id=record_id,
         root_tag="label",
         schemas=SCHEMAS,
         table_weights=TABLE_WEIGHTS,

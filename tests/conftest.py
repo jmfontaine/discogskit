@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import errno
+import os
+import sys
+
 import pyarrow as pa
 import pytest
 
 from discogskit.entities import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
+from discogskit.writers import _staging
 from discogskit.writers._ipc import deserialize_batch
 
 # ------------------------------------------------------------------------------------------------------------------------
@@ -34,6 +39,27 @@ def ipc_to_record_batches(ipc_dict: dict[str, bytes]) -> dict[str, pa.RecordBatc
 def empty_ipc(entity: str) -> dict[str, bytes]:
     """IPC dict for a chunk with no records, from an empty byte range of any file."""
     return extract_chunk_to_ipc(ChunkArgs(entity, __file__, 0, 0))
+
+
+# Root ignores directory permissions, and Windows doesn't apply POSIX modes to directories.
+needs_permissions = pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="needs directory permissions that apply to the test process",
+)
+
+
+def fail_after_first_move(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the staging commit move its first file, then fail, as a move across filesystems would."""
+    replace = os.replace
+    moved: list[object] = []
+
+    def failing_replace(src, dst):
+        if moved:
+            raise OSError(errno.EXDEV, os.strerror(errno.EXDEV), str(dst))
+        replace(src, dst)
+        moved.append(dst)
+
+    monkeypatch.setattr(_staging.os, "replace", failing_replace)
 
 
 # ------------------------------------------------------------------------------------------------------------------------

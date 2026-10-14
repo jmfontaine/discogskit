@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from discogskit.entities import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.entities.labels import SCHEMAS
@@ -54,20 +56,18 @@ class TestLabelsParsing:
         for name, table in tables.items():
             assert table.schema == SCHEMAS[name]
 
-    def test_missing_id_skipped(self, tmp_path):
-        """Label element without <id> is skipped with a warning."""
-        xml = "<label><name>No ID</name><data_quality>Correct</data_quality></label>\n"
+    @pytest.mark.parametrize("id_xml", ["", "<id></id>", "<id/>"])
+    def test_missing_id_fails(self, tmp_path, id_xml):
+        """A label without an id fails with its line instead of vanishing (#94)."""
+        xml = (
+            "<label><id>1</id><name>A</name></label>\n"
+            f"<label>{id_xml}<name>No ID</name></label>\n"
+        )
         f = tmp_path / "no_id.xml"
         f.write_text(xml)
 
-        import warnings
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            ipc_dict = extract_chunk_to_ipc(
-                ChunkArgs("labels", str(f), 0, os.path.getsize(f))
-            )
-            tables = ipc_to_tables(ipc_dict, SCHEMAS)
-
-        assert tables["labels"].num_rows == 0
-        assert any("missing id" in str(warning.message) for warning in w)
+        with pytest.raises(
+            ValueError,
+            match=r"^Invalid <label> record in .* at chunk line 2 .*: missing or empty id$",
+        ):
+            extract_chunk_to_ipc(ChunkArgs("labels", str(f), 0, os.path.getsize(f)))

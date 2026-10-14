@@ -9,6 +9,7 @@ description = "Discogs Data Dumps Toolkit"
 readme = "README.md"
 keywords = [ "cli", "discogs", "discogs-dump", "music-database" ]
 license = "Apache-2.0"
+license-files = [ "LICENSE.txt" ]
 authors = [ { name = "Jean-Marc Fontaine", email = "jm@jmfontaine.net" } ]
 requires-python = ">=3.10"
 classifiers = [
@@ -33,7 +34,7 @@ dependencies = [
   "rich>=14.3.3",
   "typer>=0.24.1",
 ]
-scripts.discogskit = "discogskit:cli.app"
+scripts.discogskit = "discogskit.cli:app"
 
 [dependency-groups]
 dev = [
@@ -72,10 +73,12 @@ run.source = [ "discogskit" ]
 
 [tool.deadcode]
 ignore_names = [
-  "_callback",         # Typer app.callback()
-  "_version_callback", # Typer Option callback
-  "convert",           # Typer app.command()
-  "load",              # Typer app.command()
-  "render",            # Rich ProgressColumn override
-  "return_value",      # mock attribute setup
+  "EndElementHandler",   # expat parser callback
+  "StartElementHandler", # expat parser callback
+  "_callback",           # Typer app.callback()
+  "_version_callback",   # Typer Option callback
+  "convert",             # Typer app.command()
+  "load",                # Typer app.command()
+  "render",              # Rich ProgressColumn override
+  "return_value",        # mock attribute setup
 ]

@@ -5,12 +5,10 @@ The chunk worker that drives ``append_record`` is shared; see ``_worker.py``.
 
 from __future__ import annotations
 
-import warnings
-
 import pyarrow as pa
 from lxml import etree
 
-from discogskit.entities import Cols, EntityDef, register
+from discogskit.entities import Cols, EntityDef, parse_bool, register
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Arrow schemas (the first table is the root table)
@@ -61,10 +59,9 @@ def append_record(
     cols: Cols, elem: etree._Element, unknown: set[str] | None = None
 ) -> None:
     """Parse a <master> element and append all data to column accumulators."""
-    id_text = elem.get("id")
+    id_text = record_id(elem)
     if not id_text:
-        warnings.warn("skipping <master> with missing id", stacklevel=2)
-        return
+        raise ValueError("missing or empty id")
     master_id = int(id_text)
 
     data_quality = None
@@ -122,9 +119,8 @@ def append_record(
                     continue
                 src = video.get("src")
                 dur_str = video.get("duration")
-                duration = int(dur_str) if dur_str else None
-                embed_str = video.get("embed")
-                embed = embed_str == "true" if embed_str else None
+                duration = None if dur_str is None else int(dur_str)
+                embed = parse_bool("embed", video.get("embed"))
                 vdesc = None
                 vtitle = None
                 for vc in video:
@@ -158,11 +154,17 @@ def append_record(
     r["styles"].append(styles)
 
 
+def record_id(elem: etree._Element) -> str | None:
+    """Return a <master> element's id as written in the XML, or None when it has none."""
+    return elem.get("id")
+
+
 register(
     EntityDef(
         append_record=append_record,
         fk_column="master_id",
         name="masters",
+        record_id=record_id,
         root_tag="master",
         schemas=SCHEMAS,
         table_weights=TABLE_WEIGHTS,

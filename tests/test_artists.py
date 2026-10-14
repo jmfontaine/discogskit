@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from discogskit.entities import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.entities.artists import SCHEMAS
@@ -76,25 +78,21 @@ class TestArtistsParsing:
         for name, table in tables.items():
             assert table.schema == SCHEMAS[name]
 
-    def test_missing_id_skipped(self, tmp_path):
-        """Artist element without <id> is skipped with a warning."""
+    @pytest.mark.parametrize("id_xml", ["", "<id></id>", "<id/>"])
+    def test_missing_id_fails(self, tmp_path, id_xml):
+        """An artist without an id fails with its line instead of vanishing (#94)."""
         xml = (
-            "<artist><name>No ID</name><data_quality>Correct</data_quality></artist>\n"
+            "<artist><id>1</id><name>A</name></artist>\n"
+            f"<artist>{id_xml}<name>No ID</name></artist>\n"
         )
         f = tmp_path / "no_id.xml"
         f.write_text(xml)
 
-        import warnings
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            ipc_dict = extract_chunk_to_ipc(
-                ChunkArgs("artists", str(f), 0, os.path.getsize(f))
-            )
-            tables = ipc_to_tables(ipc_dict, SCHEMAS)
-
-        assert tables["artists"].num_rows == 0
-        assert any("missing id" in str(warning.message) for warning in w)
+        with pytest.raises(
+            ValueError,
+            match=r"^Invalid <artist> record in .* at chunk line 2 .*: missing or empty id$",
+        ):
+            extract_chunk_to_ipc(ChunkArgs("artists", str(f), 0, os.path.getsize(f)))
 
     def test_strict_no_warnings_on_known_xml(self, artists_xml_file):
         """Strict mode produces no warnings when all XML elements are handled."""
@@ -136,6 +134,36 @@ class TestArtistsParsing:
         unhandled = [x for x in w if "unhandled" in str(x.message)]
         assert len(unhandled) == 1
         assert "brand_new_tag" in str(unhandled[0].message)
+
+    def test_strict_ignores_comments_and_pis(self, tmp_path):
+        """Comments and processing instructions inside a record aren't elements: strict mode reports only the unknown
+        element, and the text around a comment is kept whole."""
+        import warnings
+
+        xml = (
+            "<artist>\n"
+            "  <id>1</id>\n"
+            "  <!-- a comment -->\n"
+            "  <?some-pi data?>\n"
+            "  <name>Te<!-- split -->st</name>\n"
+            "  <data_quality>Correct</data_quality>\n"
+            "  <brand_new_tag>surprise</brand_new_tag>\n"
+            "</artist>\n"
+        )
+        f = tmp_path / "comments.xml"
+        f.write_text(xml)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            ipc_dict = extract_chunk_to_ipc(
+                ChunkArgs("artists", str(f), 0, os.path.getsize(f), strict=True)
+            )
+            tables = ipc_to_tables(ipc_dict, SCHEMAS)
+
+        unhandled = [x for x in w if "unhandled" in str(x.message)]
+        assert len(unhandled) == 1
+        assert "brand_new_tag" in str(unhandled[0].message)
+        assert tables["artists"].column("name").to_pylist() == ["Test"]
 
     def test_no_warnings_without_strict(self, tmp_path):
         """Without strict mode, unknown elements produce no warnings."""
