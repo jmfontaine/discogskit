@@ -61,7 +61,7 @@ jobs:
         run: uv sync --locked
 
       - name: Check for dead code
-        run: uv run deadcode src tests
+        run: scripts/dead-code.sh
 
   typecheck:
     # ty checks against the platform it runs on, so it runs on each OS.
