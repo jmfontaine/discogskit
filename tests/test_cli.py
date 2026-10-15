@@ -44,13 +44,14 @@ _PARQUET_LEVEL_RANGE = {
         pa.Codec.minimum_compression_level(codec),
         pa.Codec.maximum_compression_level(codec),
     )
-    for codec in ("gzip", "zstd")
+    for codec in ("brotli", "gzip", "zstd")
 }
 
 # Each Parquet codec's own default --compression-level, likewise read from pyarrow rather than hard-coded —
 # zstd's Arrow default (1) differs from libzstd's own default (3), and either could change with pyarrow.
 _PARQUET_LEVEL_DEFAULT = {
-    codec: pa.Codec.default_compression_level(codec) for codec in ("gzip", "zstd")
+    codec: pa.Codec.default_compression_level(codec)
+    for codec in ("brotli", "gzip", "zstd")
 }
 
 # A valid-looking .xml.gz filename so detect_entity() succeeds.
@@ -716,8 +717,13 @@ class TestPreflight:
 class TestFormatAndCompressionEnums:
     @pytest.mark.parametrize(
         "fmt, compression",
-        [("jsonl", "snappy"), ("jsonl", "zstd"), ("parquet", "bzip2")],
-        ids=["jsonl-snappy", "jsonl-zstd", "parquet-bzip2"],
+        [
+            ("jsonl", "brotli"),
+            ("jsonl", "snappy"),
+            ("jsonl", "zstd"),
+            ("parquet", "bzip2"),
+        ],
+        ids=["jsonl-brotli", "jsonl-snappy", "jsonl-zstd", "parquet-bzip2"],
     )
     def test_compression_not_valid_for_format_is_rejected(
         self, tmp_path: Path, fmt: str, compression: str
@@ -1062,6 +1068,7 @@ class TestCompressionLevel:
     _OUT_PATH: ClassVar[dict[tuple[str, str], str]] = {
         ("jsonl", "bzip2"): "artists/artists.jsonl.bz2",
         ("jsonl", "gzip"): "artists/artists.jsonl.gz",
+        ("parquet", "brotli"): "artists/artists.parquet",
         ("parquet", "gzip"): "artists/artists.parquet",
         ("parquet", "zstd"): "artists/artists.parquet",
     }
@@ -1087,10 +1094,17 @@ class TestCompressionLevel:
         [
             ("jsonl", "gzip", 0, 9),
             ("jsonl", "bzip2", 1, 9),
+            ("parquet", "brotli", *_PARQUET_LEVEL_RANGE["brotli"]),
             ("parquet", "gzip", *_PARQUET_LEVEL_RANGE["gzip"]),
             ("parquet", "zstd", *_PARQUET_LEVEL_RANGE["zstd"]),
         ],
-        ids=["jsonl-gzip", "jsonl-bzip2", "parquet-gzip", "parquet-zstd"],
+        ids=[
+            "jsonl-gzip",
+            "jsonl-bzip2",
+            "parquet-brotli",
+            "parquet-gzip",
+            "parquet-zstd",
+        ],
     )
     def test_level_reaches_the_codec(
         self, tmp_path: Path, fmt: str, compression: str, low: int, high: int
@@ -1138,10 +1152,11 @@ class TestCompressionLevel:
         "fmt, compression, library_default",
         [
             ("jsonl", "bzip2", 9),
+            ("parquet", "brotli", _PARQUET_LEVEL_DEFAULT["brotli"]),
             ("parquet", "gzip", _PARQUET_LEVEL_DEFAULT["gzip"]),
             ("parquet", "zstd", _PARQUET_LEVEL_DEFAULT["zstd"]),
         ],
-        ids=["jsonl-bzip2", "parquet-gzip", "parquet-zstd"],
+        ids=["jsonl-bzip2", "parquet-brotli", "parquet-gzip", "parquet-zstd"],
     )
     def test_default_other_codecs_match_their_own_library_default(
         self, tmp_path: Path, fmt: str, compression: str, library_default: int
@@ -1213,6 +1228,8 @@ class TestCompressionLevel:
             ("jsonl", "gzip", 10),
             ("jsonl", "bzip2", 0),
             ("jsonl", "bzip2", 10),
+            ("parquet", "brotli", _PARQUET_LEVEL_RANGE["brotli"][0] - 1),
+            ("parquet", "brotli", _PARQUET_LEVEL_RANGE["brotli"][1] + 1),
             ("parquet", "gzip", _PARQUET_LEVEL_RANGE["gzip"][0] - 1),
             ("parquet", "gzip", _PARQUET_LEVEL_RANGE["gzip"][1] + 1),
             ("parquet", "zstd", _PARQUET_LEVEL_RANGE["zstd"][0] - 1),
@@ -1223,6 +1240,8 @@ class TestCompressionLevel:
             "jsonl-gzip-high",
             "jsonl-bzip2-low",
             "jsonl-bzip2-high",
+            "parquet-brotli-low",
+            "parquet-brotli-high",
             "parquet-gzip-low",
             "parquet-gzip-high",
             "parquet-zstd-low",

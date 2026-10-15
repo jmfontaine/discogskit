@@ -138,7 +138,7 @@ Errors print `Error: <message>` and exit 1; Ctrl+C exits 130.
 | `Output files already exist in ...` / `Tables already exist in ...` | Pass `--overwrite`, or another `--output`, database or `--pg-schema` |
 | `Can't overwrite tables in schema ...: other objects depend on them` | Your views or foreign keys use the tables; the message lists them. Drop them, or load into another schema |
 | `<name>.xml exists but wasn't written by discogskit` | A foreign `.xml` next to the dump; move it away (ask first) |
-| `unsupported compression '<codec>' for <format>` | Parquet takes `zstd`, `snappy`, `gzip`, `none`; JSONL `gzip`, `bzip2`, `none` |
+| `unsupported compression '<codec>' for <format>` | Parquet takes `zstd`, `snappy`, `gzip`, `brotli`, `none`; JSONL `gzip`, `bzip2`, `none` |
 | `--pg-... can only be used with PostgreSQL, not a SQLite DSN` | Drop the `--pg-*` flags for SQLite |
 | `Duplicate <entity> id: <n>` or another value error naming a chunk and line | The dump has a record discogskit can't store as is; nothing is coerced. Report it with the message |
 | `--strict: <n> unhandled XML element paths in <record>` | `--strict` found elements discogskit doesn't parse, listed on the `Strict` lines before it. Rerun without `--strict` to load anyway, dropping them, and report the paths |

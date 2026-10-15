@@ -176,13 +176,26 @@ moved by hand. Files moved before the failure are already in `<output>/<entity>/
 | Option | Values |
 |-----------------|-------------------------------|
 | Output formats | `parquet`, `jsonl` |
-| Compression (Parquet) | `zstd` (default), `snappy`, `gzip`, `none` |
+| Compression (Parquet) | `zstd` (default), `snappy`, `gzip`, `brotli`, `none` |
 | Compression (JSONL) | `gzip`, `bzip2`, `none` (default) |
 
 `--compression-level` overrides a codec's own default. Valid ranges come from each library: JSONL gzip 0-9
 (defaults to **6**: on the 2026-10-01 dump, gzip output was 4.15% larger at level 6 than 9 across all four
 entities, for roughly 56-68% less compression CPU — see [#32](https://github.com/jmfontaine/discogskit/issues/32)),
-JSONL bzip2 1-9, Parquet gzip 1-9, Parquet zstd -131072 to 22. `snappy` and `none` don't take a level and reject one.
+JSONL bzip2 1-9, Parquet brotli 0-11, Parquet gzip 1-9, Parquet zstd -131072 to 22. `snappy` and `none` don't take a
+level and reject one.
+
+Converting the 2026-10-01 releases dump (62.7 GB of XML) to Parquet with each codec at its default level, on an Apple
+M3 (8 cores, 24 GB RAM, macOS) and otherwise default options:
+
+| Codec (default level) | Output | Run time | Parquet writes |
+|---|---:|---:|---:|
+| `zstd` (1) | 9,434 MB | 840 s | 192 s |
+| `gzip` (9) | 8,326 MB (−12%) | 1,886 s | 1,677 s |
+| `brotli` (8) | 7,625 MB (−19%) | 1,126 s | 934 s |
+
+The Parquet writes run on one thread, so once a codec makes them slower than parsing, the whole run slows with them.
+`brotli` makes the smallest files; `gzip` makes larger files than `brotli`, and more slowly.
 
 <details>
 <summary>Full command help</summary>
@@ -197,15 +210,16 @@ JSONL bzip2 1-9, Parquet gzip 1-9, Parquet zstd -131072 to 22. `snappy` and `non
 │ *    paths      <path>  One or more .xml.gz files or directories containing them [required]  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────╮
-│ --compression                              <bzip2|gzip|none|snappy  Compression codec.       │
-│                                            |zstd>                   Parquet: gzip, snappy,   │
-│                                                                     zstd (default), none.    │
-│                                                                     JSONL: bzip2, gzip, none │
-│                                                                     (default).               │
+│ --compression                              <brotli|bzip2|gzip|none  Compression codec.       │
+│                                            |snappy|zstd>            Parquet: brotli, gzip,   │
+│                                                                     snappy, zstd (default),  │
+│                                                                     none. JSONL: bzip2,      │
+│                                                                     gzip, none (default).    │
 │ --compression-level                        <int>                    Compression level for    │
 │                                                                     codecs that support one: │
 │                                                                     JSONL gzip/bzip2,        │
-│                                                                     Parquet gzip/zstd.       │
+│                                                                     Parquet                  │
+│                                                                     brotli/gzip/zstd.        │
 │                                                                     Rejected for snappy and  │
 │                                                                     none. Default: JSONL     │
 │                                                                     gzip uses level 6        │

@@ -13,6 +13,7 @@ import pytest
 
 import discogskit
 from discogskit.writers import get_writer
+from tests.conftest import ARTISTS_XML
 
 
 class TestGetWriter:
@@ -212,6 +213,7 @@ _ARTISTS_OUTPUT = {
     ("jsonl", "bzip2"): "artists/artists.jsonl.bz2",
     ("jsonl", "gzip"): "artists/artists.jsonl.gz",
     ("jsonl", "none"): "artists/artists.jsonl",
+    ("parquet", "brotli"): "artists/artists.parquet",
     ("parquet", "gzip"): "artists/artists.parquet",
     ("parquet", "none"): "artists/artists.parquet",
     ("parquet", "snappy"): "artists/artists.parquet",
@@ -227,10 +229,10 @@ def _read_rows(path, output_format, compression):
         return [json.loads(line) for line in f]
 
 
-def _convert(tmp_path, output_format, **writer_kwargs):
-    """Convert a two-artist dump with ``get_file_writer()``; return the run's result and output directory."""
+def _convert(tmp_path, output_format, *, xml=_ARTISTS_XML, **writer_kwargs):
+    """Convert a dump (two artists by default) with ``get_file_writer()``; return the run's result and output directory."""
     gz_path = tmp_path / "discogs_20260301_artists.xml.gz"
-    gz_path.write_bytes(gzip.compress(_ARTISTS_XML))
+    gz_path.write_bytes(gzip.compress(xml))
     out = tmp_path / "out"
     config = discogskit.PipelineConfig(
         chunk_mb=1,
@@ -253,6 +255,25 @@ def _convert(tmp_path, output_format, **writer_kwargs):
 
 class TestGetFileWriter:
     """get_file_writer() through the declared API only: names exported by ``discogskit``."""
+
+    def test_brotli_reads_back_the_same_data_as_uncompressed(self, tmp_path):
+        # Records filling every artists table.
+        xml = f"<artists>{ARTISTS_XML}</artists>".encode()
+        (tmp_path / "brotli").mkdir()
+        (tmp_path / "none").mkdir()
+        _, brotli_out = _convert(
+            tmp_path / "brotli", "parquet", compression="brotli", xml=xml
+        )
+        _, none_out = _convert(
+            tmp_path / "none", "parquet", compression="none", xml=xml
+        )
+
+        for table in discogskit.ENTITIES["artists"].table_order:
+            brotli = pq.ParquetFile(brotli_out / "artists" / f"{table}.parquet")
+            assert brotli.metadata.row_group(0).column(0).compression == "BROTLI"
+            expected = pq.read_table(none_out / "artists" / f"{table}.parquet")
+            assert expected.num_rows > 0, table
+            assert brotli.read().equals(expected), table
 
     @pytest.mark.parametrize(
         "output_format, compression",
@@ -286,10 +307,10 @@ class TestGetFileWriter:
     @pytest.mark.parametrize(
         "output_format, compression, match",
         [
+            ("jsonl", "brotli", "unsupported compression 'brotli' for jsonl"),
             ("jsonl", "snappy", "unsupported compression 'snappy' for jsonl"),
             ("jsonl", "zstd", "unsupported compression 'zstd' for jsonl"),
             ("parquet", "bzip2", "unsupported compression 'bzip2' for parquet"),
-            ("parquet", "brotli", "unsupported compression 'brotli' for parquet"),
             ("parquet", "bogus", "unsupported compression 'bogus' for parquet"),
         ],
     )
@@ -319,6 +340,18 @@ class TestGetFileWriter:
             ),
             ("jsonl", "gzip", 10, "out of range for gzip"),
             ("jsonl", "none", 5, "none does not support a compression level"),
+            (
+                "parquet",
+                "brotli",
+                pa.Codec.minimum_compression_level("brotli") - 1,
+                "out of range for brotli",
+            ),
+            (
+                "parquet",
+                "brotli",
+                pa.Codec.maximum_compression_level("brotli") + 1,
+                "out of range for brotli",
+            ),
             (
                 "parquet",
                 "gzip",
