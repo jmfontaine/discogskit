@@ -81,6 +81,9 @@ later ones don't run. Without `--strict`, those elements are dropped silently.
 Both commands decompress each `.xml.gz` to a `.xml` next to it, and delete the `.xml` after a successful run unless
 `--keep-xml` is set. A run that fails or is interrupted (including Ctrl+C) after decompression finished keeps the
 `.xml`, and the next run reuses it instead of decompressing again. One stopped during decompression leaves no `.xml`.
+A truncated, corrupt or non-gzip `.xml.gz` stops the run with `failed to decompress <name> (truncated, corrupt, or
+not a gzip file)`. Some truncated files make the decompressor hang instead of failing: a decompression that produces
+no output for 60 seconds is reported the same way.
 Runs on the same dump can overlap, e.g. a `convert` and a `load`: one decompresses while the others wait, then they all
 read the same `.xml`. A run that finishes while another still reads it leaves it in place for that run. They coordinate
 through a `<name>.xml.lock` file, which stays next to the dump; delete it only while no run is using that dump.
@@ -493,8 +496,9 @@ if __name__ == "__main__":
     print(f"{result.total_records:,} artists in {result.t_total:.1f}s")
 ```
 
-The parse workers are separate processes started with `spawn`, which imports the calling script again in each
-worker: keep the code that calls `run()` under `if __name__ == "__main__":`.
+Decompression and the parse workers run in separate processes started with `spawn`, which imports the calling script
+again in each one: keep the code that calls `run()` under `if __name__ == "__main__":`. Without it, the run fails
+after 60 seconds because the decompression process didn't start.
 
 `run()` prints the status and progress lines the CLI shows during a run, to stdout by default. Pass a
 [Rich](https://rich.readthedocs.io/) `Console` as `console` to change that: `Console(quiet=True)` prints nothing, and

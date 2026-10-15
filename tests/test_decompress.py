@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import errno
+import functools
 import gzip
 import io
 import multiprocessing
 import os
+import random
+import signal
+import threading
 import time
+from multiprocessing.context import SpawnProcess
 
 import pytest
 from filelock import ReadWriteLock, Timeout
@@ -21,6 +26,44 @@ _XML = b"<?xml version='1.0'?>\n<root>hello</root>"
 # here, the file ends like an empty member's all-zero footer.
 _HEADER_ZERO_EXTRA = bytes.fromhex("1f8b0804000000000000") + b"\x08\x00" + bytes(8)
 
+# A gzip member header cut inside its file name ("test.xml").
+_HEADER_NAME_CUT = bytes.fromhex("1f8b0808000000000003") + b"test.x"
+
+# Where to cut _labels_gz() so rapidgzip 0.16.0's Linux wheels (ISA-L) abort
+# the interpreter: "The bit buffer should not contain more data than have been
+# read from the file!".  Its macOS wheels raise an exception instead.
+_ABORTING_CUTS = (88_082, 198_185, 616_578)
+
+
+@functools.cache
+def _labels_gz():
+    """A deterministic labels-like dump, about 880 KB compressed."""
+    rng = random.Random(0)
+    words = [
+        "acid",
+        "ambient",
+        "bass",
+        "blues",
+        "dub",
+        "electro",
+        "folk",
+        "funk",
+        "house",
+        "jazz",
+        "punk",
+        "soul",
+        "techno",
+    ]
+    records = [b"<labels>"]
+    for i in range(50_000):
+        name = " ".join(rng.choices(words, k=rng.randint(1, 6)))
+        records.append(
+            f"<label><id>{i}</id><name>{name}</name>"
+            f"<profile>{rng.random()}</profile></label>".encode()
+        )
+    records.append(b"</labels>")
+    return gzip.compress(b"\n".join(records), mtime=0)
+
 
 def _write_gz(path, content=_XML):
     with gzip.open(path, "wb") as f:
@@ -33,17 +76,38 @@ def _leave_cached_xml(gz_path, xml_path):
     ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
 
 
-def _record_opens(monkeypatch):
-    """Spy on ``rapidgzip.open``: returns the list of paths it decompresses."""
-    opened = []
-    real_open = decompress.rapidgzip.open
+def _record_decompressions(monkeypatch):
+    """Spy on ``_decompress``: returns the list of .gz paths it decompresses."""
+    decompressed = []
+    real_decompress = decompress._decompress
 
-    def recording_open(path, parallelization):
-        opened.append(path)
-        return real_open(path, parallelization=parallelization)
+    def recording_decompress(gz_path, *args):
+        decompressed.append(gz_path)
+        real_decompress(gz_path, *args)
 
-    monkeypatch.setattr(decompress.rapidgzip, "open", recording_open)
-    return opened
+    monkeypatch.setattr(decompress, "_decompress", recording_decompress)
+    return decompressed
+
+
+def _run_patched_child(patches, *args):
+    """The decompression child, with ``patches`` applied first: values for
+    dotted names under ``discogskit.decompress``, such as ``rapidgzip.open``.
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        for name, value in patches.items():
+            mp.setattr(f"discogskit.decompress.{name}", value, raising=False)
+        decompress._decompress_child(*args)
+
+
+def _patch_child(monkeypatch, patches):
+    """Apply ``patches`` in the decompression child, which ``monkeypatch``
+    can't reach: it's another process.  Values must pickle.
+    """
+    monkeypatch.setattr(
+        decompress,
+        "_decompress_child",
+        functools.partial(_run_patched_child, patches),
+    )
 
 
 class _CompleteGzipReader(io.BytesIO):
@@ -51,7 +115,7 @@ class _CompleteGzipReader(io.BytesIO):
     ``_XML`` and, like rapidgzip, reports every compressed bit as consumed.
     """
 
-    def __init__(self, path):
+    def __init__(self, path, parallelization):
         super().__init__(_XML)
         self._path = path
 
@@ -59,11 +123,18 @@ class _CompleteGzipReader(io.BytesIO):
         return os.path.getsize(self._path) * 8
 
 
+class _AbortingReader(_CompleteGzipReader):
+    """Aborts the process, as rapidgzip does on some truncated input."""
+
+    def read(self, size=-1):
+        os.abort()
+
+
 class _GatedReader(_CompleteGzipReader):
     """The first read signals ``started``, then blocks until ``go``."""
 
-    def __init__(self, path, go, started):
-        super().__init__(path)
+    def __init__(self, path, parallelization, *, go, started):
+        super().__init__(path, parallelization)
         self._go = go
         self._read_once = False
         self._started = started
@@ -74,6 +145,100 @@ class _GatedReader(_CompleteGzipReader):
             self._started.set()
             self._go.wait()
         return super().read(size)
+
+
+class _InterruptingReader(_CompleteGzipReader):
+    """Reports its pid, sends the parent a Ctrl+C, then never returns."""
+
+    def __init__(self, path, parallelization, *, pids):
+        super().__init__(path, parallelization)
+        self._pids = pids
+
+    def read(self, size=-1):
+        self._pids.put(os.getpid())
+        # put() only queues it for a feeder thread: wait until it's sent.
+        self._pids.close()
+        self._pids.join_thread()
+        os.kill(os.getppid(), signal.SIGINT)
+        time.sleep(3600)
+
+
+class _SlowReader(_CompleteGzipReader):
+    """Pauses before each four-byte read: slow overall, never stalled."""
+
+    def read(self, size=-1):
+        time.sleep(0.2)
+        return super().read(4)
+
+
+def _crashing_child(*args):
+    """The decompression child, exiting with status 1 after its report."""
+    decompress._decompress_child(*args)
+    os._exit(1)
+
+
+def _never_starting_child(*args):
+    """Stands in for ``_decompress_child``: never reports it's running."""
+    time.sleep(3600)
+
+
+class _StalledReader(_CompleteGzipReader):
+    """Never returns, as rapidgzip does on some truncated input."""
+
+    def read(self, size=-1):
+        time.sleep(3600)
+
+
+class _XmlCheckingReader(_CompleteGzipReader):
+    """Reads a byte at a time, failing if the .xml exists during a read."""
+
+    def read(self, size=-1):
+        if os.path.exists(self._path.removesuffix(".gz")):
+            raise AssertionError("the .xml exists during decompression")
+        return super().read(1)
+
+
+class _FullDisk(io.BufferedWriter):
+    """Stands in for ``open``: every write fails with ENOSPC."""
+
+    def __init__(self, path, mode):
+        super().__init__(io.FileIO(path, mode))
+        self._path = os.fspath(path)
+
+    def write(self, data):
+        raise OSError(errno.ENOSPC, "No space left on device", self._path)
+
+
+def _child_outliving_parent(running, finished, *args):
+    """The decompression child, run only once its parent has died."""
+    running.set()
+    parent = multiprocessing.parent_process()
+    assert parent is not None
+    while parent.is_alive():
+        time.sleep(0.05)
+    try:
+        decompress._decompress_child(*args)
+    finally:
+        finished.set()
+
+
+def _ensure_xml_then_die(gz_path, xml_path, running, finished):
+    """Run ``ensure_xml`` in its own process, which dies abruptly once the
+    decompression child is running.
+    """
+
+    def die_once_running():
+        running.wait()
+        os._exit(0)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            decompress,
+            "_decompress_child",
+            functools.partial(_child_outliving_parent, running, finished),
+        )
+        threading.Thread(target=die_once_running, daemon=True).start()
+        ensure_xml(gz_path, xml_path, workers=1)
 
 
 def _ensure_xml_in_child(xml_path, blocked, go, results, started):
@@ -98,10 +263,9 @@ def _ensure_xml_in_child(xml_path, blocked, go, results, started):
             mp.setattr(
                 ReadWriteLock, name, reporting_wait(getattr(ReadWriteLock, name))
             )
-        mp.setattr(
-            decompress.rapidgzip,
-            "open",
-            lambda path, parallelization: _GatedReader(path, go, started),
+        _patch_child(
+            mp,
+            {"rapidgzip.open": functools.partial(_GatedReader, go=go, started=started)},
         )
         try:
             lease = ensure_xml(xml_path.with_name("test.xml.gz"), xml_path, workers=1)
@@ -130,50 +294,102 @@ class TestPartialFile:
         gz_path = _write_gz(tmp_path / "test.xml.gz")
         xml_path = tmp_path / "test.xml"
         partial_path = tmp_path / "test.xml.partial"
-
-        class FullDisk(io.BufferedWriter):
-            def write(self, data):
-                raise OSError(
-                    errno.ENOSPC, "No space left on device", str(partial_path)
-                )
-
-        def open_on_full_disk(path, mode):
-            return FullDisk(io.FileIO(path, mode))
-
         # Shadows the builtin inside the module only.
-        monkeypatch.setattr(decompress, "open", open_on_full_disk, raising=False)
+        _patch_child(monkeypatch, {"open": _FullDisk})
 
         with pytest.raises(OSError) as excinfo:
             ensure_xml(gz_path, xml_path, workers=1)
 
         assert excinfo.value.errno == errno.ENOSPC
+        assert excinfo.value.filename == str(partial_path)
         assert not isinstance(excinfo.value, DecompressError)
         assert not xml_path.exists()
         assert not partial_path.exists()
 
-    def test_keyboard_interrupt_removes_partial_and_reraises(
+    def test_keyboard_interrupt_stops_child_and_removes_partial(
         self, monkeypatch, tmp_path
     ):
-        """Ctrl+C during decompression leaves no incomplete .partial file."""
+        """Ctrl+C mid-decompression leaves no child process and no .partial."""
         gz_path = _write_gz(tmp_path / "test.xml.gz")
         xml_path = tmp_path / "test.xml"
         partial_path = tmp_path / "test.xml.partial"
-
-        class InterruptingReader(io.BytesIO):
-            def read(self, size=-1):
-                raise KeyboardInterrupt
-
-        monkeypatch.setattr(
-            decompress.rapidgzip,
-            "open",
-            lambda path, parallelization: InterruptingReader(_XML),
-        )
+        pids = multiprocessing.get_context("spawn").Queue()
+        reader = functools.partial(_InterruptingReader, pids=pids)
+        _patch_child(monkeypatch, {"rapidgzip.open": reader})
 
         with pytest.raises(KeyboardInterrupt):
             ensure_xml(gz_path, xml_path, workers=1)
 
+        with pytest.raises(ProcessLookupError):  # killed and reaped
+            os.kill(pids.get(timeout=30), 0)
         assert not xml_path.exists()
         assert not partial_path.exists()
+
+    def test_keyboard_interrupt_while_child_starts_stops_it(
+        self, monkeypatch, tmp_path
+    ):
+        """Ctrl+C after ``start()`` launches the child but before it records it."""
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        _patch_child(monkeypatch, {"rapidgzip.open": _StalledReader})
+        launched = []
+        real_popen = SpawnProcess._Popen
+
+        def popen_then_interrupt(process_obj):
+            popen = real_popen(process_obj)
+            launched.append(popen.pid)
+            signal.raise_signal(signal.SIGINT)
+            return popen
+
+        monkeypatch.setattr(SpawnProcess, "_Popen", staticmethod(popen_then_interrupt))
+
+        with pytest.raises(KeyboardInterrupt):
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        with pytest.raises(ProcessLookupError):  # killed and reaped
+            os.kill(launched[0], 0)
+        assert not (tmp_path / "test.xml.partial").exists()
+
+    def test_orphaned_child_writes_nothing(self, tmp_path):
+        """A child whose parent died before it ran leaves the .partial path
+        alone: another run may own it by then.
+        """
+        ctx = multiprocessing.get_context("spawn")
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        running, finished = ctx.Event(), ctx.Event()
+        parent = ctx.Process(
+            args=(gz_path, tmp_path / "test.xml", running, finished),
+            target=_ensure_xml_then_die,
+        )
+        parent.start()
+        parent.join(30)
+        if parent.is_alive():  # a hung run must not hang the suite
+            parent.kill()
+            parent.join()
+
+        assert parent.exitcode == 0  # os._exit(0) once the child ran
+        assert finished.wait(30)
+        assert not (tmp_path / "test.xml.partial").exists()
+
+    @pytest.mark.skipif(
+        not hasattr(os, "geteuid") or os.geteuid() == 0,
+        reason="root writes read-only files",
+    )
+    def test_read_only_umask_decompresses(self, tmp_path):
+        """A umask that leaves new files read-only doesn't stop the run: only
+        the child's creating handle writes the output.
+        """
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        (tmp_path / "test.xml.lock").touch()  # the lock needs a writable file
+        umask = os.umask(0o222)
+        try:
+            lease = ensure_xml(gz_path, xml_path, workers=1)
+        finally:
+            os.umask(umask)
+        lease.release(remove_xml=False)
+
+        assert xml_path.read_bytes() == _XML
 
     def test_rename_failure_removes_partial_and_keeps_error(
         self, monkeypatch, tmp_path
@@ -278,11 +494,7 @@ class TestPartialFile:
         gz_path = tmp_path / "test.xml.gz"
         gz_path.write_bytes(gzip.compress(_XML) + tail)
         xml_path = tmp_path / "test.xml"
-        monkeypatch.setattr(
-            decompress.rapidgzip,
-            "open",
-            lambda path, parallelization: _CompleteGzipReader(path),
-        )
+        _patch_child(monkeypatch, {"rapidgzip.open": _CompleteGzipReader})
 
         with pytest.raises(
             DecompressError, match=r"truncated, corrupt, or not a gzip file"
@@ -295,24 +507,121 @@ class TestPartialFile:
     def test_xml_appears_only_after_decompression(self, monkeypatch, tmp_path):
         gz_path = _write_gz(tmp_path / "test.xml.gz")
         xml_path = tmp_path / "test.xml"
-        xml_seen_during_reads: list[bool] = []
-
-        class RecordingReader(_CompleteGzipReader):
-            def read(self, size=-1):
-                xml_seen_during_reads.append(xml_path.exists())
-                return super().read(1)  # one byte per read: several reads
-
-        monkeypatch.setattr(
-            decompress.rapidgzip,
-            "open",
-            lambda path, parallelization: RecordingReader(path),
-        )
+        _patch_child(monkeypatch, {"rapidgzip.open": _XmlCheckingReader})
 
         ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
 
-        assert len(xml_seen_during_reads) > 1
-        assert not any(xml_seen_during_reads)
         assert xml_path.read_bytes() == _XML
+
+
+class TestNativeFailures:
+    """rapidgzip runs in a child process, so its aborts and hangs on bad input
+    end in ``DecompressError`` like its exceptions do.
+    """
+
+    def test_abort_raises_decompress_error(self, monkeypatch, tmp_path):
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        _patch_child(monkeypatch, {"rapidgzip.open": _AbortingReader})
+
+        with pytest.raises(
+            DecompressError, match=r"truncated, corrupt, or not a gzip file"
+        ) as excinfo:
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        assert "SIGABRT" in str(excinfo.value.__cause__)
+        assert not xml_path.exists()
+        assert not (tmp_path / "test.xml.partial").exists()
+
+    def test_child_that_never_starts_raises_runtime_error(self, monkeypatch, tmp_path):
+        """Like a script without a ``__main__`` guard, run again in the child."""
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        monkeypatch.setattr(decompress, "_START_TIMEOUT", 1)
+        monkeypatch.setattr(decompress, "_decompress_child", _never_starting_child)
+
+        with pytest.raises(RuntimeError, match=r"didn't start within 1s"):
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        assert not multiprocessing.active_children()
+        assert not xml_path.exists()
+        assert not (tmp_path / "test.xml.partial").exists()
+
+    def test_crash_after_success_raises_decompress_error(self, monkeypatch, tmp_path):
+        """A child that reports success, then exits non-zero, fails the run."""
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        monkeypatch.setattr(decompress, "_decompress_child", _crashing_child)
+
+        with pytest.raises(
+            DecompressError, match=r"truncated, corrupt, or not a gzip file"
+        ) as excinfo:
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        assert "exited with status 1 after reporting success" in str(
+            excinfo.value.__cause__
+        )
+        assert not xml_path.exists()
+        assert not (tmp_path / "test.xml.partial").exists()
+
+    @pytest.mark.parametrize("cut", _ABORTING_CUTS)
+    def test_rapidgzip_abort_raises_decompress_error(self, tmp_path, cut):
+        gz_path = tmp_path / "test.xml.gz"
+        gz_path.write_bytes(_labels_gz()[:cut])
+        xml_path = tmp_path / "test.xml"
+
+        with pytest.raises(
+            DecompressError, match=r"truncated, corrupt, or not a gzip file"
+        ):
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        assert not xml_path.exists()
+        assert not (tmp_path / "test.xml.partial").exists()
+
+    def test_rapidgzip_hang_raises_decompress_error(self, monkeypatch, tmp_path):
+        """rapidgzip's Linux wheels hang on a later member cut in its file name."""
+        gz_path = tmp_path / "test.xml.gz"
+        gz_path.write_bytes(gzip.compress(_XML * 1000) + _HEADER_NAME_CUT)
+        xml_path = tmp_path / "test.xml"
+        monkeypatch.setattr(decompress, "_STALL_TIMEOUT", 1)
+
+        with pytest.raises(
+            DecompressError, match=r"truncated, corrupt, or not a gzip file"
+        ):
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        assert not multiprocessing.active_children()
+        assert not xml_path.exists()
+        assert not (tmp_path / "test.xml.partial").exists()
+
+    def test_slow_decompression_isnt_stalled(self, monkeypatch, tmp_path):
+        """The watchdog limits the time between reads, not the total."""
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        monkeypatch.setattr(decompress, "_STALL_TIMEOUT", 1)
+        _patch_child(monkeypatch, {"rapidgzip.open": _SlowReader})
+
+        ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
+
+        assert xml_path.read_bytes() == _XML
+
+    def test_stall_raises_decompress_error(self, monkeypatch, tmp_path):
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        monkeypatch.setattr(decompress, "_STALL_TIMEOUT", 1)
+        _patch_child(monkeypatch, {"rapidgzip.open": _StalledReader})
+        start = time.monotonic()
+
+        with pytest.raises(
+            DecompressError, match=r"truncated, corrupt, or not a gzip file"
+        ) as excinfo:
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        assert time.monotonic() - start < 30
+        assert isinstance(excinfo.value.__cause__, TimeoutError)
+        assert not multiprocessing.active_children()
+        assert not xml_path.exists()
+        assert not (tmp_path / "test.xml.partial").exists()
 
 
 class TestCachedXml:
@@ -332,11 +641,11 @@ class TestCachedXml:
         else:
             stat = gz_path.stat()
             os.utime(gz_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))
-        opened = _record_opens(monkeypatch)
+        decompressed = _record_decompressions(monkeypatch)
 
         ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
 
-        assert opened == [str(gz_path)]
+        assert decompressed == [gz_path]
         assert xml_path.read_bytes() == (newer if change == "content" else _XML)
 
     def test_empty_cached_xml_recovered(self, tmp_path):
@@ -354,7 +663,7 @@ class TestCachedXml:
         gz_path = _write_gz(tmp_path / "test.xml.gz")
         xml_path = tmp_path / "test.xml"
         xml_path.write_bytes(b"the user's own file")
-        opened = _record_opens(monkeypatch)
+        decompressed = _record_decompressions(monkeypatch)
 
         for _ in range(2):  # the failed attempt doesn't adopt the file either
             with pytest.raises(
@@ -364,18 +673,18 @@ class TestCachedXml:
             ):
                 ensure_xml(gz_path, xml_path, workers=1)
 
-        assert opened == []
+        assert decompressed == []
         assert xml_path.read_bytes() == b"the user's own file"
 
     def test_gz_of_empty_xml_decompressed_once(self, monkeypatch, tmp_path):
         """An empty result straight from the .gz is returned, not decompressed forever."""
         gz_path = _write_gz(tmp_path / "test.xml.gz", b"")
         xml_path = tmp_path / "test.xml"
-        opened = _record_opens(monkeypatch)
+        decompressed = _record_decompressions(monkeypatch)
 
         ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
 
-        assert opened == [str(gz_path)]
+        assert decompressed == [gz_path]
         assert xml_path.read_bytes() == b""
 
     def test_interrupt_after_rename_keeps_marker(self, monkeypatch, tmp_path):
@@ -392,22 +701,22 @@ class TestCachedXml:
         with pytest.raises(KeyboardInterrupt):
             ensure_xml(gz_path, xml_path, workers=1)
         monkeypatch.undo()
-        opened = _record_opens(monkeypatch)
+        decompressed = _record_decompressions(monkeypatch)
 
         ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
 
-        assert opened == []
+        assert decompressed == []
         assert xml_path.read_bytes() == _XML
 
     def test_own_leftover_reused(self, monkeypatch, tmp_path):
         gz_path = _write_gz(tmp_path / "test.xml.gz")
         xml_path = tmp_path / "test.xml"
         _leave_cached_xml(gz_path, xml_path)
-        opened = _record_opens(monkeypatch)
+        decompressed = _record_decompressions(monkeypatch)
 
         ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
 
-        assert opened == []
+        assert decompressed == []
         assert xml_path.read_bytes() == _XML
 
 
