@@ -177,7 +177,7 @@ class TestRecordErrorOutput:
     def test_record_error_reaches_output_intact(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """A record error keeps its file, chunk and line through the process pool and Rich (#93).
+        """A record error keeps its file, chunk and line through the parse worker process and Rich (#93).
 
         The id looks like Rich markup, which Rich would otherwise swallow.
         """
@@ -934,6 +934,90 @@ class TestProfile:
             *ENTITIES["artists"].table_order,
             "commit",
         ]
+
+
+class TestStrict:
+    """--strict fails the run once it has reported every unhandled element, before any output is published (#179)."""
+
+    _TARGETS: ClassVar[list[str]] = ["jsonl", "parquet", "sqlite"]
+    _UNHANDLED: ClassVar[str] = (
+        "<artist><id>99</id><name>X</name><new_tag/><other_tag/></artist>\n"
+    )
+
+    @staticmethod
+    def _args(target: str, gz: Path, tmp_path: Path) -> list[str]:
+        if target == "sqlite":
+            args = ["load", str(gz), "--dsn", str(tmp_path / "out.db")]
+        else:
+            args = ["convert", str(gz), "-f", target, "--output", str(tmp_path / "out")]
+        return [*args, "--parse-workers", "1", "--no-progress"]
+
+    @staticmethod
+    def _artists_gz(tmp_path: Path, *, unhandled: bool) -> Path:
+        gz = tmp_path / _ENTITY_FILE
+        with gzip.open(gz, "wt", encoding="utf-8") as f:
+            f.write("<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
+            f.write(ARTISTS_XML)
+            if unhandled:
+                f.write(TestStrict._UNHANDLED)
+            f.write("</artists>")
+        return gz
+
+    @staticmethod
+    def _published(target: str, tmp_path: Path) -> bool:
+        """Whether the run published its output: the SQLite indexes ``finalize()`` builds, or the entity's directory
+        of files."""
+        if target != "sqlite":
+            return (tmp_path / "out" / "artists").exists()
+        conn = sqlite3.connect(tmp_path / "out.db")
+        try:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        finally:
+            conn.close()
+        return bool(rows)
+
+    @pytest.mark.parametrize("target", _TARGETS)
+    def test_clean_input_with_strict_succeeds(
+        self, target: str, tmp_path: Path
+    ) -> None:
+        gz = self._artists_gz(tmp_path, unhandled=False)
+        result = runner.invoke(app, [*self._args(target, gz, tmp_path), "--strict"])
+        output = _unstyle(result.output)
+        assert result.exit_code == 0, output
+        assert "Strict" not in output
+        assert self._published(target, tmp_path)
+
+    @pytest.mark.parametrize("target", _TARGETS)
+    def test_unhandled_elements_fail_the_run_before_publishing(
+        self, monkeypatch: pytest.MonkeyPatch, target: str, tmp_path: Path
+    ) -> None:
+        _widen_console(monkeypatch)
+        gz = self._artists_gz(tmp_path, unhandled=True)
+        result = runner.invoke(app, [*self._args(target, gz, tmp_path), "--strict"])
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        assert type(result.exception) is SystemExit, repr(result.exception)
+        lines = [line.strip() for line in output.splitlines()]
+        reported = [line for line in lines if line.startswith(("Strict", "Error"))]
+        assert reported == [
+            "Strict         unhandled XML element <new_tag> in <artist>",
+            "Strict         unhandled XML element <other_tag> in <artist>",
+            "Error: --strict: 2 unhandled XML element paths in <artist>; see the Strict lines above",
+        ]
+        assert not self._published(target, tmp_path)
+
+    @pytest.mark.parametrize("target", _TARGETS)
+    def test_unhandled_elements_without_strict_succeed(
+        self, target: str, tmp_path: Path
+    ) -> None:
+        gz = self._artists_gz(tmp_path, unhandled=True)
+        result = runner.invoke(app, self._args(target, gz, tmp_path))
+        output = _unstyle(result.output)
+        assert result.exit_code == 0, output
+        assert "Strict" not in output
+        assert self._published(target, tmp_path)
 
 
 class TestUnicodeConvert:

@@ -39,7 +39,7 @@ The core is a multi-process pipeline in `src/discogskit/pipeline.py`:
 4. **Write** — Single writer thread (one-worker `ThreadPoolExecutor`) deserializes IPC and writes to target format. A chunk counts against a budget of `parse_workers + write_queue` from parse submission until its write completes, and the main thread submits chunks only while under it, so a slow writer idles the workers instead of piling parsed chunks up in memory. The main thread waits on the workers' connections, their process sentinels and the writes together (`multiprocessing.connection.wait`), so parse errors, a dead worker (`BrokenProcessPool`, even one killed halfway through sending its result) and writer errors re-raise as soon as they happen. Any failure kills the parse workers. On Ctrl+C the main thread calls the writer's `cancel()`, because ADBC cancels a statement on SIGINT only on the main thread
 5. **Index/Cleanup** — Parallel index creation for DB targets, optional XML cleanup
 
-Multiprocessing is used because lxml is CPU-bound and holds the GIL. Arrow IPC is the inter-process format (no pickling overhead).
+Multiprocessing is used because lxml is CPU-bound and holds the GIL. Arrow IPC is the inter-process format: each worker pickles its chunk's result over its connection, but the tables in it are Arrow IPC buffers, so pickling only copies them instead of walking every row as Python objects.
 
 ### Key modules
 

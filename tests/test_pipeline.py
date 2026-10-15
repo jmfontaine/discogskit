@@ -878,11 +878,13 @@ class TestPipelineRun:
 
 
 class TestStrictReport:
-    def test_each_unhandled_element_reported_once_by_the_main_process(
+    def test_each_unhandled_element_reported_once_then_run_raises(
         self, capfd, tmp_path
     ):
         """With several workers each seeing the same unknown elements, each is reported once, not once per worker
-        (#105). capfd also captures the spawned workers' own output."""
+        (#105), then the run raises before publishing anything (#179). capfd also captures the spawned workers' own
+        output."""
+        from discogskit import UnhandledElementsError
         from discogskit.writers.jsonl import JSONLWriter
 
         n = _MANY_ARTISTS
@@ -899,10 +901,16 @@ class TestStrictReport:
         config = dataclasses.replace(_multi_chunk_config(gz_path), strict=True)
         assert config.parse_workers >= 2
 
-        result = _run_and_close(config, JSONLWriter(str(tmp_path / "out")))
+        with pytest.raises(UnhandledElementsError) as info:
+            _run_and_close(config, JSONLWriter(str(tmp_path / "out")))
 
+        assert info.value.entity == "artists"
+        assert info.value.paths == ["new_tag", "rare_tag"]
+        assert str(info.value) == (
+            "--strict: 2 unhandled XML element paths in <artist>; see the Strict lines above"
+        )
+        assert not (tmp_path / "out" / "artists").exists()
         out, err = capfd.readouterr()
-        assert result.total_records == n
         # Enough chunks that every worker parsed some.
         assert out.count("  chunk ") > config.parse_workers
         strict = [line.strip() for line in out.splitlines() if "Strict" in line]
@@ -911,6 +919,24 @@ class TestStrictReport:
             "Strict         unhandled XML element <rare_tag> in <artist>",
         ]
         assert "unhandled" not in err
+
+    def test_one_unhandled_path_is_singular(self, tmp_path):
+        from discogskit import UnhandledElementsError
+        from discogskit.writers.jsonl import JSONLWriter
+
+        gz_path = tmp_path / "artists.xml.gz"
+        with gzip.open(gz_path, "wb") as f:
+            f.write(
+                b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n"
+                b"<artist><id>1</id><new_tag/></artist>\n</artists>"
+            )
+        config = dataclasses.replace(_single_chunk_config(gz_path), strict=True)
+
+        with pytest.raises(
+            UnhandledElementsError,
+            match=r"^--strict: 1 unhandled XML element path in <artist>; ",
+        ):
+            _run_and_close(config, JSONLWriter(str(tmp_path / "out")))
 
 
 class TestPipelineRunParseWorkers:
