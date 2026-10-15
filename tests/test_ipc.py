@@ -38,7 +38,7 @@ class TestDeserializeBatch:
         sink = pa.BufferOutputStream()
         writer = ipc.new_stream(sink, schema)
         writer.close()
-        ipc_bytes = sink.getvalue().to_pybytes()
+        ipc_bytes = sink.getvalue()
 
         with pytest.raises(ValueError, match="found none"):
             deserialize_batch(ipc_bytes)
@@ -51,7 +51,7 @@ class TestDeserializeBatch:
         writer.write_batch(batch)
         writer.write_batch(batch)
         writer.close()
-        ipc_bytes = sink.getvalue().to_pybytes()
+        ipc_bytes = sink.getvalue()
 
         with pytest.raises(ValueError, match="found more than one"):
             deserialize_batch(ipc_bytes)

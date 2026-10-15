@@ -10,13 +10,13 @@ import pyarrow as pa
 from pyarrow import ipc
 
 
-def deserialize_batch(ipc_bytes: bytes) -> pa.RecordBatch:
+def deserialize_batch(buffer: pa.Buffer) -> pa.RecordBatch:
     """Deserialize one IPC stream into its single RecordBatch.
 
     Fails loudly if a stream holds no batch or more than one, instead of silently dropping extra batches or raising a
     bare StopIteration.
     """
-    reader = ipc.open_stream(pa.BufferReader(ipc_bytes))
+    reader = ipc.open_stream(pa.BufferReader(buffer))
     try:
         batch = reader.read_next_batch()
     except StopIteration:
@@ -26,10 +26,10 @@ def deserialize_batch(ipc_bytes: bytes) -> pa.RecordBatch:
     return batch
 
 
-def serialize_batch(batch: pa.RecordBatch, schema: pa.Schema) -> bytes:
-    """Serialize ``batch`` as one IPC stream with ``schema``."""
+def serialize_batch(batch: pa.RecordBatch, schema: pa.Schema) -> pa.Buffer:
+    """Serialize ``batch`` as one IPC stream with ``schema``, into the buffer the worker sends as it is (issue #31)."""
     sink = pa.BufferOutputStream()
     writer = ipc.new_stream(sink, schema)
     writer.write_batch(batch)
     writer.close()
-    return sink.getvalue().to_pybytes()
+    return sink.getvalue()

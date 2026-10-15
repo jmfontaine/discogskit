@@ -128,30 +128,35 @@ for.
 
 A run's memory goes mostly to its parse workers, each holding the chunk it parses as Python objects and then as
 Arrow tables, and to the main process, which holds the parsed chunks waiting to be written. `--chunk-mb` and
-`--parse-workers` set the peak, and so does `--write-queue`, which sets how many parsed chunks may wait in the main
-process. Loading a 6.4 GB stretch of the 2026-10-01 releases dump (2,019,143 releases) into a local PostgreSQL 18 on
-an Apple M3 (8 cores, 24 GB RAM, macOS), once per setting, discogskit's processes together peaked at:
+`--parse-workers` set the peak; a larger `--write-queue` lets more parsed chunks wait in the main process. Loading a
+6.4 GB stretch of the 2026-10-01 releases dump (2,019,143 releases) into a local PostgreSQL 18 on an Apple M3 (8
+cores, 24 GB RAM, macOS), once per setting, discogskit's processes together peaked at:
 
-| Options | All processes | Main process | Largest parse worker | Time |
-|---|---:|---:|---:|---:|
-| defaults (two runs) | 7.4 GiB, 8.3 GiB | 3.0 GiB, 2.7 GiB | 2.0 GiB, 2.0 GiB | 86 s, 85 s |
-| `--chunk-mb 64` | 4.9 GiB | 1.0 GiB | 1.4 GiB | 73 s |
-| `--chunk-mb 128` | 5.9 GiB | 1.5 GiB | 1.5 GiB | 99 s |
-| `--chunk-mb 512` | 10.1 GiB | 4.4 GiB | 2.3 GiB | 113 s |
-| `--parse-workers 2` | 5.6 GiB | 2.2 GiB | 2.0 GiB | 90 s |
-| `--parse-workers 8` | 10.5 GiB | 3.9 GiB | 2.0 GiB | 100 s |
-| `--write-queue 1` | 8.1 GiB | 2.5 GiB | 2.0 GiB | 84 s |
-| `--write-queue 4` | 9.0 GiB | 3.7 GiB | 2.0 GiB | 100 s |
-| `--write-queue 8` | 10.6 GiB | 4.3 GiB | 1.8 GiB | 83 s |
-| `--pg-write-workers 3` | 8.7 GiB | 2.4 GiB | 1.9 GiB | 73 s |
+| Options | All processes | Main process | Largest parse worker |
+|---|---:|---:|---:|
+| defaults (two runs) | 3.9 GiB, 4.4 GiB | 1.5 GiB, 1.4 GiB | 1.1 GiB, 1.2 GiB |
+| `--chunk-mb 64` | 1.7 GiB | 0.6 GiB | 0.3 GiB |
+| `--chunk-mb 128` | 2.4 GiB | 0.8 GiB | 0.5 GiB |
+| `--chunk-mb 512` | 7.6 GiB | 2.4 GiB | 1.8 GiB |
+| `--parse-workers 2` | 3.2 GiB | 1.2 GiB | 1.2 GiB |
+| `--parse-workers 8` | 6.4 GiB | 1.8 GiB | 1.1 GiB |
+| `--write-queue 1` | 4.3 GiB | 1.3 GiB | 1.1 GiB |
+| `--write-queue 4` | 4.4 GiB | 1.7 GiB | 1.2 GiB |
+| `--write-queue 8` | 5.2 GiB | 1.6 GiB | 1.1 GiB |
+| `--pg-write-workers 3` | 4.6 GiB | 1.4 GiB | 1.1 GiB |
 
 The defaults are 4 parse workers, 256 MB chunks, a write queue of 2 and 1 write worker. These are peak footprints
 (macOS `phys_footprint`, which Activity Monitor shows as Memory), summed over the main process and its parse workers
-every 0.25 s; the two default runs differ by 0.9 GiB, so smaller differences are noise. A worker keeps memory it has
-freed for reuse, so its footprint grows over its first few chunks: at 256 MB, from about 0.9 GiB during its first
-chunk to 1.6-2.0 GiB by its tenth. `/usr/bin/time -l` reports something else: the largest single process's peak
-resident set, which leaves out memory the system has compressed. Converting the whole releases dump (62.7 GB of XML)
-to Parquet with the defaults peaked at 10.3 and 10.5 GiB in two runs, 3.5 and 4.2 GiB of it in the main process.
+every 0.25 s; the two default runs differ by 0.5 GiB, so smaller differences are noise. On macOS, a worker keeps
+memory it has freed for reuse, so its footprint grows over its first few chunks: at 256 MB, from about 0.9 GiB during
+its first chunk to about 1.1 GiB by its tenth. On Linux (Python 3.13 in Docker on the same Mac), the same worker's
+peak resident set stayed at about 0.9 GiB from its first chunk to its tenth; the table above wasn't measured there.
+Sending each table's Arrow buffer to the main process as it is, instead of a pickled copy, cut that worker's peak from
+2.0 GiB to 1.1 GiB on macOS but left it unchanged on Linux
+([#31](https://github.com/jmfontaine/discogskit/issues/31)).
+`/usr/bin/time -l` reports something else: the largest single process's peak resident set, which leaves out memory
+the system has compressed. Converting the whole releases dump (62.7 GB of XML) to Parquet with the defaults peaked at
+5.7 GiB, 1.2 GiB of it in the main process.
 
 ### discogskit convert
 

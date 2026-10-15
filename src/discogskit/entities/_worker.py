@@ -36,7 +36,7 @@ class ChunkResult(NamedTuple):
     """One parsed chunk."""
 
     # Table name -> one serialized RecordBatch, in the entity's table order.
-    tables: dict[str, bytes]
+    tables: dict[str, pa.Buffer]
     # Sorted paths of the elements no parser handled, relative to the record (e.g. ``videos/video/foo``); only
     # collected with ``--strict``.
     unknown: list[str]

@@ -12,7 +12,9 @@ import signal
 import sys
 import threading
 import time
+import tracemalloc
 from concurrent.futures.process import BrokenProcessPool
+from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any, cast
 
@@ -22,8 +24,15 @@ from filelock import ReadWriteLock
 from rich.live import _RefreshThread
 
 from discogskit._console import console
-from discogskit.entities._worker import extract_chunk_to_ipc
-from discogskit.pipeline import _DuplicateIdTracker, _ElapsedEstTotalColumn, _fmt_time
+from discogskit.entities._def import ChunkArgs
+from discogskit.entities._worker import ChunkResult, extract_chunk_to_ipc
+from discogskit.pipeline import (
+    _ChunkHeader,
+    _DuplicateIdTracker,
+    _ElapsedEstTotalColumn,
+    _fmt_time,
+    _parse_worker,
+)
 from tests.conftest import ARTISTS_XML, LABELS_XML
 
 # ------------------------------------------------------------------------------------------------------------------------
@@ -191,9 +200,7 @@ _MID_SEND_BYTES = 64 * 1024 * 1024
 
 def _dying_mid_send_extract(args):
     """The real parse step, except the first call returns a large result and SIGKILLs its own worker halfway through
-    sending it, as the OOM killer would when pickling the result doubles the worker's memory (#157)."""
-    from multiprocessing.connection import Connection
-
+    sending it, as the OOM killer would (#157)."""
     # Connection._send is private and undeclared in the stubs. Pipes and sockets alike send each part of a message
     # through it.
     connection = cast("Any", Connection)
@@ -205,14 +212,84 @@ def _dying_mid_send_extract(args):
     send = connection._send
 
     def send_half_then_die(self, buf, *rest):
-        if len(buf) > _MID_SEND_BYTES:  # the result, not its length header
+        if (
+            len(buf) >= _MID_SEND_BYTES
+        ):  # the padding table, not a length header or a smaller table
             send(self, memoryview(buf)[: len(buf) // 2], *rest)
             os.kill(os.getpid(), signal.SIGKILL)
         send(self, buf, *rest)
 
     connection._send = send_half_then_die
     result = extract_chunk_to_ipc(args)
-    return result._replace(tables={**result.tables, "padding": bytes(_MID_SEND_BYTES)})
+    return result._replace(
+        tables={**result.tables, "padding": pa.py_buffer(bytes(_MID_SEND_BYTES))}
+    )
+
+
+def test_parse_worker_sends_tables_without_copying_them(tmp_path):
+    """Pickling the result copied every table into one message before sending it, so the worker held its tables
+    twice: 0.4-0.9 GiB more at a long-lived worker's peak at 256 MB chunks (issue #31)."""
+    table = pa.py_buffer(bytes(32 * 1024 * 1024))
+    tasks_r, tasks_w = multiprocessing.Pipe(duplex=False)
+    results_r, results_w = multiprocessing.Pipe(duplex=False)
+    tasks_w.send(ChunkArgs(end=1, entity="artists", file_path=str(tmp_path), start=0))
+    tasks_w.close()
+    # Drains the pipe into one preallocated buffer, so the reader allocates nothing tracemalloc would count.
+    scratch = bytearray(1024 * 1024)
+    received = []
+
+    def drain():
+        while n := os.readv(results_r.fileno(), [scratch]):
+            received.append(n)
+
+    reader = threading.Thread(target=drain)
+    reader.start()
+    sigint = signal.getsignal(signal.SIGINT)
+    tracemalloc.start()
+    try:
+        _parse_worker(
+            tasks_r, results_w, lambda _: ChunkResult(tables={"t": table}, unknown=[])
+        )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+        # The worker ignores Ctrl+C, which it leaves to the main process.
+        signal.signal(signal.SIGINT, sigint)
+        results_w.close()
+        reader.join()
+
+    assert sum(received) > table.size
+    assert peak < table.size // 2
+
+
+def test_parse_worker_ends_its_pipe_when_a_table_fails_to_send(tmp_path, monkeypatch):
+    """Once a chunk's header is out, the main process reads the next messages as its tables: an error reply sent then
+    would be taken for one, and the main process would wait for the rest forever."""
+    tasks_r, tasks_w = multiprocessing.Pipe(duplex=False)
+    results_r, results_w = multiprocessing.Pipe(duplex=False)
+    for _ in range(2):
+        tasks_w.send(
+            ChunkArgs(end=1, entity="artists", file_path=str(tmp_path), start=0)
+        )
+    tasks_w.close()
+
+    def fail(*_):
+        raise MemoryError
+
+    monkeypatch.setattr(Connection, "send_bytes", fail)
+    sigint = signal.getsignal(signal.SIGINT)
+    try:
+        _parse_worker(
+            tasks_r,
+            results_w,
+            lambda _: ChunkResult(tables={"t": pa.py_buffer(b"x")}, unknown=[]),
+        )
+    finally:
+        signal.signal(signal.SIGINT, sigint)
+
+    assert results_r.recv() == _ChunkHeader(tables=["t"], unknown=[])
+    with pytest.raises(EOFError):
+        results_r.recv_bytes()
 
 
 class _StubWriter:

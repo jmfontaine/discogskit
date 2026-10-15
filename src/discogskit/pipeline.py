@@ -43,11 +43,12 @@ Key design decisions
   refresh thread and the writer thread and holds database connections, none
   of which a forked child can safely inherit.
 - **Arrow IPC as inter-process format**: each worker serializes every table
-  of a chunk to an Arrow IPC buffer and sends the chunk's result over its
-  pipe, which pickles it. Pickling a few large ``bytes`` buffers only copies
-  them, where pickling the rows as Python objects would walk every value;
-  the main process then reads each buffer without copying it again
-  (columnar). Buffers are ~150 MB per chunk at the default ``--chunk-mb``.
+  of a chunk to an Arrow IPC buffer and writes each buffer to its pipe as it
+  is, after a small pickled header naming the tables. Pickling the rows as
+  Python objects would walk every value, and pickling the buffers would copy
+  them all into one message first (issue #31); the main process then reads
+  each buffer without copying it again (columnar). Buffers are ~150 MB per
+  chunk at the default ``--chunk-mb``.
 - **Bounded chunks in flight**: a chunk counts against a budget of
   ``parse_workers + write_queue`` from its submission to a parse worker until
   its write completes, and the main thread submits a chunk only while under
@@ -89,6 +90,7 @@ from multiprocessing.connection import wait
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
+import pyarrow as pa
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -133,8 +135,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from multiprocessing.connection import Connection
     from multiprocessing.process import BaseProcess
-
-    import pyarrow as pa
 
 
 class _ProgressBar:
@@ -329,7 +329,7 @@ class _ChunkWriter:
         self._failed = False
         self._t_idle = self._t_start = time.perf_counter()
 
-    def write(self, ipc_dict: dict[str, bytes]) -> None:
+    def write(self, ipc_dict: dict[str, pa.Buffer]) -> None:
         if self._failed:
             # run() re-raises the earlier failure; writing later chunks would
             # land data after the reported error.
@@ -414,6 +414,15 @@ def _watch(thread: threading.Thread) -> threading.Event:
     return done
 
 
+class _ChunkHeader(NamedTuple):
+    """A worker's reply for a chunk it parsed, followed on the pipe by one message per table: its IPC buffer."""
+
+    # The chunk's table names, in the order their buffers follow.
+    tables: list[str]
+    # ChunkResult.unknown.
+    unknown: list[str]
+
+
 class _ParseFailure(NamedTuple):
     """A worker's reply for a chunk it failed to parse, in place of its ``ChunkResult``."""
 
@@ -465,16 +474,39 @@ def _parse_worker(
             # The main process re-raises it.
             reply = _ParseFailure(exc, _format_traceback(exc))
         try:
-            results.send(reply)
+            if isinstance(reply, _ParseFailure):
+                results.send(reply)
+            else:
+                _send_chunk(results, reply)
         except OSError:
             # The main process is gone: nobody wants the result.
             return
         except Exception as exc:  # noqa: BLE001
+            if results.closed:
+                # _send_chunk() failed after its header: the main process sees the pipe end, as for a dead worker.
+                return
             # A reply pickle can't serialize fails before any of it is sent, so
             # the pipe can still carry the error that stopped it.
             results.send(_ParseFailure(exc, _format_traceback(exc)))
         # Otherwise the sent result stays in memory while the next chunk parses.
         del reply
+
+
+def _send_chunk(results: Connection, result: ChunkResult) -> None:
+    """Send a parsed chunk to the main process: a ``_ChunkHeader``, then each table's IPC buffer, uncopied.
+
+    Pickling the whole result copied every buffer into one message first, which held the chunk's tables twice and
+    raised a long-lived worker's peak by 0.4-0.9 GiB at 256 MB chunks (issue #31).
+    """
+    results.send(_ChunkHeader(tables=list(result.tables), unknown=result.unknown))
+    try:
+        for buffer in result.tables.values():
+            results.send_bytes(buffer)
+    except BaseException:
+        # The main process would read anything sent now as a table, then wait for the rest. Ending the pipe tells
+        # it the worker is gone.
+        results.close()
+        raise
 
 
 def _start_parse_worker() -> _ParseWorker:
@@ -546,7 +578,15 @@ def _worker_died(worker: _ParseWorker) -> BrokenProcessPool:
 def _receive(worker: _ParseWorker) -> ChunkResult:
     """Receive the result of the chunk ``worker`` is parsing; re-raise its parse error, or raise if it died."""
     try:
-        reply = worker.results.recv()
+        reply: _ChunkHeader | _ParseFailure = worker.results.recv()
+        # The worker sends the buffers right after the header. py_buffer wraps the received bytes without a copy.
+        tables = (
+            {}
+            if isinstance(reply, _ParseFailure)
+            else {
+                name: pa.py_buffer(worker.results.recv_bytes()) for name in reply.tables
+            }
+        )
     except (EOFError, OSError):
         # The pipe ended: before the reply (EOFError) or halfway through it (OSError).
         raise _worker_died(worker) from None
@@ -554,7 +594,7 @@ def _receive(worker: _ParseWorker) -> ChunkResult:
     if isinstance(reply, _ParseFailure):
         reply.error.__cause__ = _RemoteTraceback(f'\n"""\n{reply.traceback}"""')
         raise reply.error
-    return reply
+    return ChunkResult(tables=tables, unknown=reply.unknown)
 
 
 def _parse_and_write(
