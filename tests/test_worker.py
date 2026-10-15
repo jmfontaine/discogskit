@@ -281,6 +281,23 @@ def _extract_error(tmp_path, entity: str, chunk: bytes) -> tuple[str, int, int, 
 
 class TestRecordErrorContext:
     @pytest.mark.parametrize(
+        "feed_bytes",
+        [None, len(b"<artist><id>abc</id></artist>\n"), 5],
+        ids=["same-slice", "slice-ends-after-bad-record", "small-slices"],
+    )
+    def test_bad_value_before_malformed_xml_is_reported_first(
+        self, tmp_path, monkeypatch, feed_bytes
+    ):
+        """The first problem in the document is reported, whichever slices the worker feeds."""
+        if feed_bytes is not None:
+            monkeypatch.setattr(_worker, "_FEED_BYTES", feed_bytes)
+        chunk = b"<artist><id>abc</id></artist>\n<artist><id>2</bad></artist>\n"
+        file, start, end, message = _extract_error(tmp_path, "artists", chunk)
+        assert message.startswith(
+            f"Invalid <artist> record in {file} at chunk line 1 (chunk bytes {start}-{end}, id='abc'): "
+        )
+
+    @pytest.mark.parametrize(
         "entity, bad_record",
         [
             ("artists", b"<artist>\n  <id>abc</id>\n</artist>\n"),
@@ -351,23 +368,6 @@ class TestRecordErrorContext:
         assert message == (
             f"Invalid <release> record in {file} at chunk line 1 (chunk bytes {start}-{end}, id='7'):"
             " <sub_tracks> nested in sub-track '1a' of track '1' at chunk line unknown"
-        )
-
-    @pytest.mark.parametrize(
-        "feed_bytes",
-        [None, len(b"<artist><id>abc</id></artist>\n"), 5],
-        ids=["same-slice", "slice-ends-after-bad-record", "small-slices"],
-    )
-    def test_bad_value_before_malformed_xml_is_reported_first(
-        self, tmp_path, monkeypatch, feed_bytes
-    ):
-        """The first problem in the document is reported, whichever slices the worker feeds."""
-        if feed_bytes is not None:
-            monkeypatch.setattr(_worker, "_FEED_BYTES", feed_bytes)
-        chunk = b"<artist><id>abc</id></artist>\n<artist><id>2</bad></artist>\n"
-        file, start, end, message = _extract_error(tmp_path, "artists", chunk)
-        assert message.startswith(
-            f"Invalid <artist> record in {file} at chunk line 1 (chunk bytes {start}-{end}, id='abc'): "
         )
 
 
