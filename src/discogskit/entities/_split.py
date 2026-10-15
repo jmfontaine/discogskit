@@ -3,11 +3,12 @@
 Splits a decompressed XML dump into byte-range chunks so that multiple processes can parse them independently
 with no coordination.
 
-One compiled regex walks the mmap looking for every ``<tag>`` / ``<tag .../>`` / ``</tag>`` occurrence of the
-record tag, so the per-byte work of locating candidate markup and parsing a start tag's attribute grammar runs in
-C instead of a Python loop. A record's own markup can contain further elements with the *same* tag name (e.g. a
-label's ``<sublabels>`` holds more ``<label>`` elements), so Python only has to track nesting depth from the
-events the regex yields: an opening tag increments it, a closing tag decrements it, and a self-closing
+One compiled regex walks a mmap of the file looking for every ``<tag>`` / ``<tag .../>`` / ``</tag>`` occurrence of
+the record tag, so the per-byte work of locating candidate markup and parsing a start tag's attribute grammar runs in
+C instead of a Python loop; it moves to a fresh mapping every ``_REMAP_BYTES``, so the file's pages don't pile up in
+the process's resident set (issue #83). A record's own markup can contain further elements with the *same* tag
+name (e.g. a label's ``<sublabels>`` holds more ``<label>`` elements), so Python only has to track nesting depth
+from the events the regex yields: an opening tag increments it, a closing tag decrements it, and a self-closing
 ``<tag .../>`` doesn't change it unless it's at depth zero, in which case it's a complete record on its own. A
 closing tag only ends a complete top-level record when it brings the depth back to zero. We make no assumption
 about formatting — indentation, line endings, a separator between records, or ``>`` inside a quoted attribute
@@ -27,6 +28,10 @@ from __future__ import annotations
 
 import mmap
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 # Zero or more "name=value" attributes (double- or single-quoted), consuming the quotes so a literal ">" or "/>"
 # inside a value is never mistaken for the end of the tag.
@@ -47,6 +52,13 @@ _XML_WS = rb"[\x20\x09\x0d\x0a]"
 # the same bytes exist: with ``\s+`` instead, a failed match tried every way to split a whitespace run, which took
 # exponential time in its length (issue #104).
 _MISC = rb"(?:" + _XML_WS + rb"|" + _COMMENT + rb"|" + _PI + rb")*"
+
+# How far the record scan reads through one mapping of the file before it unmaps it and goes on through a fresh one.
+# A mapping's pages count towards the process's resident set (RSS) until it's unmapped, so scanning the 62.7 GB
+# releases dump through one mapping put up to 7 GiB of the file in the main process's RSS, how much depending on the
+# memory the machine had free, not on any option (issue #83). Those pages are the file's cached contents, not memory
+# the scan allocated, but /usr/bin/time and other RSS-based measures count them.
+_REMAP_BYTES = 256 * 1024 * 1024
 
 
 def _compile_pattern(tag: bytes) -> re.Pattern[bytes]:
@@ -77,8 +89,43 @@ def _compile_pattern(tag: bytes) -> re.Pattern[bytes]:
     )
 
 
+def _markup(
+    fileno: int, pattern: re.Pattern[bytes]
+) -> Iterator[tuple[int | None, int, int]]:
+    """Yield ``(lastindex, start, end)`` for each match of ``pattern`` in the file, in order, as ``finditer`` over one
+    mapping of the whole file would.
+
+    Once a mapping has scanned ``_REMAP_BYTES``, the scan closes it and resumes in a fresh mapping at the end of the
+    last match, which is where ``finditer`` itself would resume: no match is empty, and the pattern doesn't look
+    behind its start.
+    """
+    pos = 0
+    while True:
+        mm = mmap.mmap(fileno, 0, access=mmap.ACCESS_READ)
+        # Held by name so the finally below releases it: close() refuses to unmap while the iterator holds the buffer.
+        matches = pattern.finditer(mm, pos)
+        resume = None
+        try:
+            for match in matches:
+                lastindex, (start, end) = match.lastindex, match.span()
+                yield lastindex, start, end
+                if end - pos >= _REMAP_BYTES:
+                    resume = end
+                    break
+        finally:
+            del matches
+            mm.close()
+        if resume is None:
+            return
+        pos = resume
+
+
 def _scan_records(
-    mm: mmap.mmap, tag: bytes, container: bytes, target_chunk_bytes: int
+    mm: mmap.mmap,
+    fileno: int,
+    tag: bytes,
+    container: bytes,
+    target_chunk_bytes: int,
 ) -> tuple[list[tuple[int, int]], int]:
     """Scan the whole file for ``<tag>`` records, tracking nesting depth, and split them into byte ranges.
 
@@ -86,7 +133,8 @@ def _scan_records(
     found at depth zero. Each range starts at the first record or where the previous range ended, and ends at the
     first record end at least ``target_chunk_bytes`` past its start, except the last, which ends after the last
     record. Only the open range's start is kept, not every record's end: the releases dump has tens of millions
-    of records (issue #122).
+    of records (issue #122). The scan reads the file at ``fileno`` through mappings of its own (see ``_markup``);
+    ``mm``, a mapping of the same file, only serves the checks and error messages, which read a few bytes each.
 
     Returns the ranges and the byte offset right after the last record. Raises ``ValueError`` for unsupported
     content before the first record (checked as soon as the scan reaches it, see ``_check_leading_content``), a
@@ -104,17 +152,16 @@ def _scan_records(
     range_start = -1
     data_end = -1
     splits: list[tuple[int, int]] = []
-    for m in pattern.finditer(mm):
-        g = m.lastindex
+    for g, start, end in _markup(fileno, pattern):
         if range_start < 0:
             # Validate what precedes the first record before reading further (issue #79): a releases file is
             # tens of GB, and a record tag inside unsupported content (e.g. a container attribute value) must be
             # reported as that content, not as whatever structural error it causes later.
             if g == open_group or g == empty_group:
-                range_start = m.start()
+                range_start = start
                 _check_leading_content(mm, range_start, tag, container)
-            elif (g == close_group or g in bad_groups) and m.start() > 0:
-                _check_leading_content(mm, m.start(), tag, container)
+            elif (g == close_group or g in bad_groups) and start > 0:
+                _check_leading_content(mm, start, tag, container)
         if g == open_group:
             depth += 1
             continue
@@ -122,18 +169,18 @@ def _scan_records(
             depth -= 1
             if depth < 0:
                 raise ValueError(
-                    f"</{tag.decode()}> at byte {m.start()} has no matching <{tag.decode()}>"
+                    f"</{tag.decode()}> at byte {start} has no matching <{tag.decode()}>"
                 )
         elif g != empty_group:
             if g in bad_groups:
                 raise ValueError(
-                    f"Malformed or unterminated markup at byte {m.start()}: "
-                    f"{mm[m.start() : m.start() + 40]!r}"
+                    f"Malformed or unterminated markup at byte {start}: "
+                    f"{mm[start : start + 40]!r}"
                 )
             # A comment, CDATA section, processing instruction or DOCTYPE matched whole: no depth change.
             continue
         if depth == 0:
-            data_end = m.end()
+            data_end = end
             if data_end - range_start >= target_chunk_bytes:
                 splits.append((range_start, data_end))
                 range_start = data_end
@@ -280,7 +327,7 @@ def find_split_points(
             mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
             try:
                 splits, data_end = _scan_records(
-                    mm, tag_bytes, container_bytes, target_chunk_bytes
+                    mm, f.fileno(), tag_bytes, container_bytes, target_chunk_bytes
                 )
                 _check_trailing_content(mm, data_end, tag_bytes, container_bytes)
                 return splits

@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import os
 import re
 import signal
+import subprocess
+import sys
 import time
 from functools import partial
 
 import pytest
 
+from discogskit.entities import _split
 from discogskit.entities._def import ChunkArgs
 from discogskit.entities._split import find_split_points
 from discogskit.entities._worker import extract_chunk_to_ipc
@@ -16,9 +20,74 @@ from discogskit.entities.labels import SCHEMAS as LABELS_SCHEMAS
 from tests.conftest import LABELS_XML, ipc_to_tables
 
 
-@pytest.fixture()
-def find_splits():
+@pytest.fixture(params=["one-mapping", "remap-after-every-match"])
+def find_splits(request, monkeypatch):
+    if request.param == "remap-after-every-match":
+        # The scan moves to a fresh mapping after every match (issue #83), so each test also checks that resuming
+        # there finds what one uninterrupted scan finds, errors included.
+        monkeypatch.setattr(_split, "_REMAP_BYTES", 1)
     return partial(find_split_points, tag="item", container="items")
+
+
+def _rss_bytes() -> int:
+    """This process's resident set size; ps reports it on Linux and macOS alike."""
+    out = subprocess.run(
+        ["ps", "-o", "rss=", "-p", str(os.getpid())],
+        capture_output=True,
+        check=True,
+        text=True,
+    ).stdout
+    return int(out) * 1024
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="measures RSS with ps")
+def test_scan_does_not_keep_the_file_resident(tmp_path, monkeypatch):
+    """Scanning through one mapping kept every page it read in the process's RSS until the scan ended: up to 7 GiB
+    of the 62.7 GB releases dump (issue #83). Each page is the file's own, so a file several windows long shows it."""
+    mib = 1024 * 1024
+    record = b"<item>" + b"x" * 1000 + b"</item>\n"
+    path = tmp_path / "big.xml"
+    with path.open("wb") as f:
+        f.write(b"<items>\n")
+        for _ in range(128 * mib // (len(record) * 1024)):
+            f.write(record * 1024)
+        f.write(b"</items>")
+    monkeypatch.setattr(_split, "_REMAP_BYTES", 8 * mib)
+    # Measured while the scan runs, three quarters of the way through the file, so the pages it read so far count
+    # whether or not a mapping that's done with them is closed only at the end.
+    mid_scan = []
+    markup = _split._markup
+
+    def measured_markup(fileno, pattern):
+        for event in markup(fileno, pattern):
+            if not mid_scan and event[2] >= 96 * mib:
+                mid_scan.append(_rss_bytes())
+            yield event
+
+    monkeypatch.setattr(_split, "_markup", measured_markup)
+    before = _rss_bytes()
+
+    splits = find_split_points(str(path), 32 * mib, "item", "items")
+
+    assert len(splits) == 4
+    assert mid_scan[0] - before < 48 * mib
+
+
+@pytest.mark.parametrize("remap_bytes", [1, 7, 64])
+def test_remapping_finds_the_same_splits(tmp_path, monkeypatch, remap_bytes):
+    """Resuming in a fresh mapping mid-file, even next to a comment, CDATA section, processing instruction or
+    nested record, splits exactly as one mapping does."""
+    records = b"".join(
+        b'<label id="%d"><!-- <label> --><![CDATA[</label>]]><?pi </label>?>'
+        b"<sublabels><label>s</label><label/></sublabels></label>\n" % i
+        for i in range(40)
+    )
+    path = tmp_path / "labels.xml"
+    path.write_bytes(b"<?xml version='1.0'?>\n<labels>\n" + records + b"</labels>\n")
+    expected = find_split_points(str(path), 300, "label", "labels")
+    monkeypatch.setattr(_split, "_REMAP_BYTES", remap_bytes)
+
+    assert find_split_points(str(path), 300, "label", "labels") == expected
 
 
 class TestSplitFinder:
