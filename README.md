@@ -128,30 +128,30 @@ for.
 
 A run's memory goes mostly to its parse workers, each holding the chunk it parses as Python objects and then as
 Arrow tables, and to the main process, which holds the parsed chunks waiting to be written. `--chunk-mb` and
-`--parse-workers` set the peak. A larger `--write-queue` lets more parsed chunks wait in the main process, but from 1
-to 8 it barely changed the peak of all processes together. Loading the 2026-10-01 releases dump (19,492,392 releases,
-62.7 GB of XML) into a local PostgreSQL 18 on an Apple M3 (8 cores, 24 GB RAM, macOS), discogskit's processes
-together peaked at 9.3 and 9.6 GiB in two full loads with the defaults (4 parse workers, 256 MB chunks, write queue
-2). The table comes from loading a 6.4 GB stretch of the same dump (2,019,143 releases) once per setting; over a
-25.8 GB stretch (8,350,265 releases), `--chunk-mb 64` peaked at 6.3 GiB:
+`--parse-workers` set the peak, and so does `--write-queue`, which sets how many parsed chunks may wait in the main
+process. Loading a 6.4 GB stretch of the 2026-10-01 releases dump (2,019,143 releases) into a local PostgreSQL 18 on
+an Apple M3 (8 cores, 24 GB RAM, macOS), once per setting, discogskit's processes together peaked at:
 
 | Options | All processes | Main process | Largest parse worker | Time |
 |---|---:|---:|---:|---:|
-| defaults (two runs) | 9.6 GiB, 9.7 GiB | 2.8 GiB, 2.9 GiB | 2.5 GiB, 2.8 GiB | 90 s, 107 s |
-| `--chunk-mb 64` | 5.5 GiB | 1.0 GiB | 1.7 GiB | 75 s |
-| `--chunk-mb 128` | 7.4 GiB | 1.5 GiB | 2.3 GiB | 93 s |
-| `--chunk-mb 512` | 11.0 GiB | 3.2 GiB | 2.8 GiB | 117 s |
-| `--parse-workers 2` | 7.4 GiB | 2.2 GiB | 2.9 GiB | 89 s |
-| `--parse-workers 8` | 10.8 GiB | 3.3 GiB | 2.1 GiB | 106 s |
-| `--write-queue 1` | 9.8 GiB | 2.6 GiB | 2.8 GiB | 94 s |
-| `--write-queue 8` | 9.8 GiB | 3.8 GiB | 2.1 GiB | 102 s |
-| `--pg-write-workers 3` | 8.8 GiB | 2.2 GiB | 2.2 GiB | 94 s |
+| defaults (two runs) | 7.4 GiB, 8.3 GiB | 3.0 GiB, 2.7 GiB | 2.0 GiB, 2.0 GiB | 86 s, 85 s |
+| `--chunk-mb 64` | 4.9 GiB | 1.0 GiB | 1.4 GiB | 73 s |
+| `--chunk-mb 128` | 5.9 GiB | 1.5 GiB | 1.5 GiB | 99 s |
+| `--chunk-mb 512` | 10.1 GiB | 4.4 GiB | 2.3 GiB | 113 s |
+| `--parse-workers 2` | 5.6 GiB | 2.2 GiB | 2.0 GiB | 90 s |
+| `--parse-workers 8` | 10.5 GiB | 3.9 GiB | 2.0 GiB | 100 s |
+| `--write-queue 1` | 8.1 GiB | 2.5 GiB | 2.0 GiB | 84 s |
+| `--write-queue 4` | 9.0 GiB | 3.7 GiB | 2.0 GiB | 100 s |
+| `--write-queue 8` | 10.6 GiB | 4.3 GiB | 1.8 GiB | 83 s |
+| `--pg-write-workers 3` | 8.7 GiB | 2.4 GiB | 1.9 GiB | 73 s |
 
-These are peak footprints (macOS `phys_footprint`, which Activity Monitor shows as Memory), summed over the main
-process and its parse workers every 0.25 s. The two default runs took 90 and 107 s, so time differences under about
-17 s are noise. A worker keeps memory it has freed for reuse, so its footprint grows over its first few chunks: at
-256 MB, from about 1.4 GiB during its first chunk to about 3 GiB by its sixth. `/usr/bin/time -l` reports the
-largest single process's peak resident set instead: 2.2 GiB for a full load with the defaults.
+The defaults are 4 parse workers, 256 MB chunks, a write queue of 2 and 1 write worker. These are peak footprints
+(macOS `phys_footprint`, which Activity Monitor shows as Memory), summed over the main process and its parse workers
+every 0.25 s; the two default runs differ by 0.9 GiB, so smaller differences are noise. A worker keeps memory it has
+freed for reuse, so its footprint grows over its first few chunks: at 256 MB, from about 0.9 GiB during its first
+chunk to 1.6-2.0 GiB by its tenth. `/usr/bin/time -l` reports something else: the largest single process's peak
+resident set, which leaves out memory the system has compressed. Converting the whole releases dump (62.7 GB of XML)
+to Parquet with the defaults peaked at 10.3 and 10.5 GiB in two runs, 3.5 and 4.2 GiB of it in the main process.
 
 ### discogskit convert
 

@@ -15,8 +15,8 @@ bounded number of chunks in flight::
     N byte-range chunks
         |
         +---> [Stage 3a: Parse workers]  multiprocessing.Process (spawn)
-        |         Each worker reads its byte range, wraps in an XML
-        |         envelope, parses with lxml iterparse, and produces
+        |         Each worker feeds its byte range, in an XML envelope,
+        |         to lxml's pull parser 1 MiB at a time, and produces
         |         Arrow IPC buffers (one per normalized table).
         |              |
         |              v  at most parse_workers + write_queue chunks in flight
