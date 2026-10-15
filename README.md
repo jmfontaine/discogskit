@@ -512,8 +512,8 @@ and name may change in any release.
 | `UnhandledElementsError` | Raised by a `strict` run whose input has XML elements no parser handled, before the writer's `finalize()`; its `entity` and `paths` attributes name them |
 
 `get_writer()` and `get_file_writer()` raise `ValueError` for an option they can't use, such as a codec the format
-doesn't support or a compression level out of the codec's range, before creating any file. Other failures raise other
-exceptions, e.g. `ValueError` for a value discogskit can't store.
+doesn't support or a compression level that isn't an `int` or is out of the codec's range, before creating any file.
+Other failures raise other exceptions, e.g. `ValueError` for a value discogskit can't store.
 
 ```python
 from pathlib import Path

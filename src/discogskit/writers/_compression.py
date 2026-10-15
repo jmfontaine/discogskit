@@ -22,9 +22,15 @@ def check_compression(
 def check_compression_level(
     compression: str, level: int | None, level_range: tuple[int, int] | None
 ) -> None:
-    """Raise ``ValueError`` if ``level`` is set and ``compression`` has no levels (``level_range`` None) or it's out of range."""
+    """Raise ``ValueError`` if ``level`` is set and isn't an ``int``, ``compression`` has no levels (``level_range``
+    None), or it's out of range.
+    """
     if level is None:
         return
+    # bool is an int subclass, but True as level 1 is a mistake, not a choice. ValueError, not TypeError: the
+    # factories document ValueError for every option they can't use.
+    if not isinstance(level, int) or isinstance(level, bool):
+        raise ValueError(f"compression level must be an integer, not {level!r}.")  # noqa: TRY004
     if level_range is None:
         raise ValueError(f"{compression} does not support a compression level.")
     lo, hi = level_range
