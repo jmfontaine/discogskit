@@ -76,6 +76,33 @@ class TestGetWriter:
         assert reason in str(excinfo.value)
         assert list(tmp_path.iterdir()) == []
 
+    @pytest.mark.parametrize(
+        "dsn",
+        [
+            "sqlite:///:memory:",
+            "sqlite:///:MEMORY:",
+            "SQLITE:///:Memory:",
+            "sqlite:///file::memory:",
+            "sqlite:///FILE:%3Amemory%3A",
+            "file::memory:#discogs.db",
+            "file::memory:%00.db",
+        ],
+    )
+    def test_in_memory_sqlite_dsn_is_rejected(self, monkeypatch, tmp_path, dsn):
+        """An in-memory database would load the whole dump, then discard it when the run ends."""
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ValueError, match="Invalid SQLite DSN") as excinfo:
+            get_writer(dsn)
+        assert "in-memory database" in str(excinfo.value)
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize("dsn", [":memory:.db", "sqlite:///memory.db"])
+    def test_file_named_like_memory_is_accepted(self, monkeypatch, tmp_path, dsn):
+        """Only the exact in-memory names are rejected, not files whose name merely contains one."""
+        monkeypatch.chdir(tmp_path)
+        get_writer(dsn).close()
+        assert len(list(tmp_path.iterdir())) == 1
+
     def test_other_url_with_sqlite_suffix_is_unsupported(self, monkeypatch, tmp_path):
         """A URL isn't a SQLite path just because it ends in .db."""
         monkeypatch.chdir(tmp_path)

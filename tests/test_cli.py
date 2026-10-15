@@ -1353,6 +1353,33 @@ class TestLoadRejectsPostgreSqlOnlyOptionsForSqlite:
         assert "No such option" in output
 
 
+class TestLoadRejectsInMemorySqlite:
+    @pytest.mark.parametrize(
+        "dsn",
+        [
+            "sqlite:///:memory:",
+            "sqlite:///:MEMORY:",
+            "sqlite:///file::memory:",
+            "sqlite:///file::memory:%00.db",
+            "file::memory:#discogs.db",
+        ],
+    )
+    def test_fails_before_decompressing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dsn: str
+    ) -> None:
+        """The whole load would go into a private database and be discarded when the process exits."""
+        _widen_console(monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        gz = _make_gz(tmp_path)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = runner.invoke(app, ["load", str(gz), "--dsn", dsn])
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        assert f"Invalid SQLite DSN: {dsn!r} names an in-memory database" in output
+        run.assert_not_called()
+        assert list(tmp_path.iterdir()) == [gz]
+
+
 class TestConsoleScriptEntryPoint:
     def test_loads_in_a_fresh_interpreter(self) -> None:
         """Tools that load console scripts through importlib.metadata must get the Typer app.
