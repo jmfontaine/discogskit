@@ -121,8 +121,8 @@ A run on a full dump takes minutes to tens of minutes: run it in the background 
 output isn't a terminal, it prints one line per chunk as it's written, then a summary per entity.
 
 Tuning: `--parse-workers` (default half the CPU count) parses chunks in parallel; `--chunk-mb` sets their size;
-`--write-queue` bounds how far parsing runs ahead of writing. All three set peak memory: loading releases with the
-defaults peaked at about 3.9-4.4 GiB across discogskit's processes, `--chunk-mb 64` at about 1.7 GiB and
+`--write-queue` bounds how far parsing runs ahead of writing. All three set peak memory: loading releases on macOS
+with the defaults peaked at about 3.9-4.4 GiB across discogskit's processes, `--chunk-mb 64` at about 1.7 GiB and
 `--write-queue 8` at about 5.2 GiB. `--profile` prints a per-table timing
 breakdown. `--strict` lists the XML elements no parser handled, which discogskit would otherwise drop, then fails the
 run: use it to check a new dump after Discogs changes the format.
