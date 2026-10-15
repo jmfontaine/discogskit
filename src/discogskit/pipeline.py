@@ -191,7 +191,7 @@ class PipelineConfig:
     """Settings for one ``run()``: one dump of one entity.
 
     ``entity`` is a key of ``ENTITIES`` and must match the dump at ``gz_path`` (``detect_entity()`` reads it from a
-    Discogs dump file name). ``chunk_mb`` sets the rough size, in MB, of the chunks the XML is split into, and
+    Discogs dump file name). ``chunk_mb`` sets the rough size, in MiB, of the chunks the XML is split into, and
     ``parse_workers`` the number of parse processes, at least 1. At most ``parse_workers + write_queue`` chunks are
     being parsed or waiting to be written at once. ``keep_xml`` keeps the decompressed XML after a successful run.
     ``profile`` fills ``PipelineResult.profile_data`` and prints per-chunk lines instead of a progress bar;

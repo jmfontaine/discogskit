@@ -84,7 +84,8 @@ which is much larger than the `.gz`. The `.xml` is deleted after a successful ru
 
 - A run that fails or is interrupted after decompression keeps the `.xml`, and the next run reuses it.
 - A truncated, corrupt or non-gzip `.xml.gz` stops the run with
-  `failed to decompress <name> (truncated, corrupt, or not a gzip file)`; when the truncation makes the decompressor
+  `failed to decompress <name> (truncated, corrupt, or not a gzip file)`, followed by what the decompressor printed
+  about it, if anything; when the truncation makes the decompressor
   hang, that comes after 60 seconds without output. Check the `.xml.gz` against the matching month's
   `discogs_YYYYMMDD_CHECKSUM.txt` first.
 - Runs on the same dump can overlap (a `convert` and a `load`): one decompresses while the others wait, then all

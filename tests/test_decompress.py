@@ -16,8 +16,10 @@ from multiprocessing.context import SpawnProcess
 
 import pytest
 from filelock import ReadWriteLock, Timeout
+from rich.console import Console
 
 from discogskit import decompress
+from discogskit._console import using
 from discogskit.decompress import DecompressError, ForeignXmlError, ensure_xml
 
 _XML = b"<?xml version='1.0'?>\n<root>hello</root>"
@@ -144,6 +146,26 @@ class _GatedReader(_CompleteGzipReader):
             self._read_once = True
             self._started.set()
             self._go.wait()
+        return super().read(size)
+
+
+class _NoisyAbortingReader(_CompleteGzipReader):
+    """Prints to the process's stderr, as rapidgzip's native code does, then aborts."""
+
+    def read(self, size=-1):
+        os.write(2, b"Unexpected end of file when getting block\n  at offset 10\n")
+        os.abort()
+
+
+class _NoisyReader(_CompleteGzipReader):
+    """Prints 100 lines to the process's stderr on its first read, then reads normally."""
+
+    printed = False
+
+    def read(self, size=-1):
+        if not self.printed:
+            os.write(2, b"".join(b"rapidgzip: warning %d\n" % i for i in range(100)))
+            self.printed = True
         return super().read(size)
 
 
@@ -532,6 +554,39 @@ class TestNativeFailures:
         assert "SIGABRT" in str(excinfo.value.__cause__)
         assert not xml_path.exists()
         assert not (tmp_path / "test.xml.partial").exists()
+
+    def test_child_stderr_joins_the_error(self, capfd, monkeypatch, tmp_path):
+        """What native code printed before failing is part of the error, not loose text above it."""
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        _patch_child(monkeypatch, {"rapidgzip.open": _NoisyAbortingReader})
+
+        with pytest.raises(DecompressError) as excinfo:
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        assert str(excinfo.value) == (
+            "failed to decompress test.xml.gz (truncated, corrupt, or not a gzip file): "
+            "Unexpected end of file when getting block at offset 10"
+        )
+        assert "SIGABRT" in str(excinfo.value.__cause__)
+        assert "Unexpected" not in capfd.readouterr().err
+
+    def test_child_stderr_after_success_is_passed_on(
+        self, capfd, monkeypatch, tmp_path
+    ):
+        """All of it, through the console a library caller can silence or redirect."""
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        _patch_child(monkeypatch, {"rapidgzip.open": _NoisyReader})
+        out = io.StringIO()
+
+        with using(Console(file=out, width=200)):
+            ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
+
+        assert xml_path.read_bytes() == _XML
+        printed = out.getvalue().splitlines()
+        assert printed[:100] == [f"rapidgzip: warning {i}" for i in range(100)]
+        assert "rapidgzip" not in capfd.readouterr().err
 
     def test_child_that_never_starts_raises_runtime_error(self, monkeypatch, tmp_path):
         """Like a script without a ``__main__`` guard, run again in the child."""

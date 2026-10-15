@@ -42,9 +42,14 @@ class StagedFiles:
             self.staging_dir = _make_staging_dir(
                 output_dir, entity_name, self._created_dirs
             )
-        except BaseException:
+        except BaseException as exc:
             # No writer holds this object yet to discard() it.
             _remove_if_empty(self._created_dirs)
+            if isinstance(exc, OSError):
+                # strerror, not the exception: its path may be a parent's or the staging directory's.
+                raise OSError(
+                    f"Can't write output files into {output_dir}: {exc.strerror or exc}"
+                ) from exc
             raise
         self._kept = False
         if self.final_dir.exists():

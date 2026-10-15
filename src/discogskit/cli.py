@@ -215,7 +215,7 @@ def _run_jobs(
             # isn't a terminal), echo the run's settings.
             if verbose:
                 status("Workers", str(parse_workers))
-                status("Chunk size", f"{chunk_mb} MB")
+                status("Chunk size", f"{chunk_mb} MiB")
                 status("Write queue", str(write_queue))
                 status("Source", str(gz_path))
 
@@ -285,7 +285,7 @@ def convert(
     # Performance tuning
     chunk_mb: Annotated[
         int,
-        typer.Option(help="Split XML into chunks of roughly this size (MB)", min=1),
+        typer.Option(help="Split XML into chunks of roughly this size (MiB)", min=1),
     ] = 256,
     parse_workers: Annotated[
         int,
@@ -371,7 +371,7 @@ def load(
     # Performance tuning
     chunk_mb: Annotated[
         int,
-        typer.Option(help="Split XML into chunks of roughly this size (MB)", min=1),
+        typer.Option(help="Split XML into chunks of roughly this size (MiB)", min=1),
     ] = 256,
     parse_workers: Annotated[
         int,
