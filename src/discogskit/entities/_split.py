@@ -21,7 +21,7 @@ anything after the last record other than whitespace, a comment, a processing in
 occurrence of the container's own closing tag: we fail loudly instead of guessing what unrecognized content means
 or silently dropping it.
 Each returned chunk ``[start, end)`` is guaranteed to contain only complete top-level elements, so workers can wrap
-the bytes in an XML envelope and parse with iterparse.
+the bytes in an XML envelope and parse them as a document.
 """
 
 from __future__ import annotations

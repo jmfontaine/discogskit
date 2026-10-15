@@ -14,8 +14,7 @@ the end of each chunk. This is faster than appending to Arrow arrays incremental
 from __future__ import annotations
 
 from collections.abc import Callable
-from io import BytesIO
-from typing import NamedTuple, TypeVar
+from typing import NamedTuple, TypeVar, cast
 from xml.parsers import expat
 
 import pyarrow as pa
@@ -25,6 +24,11 @@ from discogskit._ipc import serialize_batch
 from discogskit.entities import ENTITIES
 from discogskit.entities._def import ChunkArgs, Cols, ElementValueError
 
+# Bytes of the chunk read and fed to the parser at a time. Reading the whole chunk and wrapping it in its container
+# held a copy of it for the whole parse, and two while wrapping: 256 MB each at the default chunk size (issue #30).
+# Measured on 256 MiB chunks of every entity, 64 KiB slices parse no slower than the whole chunk did, while 1 MiB
+# slices parsed one labels chunk 22-57% slower (#30).
+_FEED_BYTES = 64 * 1024
 _T = TypeVar("_T")
 
 
@@ -177,27 +181,26 @@ def _to_batch(
         ) from exc
 
 
+def _chunk_xml(args: ChunkArgs, header: bytes, footer: bytes) -> bytes:
+    """The whole chunk in its envelope, read again for the error messages that scan it for exact lines."""
+    with open(args.file_path, "rb") as f:
+        f.seek(args.start)
+        return header + f.read(args.end - args.start) + footer
+
+
 def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
     """Parse one chunk of ``<root_tag>`` records into one serialized RecordBatch per table.
 
-    Reads the byte range from the decompressed XML, wraps it in the ``<name>`` container so it is a valid document,
-    and parses it with lxml iterparse. With ``args.strict``, also returns the paths of the elements no parser handled;
-    the main process reports them once per run, so workers print nothing.
+    Feeds the byte range from the decompressed XML to lxml's pull parser, wrapped in the ``<name>`` container so it is
+    a valid document, ``_FEED_BYTES`` at a time. With ``args.strict``, also returns the paths of the elements no parser
+    handled; the main process reports them once per run, so workers print nothing.
     """
     entity = ENTITIES[args.entity]
-    with open(args.file_path, "rb") as f:
-        f.seek(args.start)
-        data = f.read(args.end - args.start)
-
     container = entity.name.encode()
     # No newline after the container's opening tag, so the chunk starts on line 1 and lxml's line numbers count from
     # the chunk's first byte.
     header = b"<?xml version='1.0' encoding='UTF-8'?><" + container + b">"
     footer = b"\n</" + container + b">"
-    # One copy of the chunk; header + data + footer would copy it twice.
-    xml_data = b"".join((header, data, footer))
-    # Free the chunk itself now rather than holding both copies for the whole parse (issue #122).
-    del data
     cols: Cols = {
         name: {col_name: [] for col_name in schema.names}
         for name, schema in entity.schemas.items()
@@ -210,7 +213,7 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
         # can't be guessed, so fail instead.
         if child.tag[:1] == "{":
             # Direct children are checked in document order, so this is the first namespaced one.
-            line = _first_namespaced_child_line(xml_data)
+            line = _first_namespaced_child_line(_chunk_xml(args, header, footer))
             where = (
                 f"near line {child.sourceline}" if line is None else f"on line {line}"
             )
@@ -221,22 +224,12 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
             )
 
     ordinal = 0
-    try:
-        # Comments and processing instructions aren't elements; kept, their callable .tag would reach the parsers'
-        # unknown-element checks. The other options are lxml's hardening, passed explicitly because the defaults vary
-        # by lxml version (6.0.x still resolves entities).
-        records = etree.iterparse(
-            BytesIO(xml_data),
-            events=("end",),
-            huge_tree=False,
-            load_dtd=False,
-            no_network=True,
-            remove_comments=True,
-            remove_pis=True,
-            resolve_entities=False,
-            tag=entity.root_tag,
-        )
-        for _, elem in records:
+
+    def parse_records(parser: etree.XMLPullParser) -> None:
+        nonlocal ordinal
+        for _, event_elem in parser.read_events():
+            # Only "end" events are asked for, and each carries an element; the stubs type every kind of event.
+            elem = cast("etree._Element", event_elem)
             # Only records directly under the container are records; e.g. <label> also appears inside <sublabels>.
             parent = elem.getparent()
             if parent is None or parent.tag != entity.name:
@@ -250,7 +243,11 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
                 id_part = "" if record_id is None else f", id={record_id!r}"
                 element = exc.element if isinstance(exc, ElementValueError) else elem
                 line, element_line = _record_lines(
-                    xml_data, entity.name, elem, ordinal, element
+                    _chunk_xml(args, header, footer),
+                    entity.name,
+                    elem,
+                    ordinal,
+                    element,
                 )
                 detail = (
                     exc if element is elem else f"{exc} at chunk line {element_line}"
@@ -260,8 +257,8 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
                     f" (chunk bytes {args.start}-{args.end}{id_part}): {detail}"
                 ) from exc
             ordinal += 1
-            # Standard lxml memory optimization for iterparse: free each element after processing to prevent the
-            # entire tree from accumulating. Without this, a 256 MB chunk would build a multi-GB tree in memory.
+            # Standard lxml memory optimization for incremental parsing: free each element after processing to
+            # prevent the entire tree from accumulating. Without this, a 256 MB chunk would build a multi-GB tree.
             elem.clear()
             # Each child of the container before this record is checked and deleted here, in document order; those
             # after the chunk's last record are checked once parsing ends. A nested element named like the container
@@ -271,9 +268,46 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
                 if top_level:
                     reject_namespaced(parent[0])
                 del parent[0]
-        for child in records.root:
+
+    # Comments and processing instructions aren't elements; kept, their callable .tag would reach the parsers'
+    # unknown-element checks. The other options are lxml's hardening, passed explicitly because the defaults vary by
+    # lxml version (6.0.x still resolves entities).
+    parser = etree.XMLPullParser(
+        events=("end",),
+        huge_tree=False,
+        load_dtd=False,
+        no_network=True,
+        remove_comments=True,
+        remove_pis=True,
+        resolve_entities=False,
+        tag=entity.root_tag,
+    )
+    try:
+        parser.feed(header)
+        with open(args.file_path, "rb") as f:
+            f.seek(args.start)
+            remaining = args.end - args.start
+            while remaining > 0:
+                data = f.read(min(_FEED_BYTES, remaining))
+                # The file is shorter than when it was split. Its records may still end cleanly where it stops, so
+                # parsing what's left could silently drop the rest of the chunk.
+                if not data:
+                    raise ValueError(
+                        f"{args.file_path} ended at byte {args.end - remaining}, inside the chunk at bytes"
+                        f" {args.start}-{args.end}: it changed after it was split"
+                    )
+                remaining -= len(data)
+                parser.feed(data)
+                parse_records(parser)
+        parser.feed(footer)
+        root = parser.close()
+        parse_records(parser)
+        for child in root:
             reject_namespaced(child)
     except etree.XMLSyntaxError as exc:
+        # The slice that holds the malformed XML may also end records before it, whose events feed() queued before
+        # raising. Handle them first, so the error reported is the first one in the document, whatever the slices.
+        parse_records(parser)
         # XMLSyntaxError carries an error log that can't be pickled, so the pool would only report "cannot pickle
         # '_ListErrorLog'" and the real error would be lost (#60). Re-raise as a plain ValueError with the location.
         # Only parsing raises it; errors from append_record get their own context above.

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os
 import pickle
+import tracemalloc
 
 import pytest
 
-from discogskit.entities import ENTITIES
+from discogskit.entities import ENTITIES, _worker
 from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.entities.artists import SCHEMAS
@@ -204,6 +205,61 @@ def test_namespaced_element_in_nested_container_is_not_a_record(tmp_path):
     assert 1 in ipc_to_tables(ipc_dict, SCHEMAS)["artists"].column("id").to_pylist()
 
 
+def test_worker_never_holds_the_whole_chunk(tmp_path):
+    """The worker read its whole byte range and copied it into the XML envelope, holding the chunk for the whole parse
+    and twice while copying: 512 MB at the default 256 MB chunks (issue #30)."""
+    # Elements no parser handles are dropped without --strict, so the records leave little in the column lists.
+    record = (
+        b"<artist><id>1</id><name>A</name><new_tag>"
+        + b"x" * 4000
+        + b"</new_tag></artist>\n"
+    )
+    chunk = record * 4096
+    f = tmp_path / "artists.xml"
+    f.write_bytes(chunk)
+    args = ChunkArgs(end=len(chunk), entity="artists", file_path=str(f), start=0)
+
+    tracemalloc.start()
+    try:
+        extract_chunk_to_ipc(args)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < len(chunk) // 2
+
+
+@pytest.mark.parametrize("entity_name", sorted(PLAIN_RECORDS))
+@pytest.mark.parametrize("feed_bytes", [1, 7, 64])
+def test_feeding_in_slices_parses_the_same_tables(
+    tmp_path, monkeypatch, entity_name, feed_bytes
+):
+    """Slices that end mid-tag, mid-attribute or mid-text must not change what the worker parses."""
+    f = tmp_path / f"{entity_name}.xml"
+    f.write_text(PLAIN_RECORDS[entity_name] * 3)
+    args = ChunkArgs(
+        end=os.path.getsize(f), entity=entity_name, file_path=str(f), start=0
+    )
+    expected = extract_chunk_to_ipc(args).tables
+    monkeypatch.setattr(_worker, "_FEED_BYTES", feed_bytes)
+
+    assert extract_chunk_to_ipc(args).tables == expected
+
+
+def test_file_shorter_than_its_chunk_fails(tmp_path):
+    """A file cut short between two records would still parse; the records past its end must not vanish silently."""
+    f = tmp_path / "artists.xml"
+    f.write_text(ARTISTS_XML)
+    size = os.path.getsize(f)
+    args = ChunkArgs(end=size + 100, entity="artists", file_path=str(f), start=0)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"ended at byte {size}, inside the chunk at bytes 0-{size + 100}",
+    ):
+        extract_chunk_to_ipc(args)
+
+
 # Bytes before the chunk, so the chunk doesn't start at byte 0 and its line numbers differ from the file's.
 _PREFIX = b"<artist>\n  <id>1</id>\n</artist>\n"
 
@@ -224,6 +280,23 @@ def _extract_error(tmp_path, entity: str, chunk: bytes) -> tuple[str, int, int, 
 
 
 class TestRecordErrorContext:
+    @pytest.mark.parametrize(
+        "feed_bytes",
+        [None, len(b"<artist><id>abc</id></artist>\n"), 5],
+        ids=["same-slice", "slice-ends-after-bad-record", "small-slices"],
+    )
+    def test_bad_value_before_malformed_xml_is_reported_first(
+        self, tmp_path, monkeypatch, feed_bytes
+    ):
+        """The first problem in the document is reported, whichever slices the worker feeds."""
+        if feed_bytes is not None:
+            monkeypatch.setattr(_worker, "_FEED_BYTES", feed_bytes)
+        chunk = b"<artist><id>abc</id></artist>\n<artist><id>2</bad></artist>\n"
+        file, start, end, message = _extract_error(tmp_path, "artists", chunk)
+        assert message.startswith(
+            f"Invalid <artist> record in {file} at chunk line 1 (chunk bytes {start}-{end}, id='abc'): "
+        )
+
     @pytest.mark.parametrize(
         "entity, bad_record",
         [
