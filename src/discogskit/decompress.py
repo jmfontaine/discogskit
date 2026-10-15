@@ -13,9 +13,10 @@ once every byte is on disk.
 rapidgzip runs in a child process, which writes ``.partial`` and reports
 success or the exception that stopped it.  On some truncated input rapidgzip
 aborts the process or hangs, in native code: the parent raises
-``DecompressError`` when the child dies without a report or goes
-``_STALL_TIMEOUT`` without reading a chunk, as it does for rapidgzip's
-exceptions.  The parent kills the child on every way out, Ctrl+C included.
+``DecompressError`` when the child dies or exits non-zero, even after
+reporting success, or goes ``_STALL_TIMEOUT`` without reading a chunk, as it
+does for rapidgzip's exceptions.  The parent kills the child on every way
+out, Ctrl+C included.
 If the parent dies, the child stops before it starts writing or after its
 next chunk, so not while rapidgzip hangs.
 
@@ -369,6 +370,13 @@ def _run_decompress_child(gz_path: Path, partial_path: Path, workers: int) -> No
             break
         # It has closed rapidgzip and the output, so it's only exiting.
         child.join(_STALL_TIMEOUT)
+        # Success counts only if the child then exits cleanly: a non-zero
+        # exit or a signal death fails the run wherever it happens.
+        if error is None and child.exitcode != 0:
+            raise DecompressError(gz_path) from ChildProcessError(
+                f"the decompression process {_describe_exit(child.exitcode)}"
+                " after reporting success"
+            )
     finally:
         receiver.close()
         sender.close()
@@ -386,7 +394,9 @@ def _run_decompress_child(gz_path: Path, partial_path: Path, workers: int) -> No
 
 def _describe_exit(exitcode: int | None) -> str:
     """How a process that ended with ``exitcode`` ended, for an error message."""
-    if exitcode is not None and exitcode < 0:
+    if exitcode is None:
+        return f"didn't exit within {_STALL_TIMEOUT:g}s"
+    if exitcode < 0:
         try:
             return f"was killed by {signal.Signals(-exitcode).name}"
         except ValueError:  # a signal Python has no name for

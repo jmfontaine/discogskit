@@ -171,6 +171,12 @@ class _SlowReader(_CompleteGzipReader):
         return super().read(4)
 
 
+def _crashing_child(*args):
+    """The decompression child, exiting with status 1 after its report."""
+    decompress._decompress_child(*args)
+    os._exit(1)
+
+
 def _never_starting_child(*args):
     """Stands in for ``_decompress_child``: never reports it's running."""
     time.sleep(3600)
@@ -538,6 +544,23 @@ class TestNativeFailures:
             ensure_xml(gz_path, xml_path, workers=1)
 
         assert not multiprocessing.active_children()
+        assert not xml_path.exists()
+        assert not (tmp_path / "test.xml.partial").exists()
+
+    def test_crash_after_success_raises_decompress_error(self, monkeypatch, tmp_path):
+        """A child that reports success, then exits non-zero, fails the run."""
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        monkeypatch.setattr(decompress, "_decompress_child", _crashing_child)
+
+        with pytest.raises(
+            DecompressError, match=r"truncated, corrupt, or not a gzip file"
+        ) as excinfo:
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        assert "exited with status 1 after reporting success" in str(
+            excinfo.value.__cause__
+        )
         assert not xml_path.exists()
         assert not (tmp_path / "test.xml.partial").exists()
 
