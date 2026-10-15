@@ -8,7 +8,14 @@ from __future__ import annotations
 import pyarrow as pa
 from lxml import etree
 
-from discogskit.entities._def import Cols, EntityDef
+from discogskit.entities._def import (
+    Cols,
+    EntityDef,
+    check_leaf,
+    child_elements,
+    leaf_text,
+    leaf_texts,
+)
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Arrow schemas (the first table is the root table)
@@ -64,14 +71,23 @@ _REF_ID_FIELD = {
 }
 
 
-def _parse_refs(cols: Cols, table: str, artist_id: int, parent: etree._Element) -> None:
+def _parse_refs(
+    cols: Cols,
+    table: str,
+    artist_id: int,
+    parent: etree._Element,
+    unknown: set[str] | None,
+) -> None:
     """Parse artist ref children (aliases, groups, members)."""
     row = cols[table]
     ref_field = _REF_ID_FIELD[table]
-    for name_elem in parent.findall("name"):
+    path = f"{parent.tag}/"
+    for name_elem in child_elements(parent, "name", "", unknown):
         ref_id_str = name_elem.get("id")
         ref_id = int(ref_id_str) if ref_id_str else None
         name = name_elem.text or ""
+        if unknown is not None:
+            check_leaf(name_elem, path, unknown)
         row["artist_id"].append(artist_id)
         row[ref_field].append(ref_id)
         row["name"].append(name)
@@ -96,25 +112,27 @@ def append_record(
     for child in elem:
         tag = child.tag
         if tag == "id":
-            pass  # already extracted via findtext above
+            # Already extracted via findtext above.
+            if unknown is not None:
+                check_leaf(child, "", unknown)
         elif tag == "aliases":
-            _parse_refs(cols, "artist_aliases", artist_id, child)
+            _parse_refs(cols, "artist_aliases", artist_id, child, unknown)
         elif tag == "data_quality":
-            data_quality = child.text or ""
+            data_quality = leaf_text(child, "", unknown)
         elif tag == "groups":
-            _parse_refs(cols, "artist_groups", artist_id, child)
+            _parse_refs(cols, "artist_groups", artist_id, child, unknown)
         elif tag == "members":
-            _parse_refs(cols, "artist_members", artist_id, child)
+            _parse_refs(cols, "artist_members", artist_id, child, unknown)
         elif tag == "name":
-            name = child.text or ""
+            name = leaf_text(child, "", unknown)
         elif tag == "namevariations":
-            name_variations = [n.text or "" for n in child.findall("name")]
+            name_variations = leaf_texts(child, "name", "", unknown)
         elif tag == "profile":
-            profile = child.text or ""
+            profile = leaf_text(child, "", unknown)
         elif tag == "realname":
-            real_name = child.text or ""
+            real_name = leaf_text(child, "", unknown)
         elif tag == "urls":
-            urls = [u.text or "" for u in child.findall("url")]
+            urls = leaf_texts(child, "url", "", unknown)
         elif unknown is not None:
             unknown.add(tag)
 

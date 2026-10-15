@@ -6,7 +6,7 @@ The entity modules import from here rather than from the ``discogskit.entities``
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
@@ -77,6 +77,53 @@ class EntityDef:
         return find_split_points(
             file_path, target_chunk_bytes, self.root_tag, self.name
         )
+
+
+# With ``--strict``, the parsers add to ``unknown`` the path of every child element they don't handle, at every level
+# they walk, through the helpers below. A path is relative to the record (``videos/video/foo``); ``parent_path`` is the
+# path of ``elem``'s parent ending in ``/``, or ``""`` when that parent is the record itself. A text-only element's
+# children are unhandled too: reading only its text drops them. Loops over repeated items read text-only children
+# inline and call ``check_leaf`` only with ``--strict``, so a run without it makes no extra call per element.
+
+
+def check_leaf(elem: etree._Element, parent_path: str, unknown: set[str]) -> None:
+    """Add the path of each child of ``elem``, an element the parser reads only the text and attributes of."""
+    for child in elem:
+        unknown.add(f"{parent_path}{elem.tag}/{child.tag}")
+
+
+def child_elements(
+    elem: etree._Element, tag: str, parent_path: str, unknown: set[str] | None
+) -> Iterator[etree._Element]:
+    """Yield ``elem``'s ``<tag>`` children and add the path of each other child; iterate to the end to check them
+    all."""
+    for child in elem:
+        if child.tag == tag:
+            yield child
+        elif unknown is not None:
+            unknown.add(f"{parent_path}{elem.tag}/{child.tag}")
+
+
+def leaf_text(elem: etree._Element, parent_path: str, unknown: set[str] | None) -> str:
+    """Return the text of ``elem``, a text-only element, or ``""`` when it has none, and add the path of each of its
+    children."""
+    if unknown is not None:
+        check_leaf(elem, parent_path, unknown)
+    return elem.text or ""
+
+
+def leaf_texts(
+    elem: etree._Element, tag: str, parent_path: str, unknown: set[str] | None
+) -> list[str]:
+    """Return the texts of ``elem``'s ``<tag>`` children, as ``leaf_text`` does, and add the path of each other
+    child."""
+    if unknown is None:
+        return [child.text or "" for child in elem.findall(tag)]
+    path = f"{parent_path}{elem.tag}/"
+    return [
+        leaf_text(child, path, unknown)
+        for child in child_elements(elem, tag, parent_path, unknown)
+    ]
 
 
 # Only these literals are booleans; any other value fails instead of being read as False (#95).
