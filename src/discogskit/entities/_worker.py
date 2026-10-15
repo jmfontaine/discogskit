@@ -267,20 +267,20 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
                     reject_namespaced(parent[0])
                 del parent[0]
 
+    # Comments and processing instructions aren't elements; kept, their callable .tag would reach the parsers'
+    # unknown-element checks. The other options are lxml's hardening, passed explicitly because the defaults vary by
+    # lxml version (6.0.x still resolves entities).
+    parser = etree.XMLPullParser(
+        events=("end",),
+        huge_tree=False,
+        load_dtd=False,
+        no_network=True,
+        remove_comments=True,
+        remove_pis=True,
+        resolve_entities=False,
+        tag=entity.root_tag,
+    )
     try:
-        # Comments and processing instructions aren't elements; kept, their callable .tag would reach the parsers'
-        # unknown-element checks. The other options are lxml's hardening, passed explicitly because the defaults vary
-        # by lxml version (6.0.x still resolves entities).
-        parser = etree.XMLPullParser(
-            events=("end",),
-            huge_tree=False,
-            load_dtd=False,
-            no_network=True,
-            remove_comments=True,
-            remove_pis=True,
-            resolve_entities=False,
-            tag=entity.root_tag,
-        )
         parser.feed(header)
         with open(args.file_path, "rb") as f:
             f.seek(args.start)
@@ -303,6 +303,9 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
         for child in root:
             reject_namespaced(child)
     except etree.XMLSyntaxError as exc:
+        # The slice that holds the malformed XML may also end records before it, whose events feed() queued before
+        # raising. Handle them first, so the error reported is the first one in the document, whatever the slices.
+        parse_records(parser)
         # XMLSyntaxError carries an error log that can't be pickled, so the pool would only report "cannot pickle
         # '_ListErrorLog'" and the real error would be lost (#60). Re-raise as a plain ValueError with the location.
         # Only parsing raises it; errors from append_record get their own context above.
