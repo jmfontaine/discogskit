@@ -28,6 +28,7 @@ class OutputFormat(str, Enum):
 class Compression(str, Enum):
     """Compression codec for `convert` output. Valid codecs depend on `--format`."""
 
+    BROTLI = "brotli"
     BZIP2 = "bzip2"
     GZIP = "gzip"
     NONE = "none"
@@ -260,14 +261,14 @@ def convert(
     compression: Annotated[
         Compression | None,
         typer.Option(
-            help="Compression codec. Parquet: gzip, snappy, zstd (default), none. JSONL: bzip2, gzip, none (default)."
+            help="Compression codec. Parquet: brotli, gzip, snappy, zstd (default), none. JSONL: bzip2, gzip, none (default)."
         ),
     ] = None,
     compression_level: Annotated[
         int | None,
         typer.Option(
             help=(
-                "Compression level for codecs that support one: JSONL gzip/bzip2, Parquet gzip/zstd. "
+                "Compression level for codecs that support one: JSONL gzip/bzip2, Parquet brotli/gzip/zstd. "
                 "Rejected for snappy and none. Default: JSONL gzip uses level 6 (faster, slightly "
                 "larger output than 9; measured in #32); every other codec uses its own library default."
             )

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from discogskit.entities import EntityDef
 
 
-_COMPRESSIONS = ("gzip", "none", "snappy", "zstd")
+_COMPRESSIONS = ("brotli", "gzip", "none", "snappy", "zstd")
 
 
 def _level_range(compression: str) -> tuple[int, int] | None:

@@ -72,10 +72,10 @@ def get_file_writer(
 ) -> Writer:
     """Construct a file writer for ``output_format`` (``"jsonl"`` or ``"parquet"``) that writes under ``output_dir``.
 
-    ``compression`` defaults to the format's own: ``"zstd"`` for Parquet (also ``"gzip"``, ``"snappy"``, ``"none"``),
-    ``"none"`` for JSONL (also ``"bzip2"``, ``"gzip"``). ``compression_level`` defaults to the codec's library
-    default, except JSONL gzip, which uses 6. Raises ``ValueError``, before any file exists, for an unknown format, a
-    codec the format can't use, or a level the codec doesn't accept.
+    ``compression`` defaults to the format's own: ``"zstd"`` for Parquet (also ``"brotli"``, ``"gzip"``, ``"snappy"``,
+    ``"none"``), ``"none"`` for JSONL (also ``"bzip2"``, ``"gzip"``). ``compression_level`` defaults to the codec's
+    library default, except JSONL gzip, which uses 6. Raises ``ValueError``, before any file exists, for an unknown
+    format, a codec the format can't use, or a level the codec doesn't accept.
     """
     if output_format == "jsonl":
         from discogskit.writers.jsonl import JSONLWriter

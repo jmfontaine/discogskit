@@ -12,6 +12,11 @@ on:
         default: false
         type: boolean
   workflow_dispatch:
+    inputs:
+      macos:
+        description: Also run tests and the type check on macOS
+        default: false
+        type: boolean
 
 permissions:
   contents: read
