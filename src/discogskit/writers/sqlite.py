@@ -14,14 +14,21 @@ Bulk loading uses WAL journal mode, synchronous=OFF, and one transaction per chu
 temporary: ``finalize()`` switches to synchronous=FULL, checkpoints the WAL into the database file, syncs the file,
 and restores the journal mode the file had before the load, since WAL mode persists in the file. ``setup()`` drops
 and creates the tables in one transaction, so a failing drop leaves every table in place.
+
+Connecting creates a missing database file, so the writer connects to a missing one only in ``setup()``, once the
+pipeline has checked its input: a run that fails before that leaves no file behind. Until then, a probe file shows
+that the directory can hold it, so an unusable path still fails before any work.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import tempfile
 import time
 from contextlib import suppress
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
@@ -103,16 +110,43 @@ class SQLiteWriter:
 
     def __init__(self, path: str, *, fk: bool = False, overwrite: bool = False) -> None:
         self._path = path
+        # Absolute, so the file setup() creates is the one named now, whatever the working directory is by then. Not
+        # normalized: collapsing "link/.." would name another file than the OS does when link is a symlink.
+        self._abspath = str(Path(path).absolute())
         # pipeline.run calls write_chunk on its writer thread, while setup/finalize/
         # close run on the caller's thread. Uses never overlap: the writer thread is
         # idle whenever the caller touches the connection.
-        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn: sqlite3.Connection | None = None
+        if os.path.lexists(path):
+            self._connection()
+        else:
+            self._probe()
         self._fk = fk
         self._overwrite = overwrite
         self._insert_sql: dict[str, str] = {}
         # The file's journal mode before setup() switched it to WAL, until finalize() restores it.
         self._journal_mode: str | None = None
         self._list_columns: dict[str, set[int]] = {}
+
+    def _connection(self) -> sqlite3.Connection:
+        """The connection to the database, opened (and the file created, if missing) on first use."""
+        if self._conn is None:
+            self._conn = sqlite3.connect(self._abspath, check_same_thread=False)
+        return self._conn
+
+    def _probe(self) -> None:
+        """Fail now, not after decompressing, if the database's directory can't hold a new file."""
+        try:
+            fd, probe = tempfile.mkstemp(
+                dir=os.path.dirname(self._abspath), prefix=".discogskit-probe-"
+            )
+        except OSError as exc:
+            # strerror, not the exception: its path is the probe's, which means nothing to the user.
+            raise OSError(
+                f"Can't create the SQLite database {self._path}: {exc.strerror or exc}"
+            ) from exc
+        os.close(fd)
+        os.remove(probe)
 
     def cancel(self) -> None:
         """Do nothing: a write to a local SQLite file can't stall the way a database server can."""
@@ -121,9 +155,11 @@ class SQLiteWriter:
         """Raise ``OutputExistsError`` if any of ``entity``'s tables exists and overwrite is off."""
         if self._overwrite:
             return
+        if self._conn is None and not os.path.lexists(self._abspath):
+            return
         existing = {
             row[0]
-            for row in self._conn.execute(
+            for row in self._connection().execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
@@ -141,7 +177,8 @@ class SQLiteWriter:
         """Apply PRAGMAs, drop/create tables."""
         # Checked again here, before any destructive operation: tables can appear after the caller's own check().
         self.check(entity)
-        cur = self._conn.cursor()
+        conn = self._connection()
+        cur = conn.cursor()
 
         # Performance PRAGMAs, outside the transaction: journal_mode can't change inside one.
         self._journal_mode = cur.execute("PRAGMA journal_mode").fetchone()[0]
@@ -171,9 +208,9 @@ class SQLiteWriter:
                     pk_column="id",
                 )
                 cur.execute(ddl)
-            self._conn.commit()
+            conn.commit()
         except BaseException:
-            self._conn.rollback()
+            conn.rollback()
             raise
 
         n_tables = len(entity.table_order)
@@ -196,7 +233,8 @@ class SQLiteWriter:
     def write_chunk(self, tables: dict[str, pa.RecordBatch]) -> dict[str, float]:
         """Write one chunk; returns per-table flush time in seconds."""
         timings: dict[str, float] = {}
-        cur = self._conn.cursor()
+        conn = self._connection()
+        cur = conn.cursor()
 
         for table_name, batch in tables.items():
             t0 = time.perf_counter()
@@ -221,7 +259,7 @@ class SQLiteWriter:
             timings[table_name] = time.perf_counter() - t0
 
         t_commit = time.perf_counter()
-        self._conn.commit()
+        conn.commit()
         timings["_commit"] = time.perf_counter() - t_commit
         return timings
 
@@ -231,10 +269,11 @@ class SQLiteWriter:
 
         if len(entity.table_order) > 1:
             t0 = time.perf_counter()
-            cur = self._conn.cursor()
+            conn = self._connection()
+            cur = conn.cursor()
             for t in entity.table_order[1:]:
                 cur.execute(_index_ddl(t, fk_col))
-            self._conn.commit()
+            conn.commit()
             n_idx = len(entity.table_order) - 1
             status("Index", f"{n_idx} indexes", f"[{time.perf_counter() - t0:.2f}s]")
 
@@ -248,10 +287,11 @@ class SQLiteWriter:
         # with synchronous=OFF, so without syncing. Rewriting user_version unchanged adds a frame, so the checkpoint
         # always has one to copy and syncs the file. (Not os.fsync() on a second descriptor: closing it would drop
         # the connection's POSIX locks, https://www.sqlite.org/howtocorrupt.html#posix_close_bug.)
-        self._conn.execute("PRAGMA synchronous=FULL")
-        user_version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-        self._conn.execute(f"PRAGMA user_version={int(user_version)}")
-        busy, log, checkpointed = self._conn.execute(
+        conn = self._connection()
+        conn.execute("PRAGMA synchronous=FULL")
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        conn.execute(f"PRAGMA user_version={int(user_version)}")
+        busy, log, checkpointed = conn.execute(
             "PRAGMA wal_checkpoint(TRUNCATE)"
         ).fetchone()
         if busy or log != checkpointed:
@@ -260,9 +300,7 @@ class SQLiteWriter:
                 "connection is using the database."
             )
         # The mode came from SQLite itself, a bare keyword such as "delete" or "wal".
-        mode = self._conn.execute(
-            f"PRAGMA journal_mode={self._journal_mode}"
-        ).fetchone()[0]
+        mode = conn.execute(f"PRAGMA journal_mode={self._journal_mode}").fetchone()[0]
         if mode != self._journal_mode:
             raise sqlite3.OperationalError(
                 f"Couldn't restore the journal mode of {self._path} to {self._journal_mode} (it's {mode}): another "
@@ -274,6 +312,8 @@ class SQLiteWriter:
         """Release resources. After a failed load, still try to restore the journal mode, without replacing the
         error that aborted it: a file left in WAL mode would otherwise keep it, even after a successful rerun.
         """
+        if self._conn is None:
+            return
         if self._journal_mode is not None:
             with suppress(sqlite3.Error):
                 self._conn.rollback()
