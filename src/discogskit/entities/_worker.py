@@ -26,7 +26,9 @@ from discogskit.entities._def import ChunkArgs, Cols, ElementValueError
 
 # Bytes of the chunk read and fed to the parser at a time. Reading the whole chunk and wrapping it in its container
 # held a copy of it for the whole parse, and two while wrapping: 256 MB each at the default chunk size (issue #30).
-_FEED_BYTES = 1024 * 1024
+# Measured on 256 MiB chunks of every entity, 64 KiB slices parse no slower than the whole chunk did, while 1 MiB
+# slices parsed one labels chunk 22-57% slower (#30).
+_FEED_BYTES = 64 * 1024
 _T = TypeVar("_T")
 
 
