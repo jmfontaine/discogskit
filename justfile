@@ -17,7 +17,11 @@ _require-main:
     fi
     git fetch --quiet --tags origin main
     if [ "$(git rev-parse main)" != "$(git rev-parse origin/main)" ]; then
-        echo "Error: local main ($(git rev-parse --short main)) differs from origin/main ($(git rev-parse --short origin/main))"
+        if git merge-base --is-ancestor main origin/main; then
+            echo "Error: local main ($(git rev-parse --short main)) is behind origin/main ($(git rev-parse --short origin/main)); run git pull --ff-only on main"
+        else
+            echo "Error: local main ($(git rev-parse --short main)) differs from origin/main ($(git rev-parse --short origin/main))"
+        fi
         exit 1
     fi
 
@@ -44,15 +48,38 @@ _version-pr branch version message body dry_run:
         exit 0
     fi
     git switch --create "$branch" main
+    pushed=false
+    # On any failure from here on, return to main and say what is left of the branch.
+    restore() {
+        status=$?
+        echo "Error: opening the pull request for $branch failed (exit $status); switching back to main"
+        git switch --quiet --discard-changes main
+        if [ "$(git rev-parse "$branch")" = "$(git rev-parse main)" ]; then
+            git branch --quiet --delete --force "$branch"
+            echo "Discarded the version edit and deleted $branch, which had no commit."
+        elif [ "$pushed" = false ]; then
+            echo "Kept $branch with its commit $(git rev-parse --short "$branch"): push it and open the pull request, or delete it with git branch -D $branch."
+        else
+            echo "$branch is pushed to origin but has no pull request: open one with gh pr create --base main --head $branch, or delete the branch."
+        fi
+        if [ -n "$(git status --porcelain)" ]; then
+            echo "The working tree still has untracked files left by the failed run:"
+            git status --short
+        fi
+    }
+    trap restore EXIT
     uv version --no-sync "$version"
     if [ -n "$(git status --porcelain -- . ':!pyproject.toml' ':!uv.lock')" ]; then
-        echo "Error: setting the version changed more than pyproject.toml and uv.lock; $branch is left as is"
+        echo "Error: setting the version changed more than pyproject.toml and uv.lock:"
+        git status --short
         exit 1
     fi
     git add pyproject.toml uv.lock
     git commit --quiet -S -m "$message"
     git push --set-upstream origin "$branch"
+    pushed=true
     gh pr create --base main --head "$branch" --title "$message" --body "$body"
+    trap - EXIT
     git switch main
 
 # Run benchmarks
