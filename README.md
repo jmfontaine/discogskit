@@ -615,6 +615,29 @@ Compare numbers only within one run: shared runners vary from run to run, and so
 start of the dump, not a random sample, so its throughput may not match the full dump's.
 
 
+## Development
+
+[just](https://github.com/casey/just) runs the development tasks: `just --list` shows them all.
+
+### Releasing
+
+Between releases, `main` carries the next version as a [PEP 440](https://peps.python.org/pep-0440/) development
+release, such as `0.2.0.dev0`, which sorts below `0.2.0`, so installers never prefer a build from `main` over a
+release. `main` only changes through pull requests, so a release takes three steps, each run from a clean `main` equal
+to `origin/main`:
+
+1. `just release-prepare` opens a pull request that sets the release version (`0.2.0.dev0` → `0.2.0`) and changes
+   nothing else. Merging it is the go/no-go decision.
+2. After it merges, update `main` and run `just release`. It refuses a development or release-candidate version and an
+   existing tag, creates the signed tag `v0.2.0` on the release commit, and pushes only the tag. The tag starts the
+   [release workflow](.github/workflows/release.yml), which checks that the tag matches the version, publishes to
+   PyPI and creates the GitHub release, and `just release` waits for it.
+3. `just release-next` opens a pull request that starts the next minor version's development (`0.2.0` →
+   `0.3.0.dev0`). Pass `patch` or `major` for `0.2.1.dev0` or `1.0.0.dev0` instead.
+
+Each recipe takes `--dry-run`, which runs its checks and prints what it would do without creating a branch, a tag or a
+pull request.
+
 ## License
 
 discogskit is licensed under the [Apache License 2.0](LICENSE.txt).
