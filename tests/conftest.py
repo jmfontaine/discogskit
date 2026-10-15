@@ -22,7 +22,7 @@ from discogskit.writers import _staging
 
 
 def ipc_to_tables(
-    ipc_dict: dict[str, bytes], schemas: dict[str, pa.Schema]
+    ipc_dict: dict[str, pa.Buffer], schemas: dict[str, pa.Schema]
 ) -> dict[str, pa.Table]:
     """Deserialize an IPC dict into Arrow Tables keyed by table name."""
     return {
@@ -33,12 +33,12 @@ def ipc_to_tables(
     }
 
 
-def ipc_to_record_batches(ipc_dict: dict[str, bytes]) -> dict[str, pa.RecordBatch]:
+def ipc_to_record_batches(ipc_dict: dict[str, pa.Buffer]) -> dict[str, pa.RecordBatch]:
     """Deserialize an IPC dict into the ``dict[str, pa.RecordBatch]`` ``Writer.write_chunk`` expects."""
     return {name: deserialize_batch(ipc_bytes) for name, ipc_bytes in ipc_dict.items()}
 
 
-def empty_ipc(entity: str) -> dict[str, bytes]:
+def empty_ipc(entity: str) -> dict[str, pa.Buffer]:
     """IPC dict for a chunk with no records, from an empty byte range of any file."""
     return extract_chunk_to_ipc(
         ChunkArgs(end=0, entity=entity, file_path=__file__, start=0)
