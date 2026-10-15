@@ -151,6 +151,9 @@ every 0.25 s; the two default runs differ by 0.5 GiB, so smaller differences are
 memory it has freed for reuse, so its footprint grows over its first few chunks: at 256 MB, from about 0.9 GiB during
 its first chunk to about 1.1 GiB by its tenth. On Linux (Python 3.13 in Docker on the same Mac), the same worker's
 peak resident set stayed at about 0.9 GiB from its first chunk to its tenth; the table above wasn't measured there.
+Sending each table's Arrow buffer to the main process as it is, instead of a pickled copy, cut that worker's peak from
+2.0 GiB to 1.1 GiB on macOS but left it unchanged on Linux
+([#31](https://github.com/jmfontaine/discogskit/issues/31)).
 `/usr/bin/time -l` reports something else: the largest single process's peak resident set, which leaves out memory
 the system has compressed. Converting the whole releases dump (62.7 GB of XML) to Parquet with the defaults peaked at
 5.7 GiB, 1.2 GiB of it in the main process.
