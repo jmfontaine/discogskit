@@ -111,10 +111,19 @@ Discogs:
 |---|---|---|
 | `0` | `releases.master_id` | the release has no master (no master has id 0) |
 | `0` | `masters.year` | the year is unknown |
-| `0` | some artist and company ids in link tables (e.g. `release_artists.artist_id`, `release_companies.company_id`) | no linked Discogs entity |
+| `0` | `artist_id` in `release_extraartists`, `release_track_artists` and `release_track_extraartists` | no linked Discogs entity |
 | `65535` | `duration` in `master_videos` and `release_videos` | possibly a value capped at the 16-bit maximum upstream rather than a real duration |
 
+`release_artists.artist_id` and `release_companies.company_id` hold no `0` in that dump: a release artist or company
+without an id has `NULL` there.
+
 Filter them in your queries where they matter, e.g. `WHERE master_id <> 0`.
+
+Row order isn't guaranteed. discogskit writes each chunk of records as soon as a parse worker finishes it, so a
+table's rows aren't in id order, and two runs on the same dump can write them in a different order: two conversions
+of the 2026-10-01 releases dump to Parquet wrote the same 234 row groups per file in a different order (10 positions
+differed). The artists, labels and masters files came out byte-identical, and so did two SQLite loads of all four
+dumps, but nothing guarantees it. Use `ORDER BY` wherever order matters, and always before `LIMIT`.
 
 A value discogskit can't store, such as a non-numeric id or one too large for its column, stops the run, and so do a
 record with a missing or empty id and a release sub-track with `<sub_tracks>` of its own (discogskit reads one level
@@ -179,7 +188,7 @@ moved by hand. Files moved before the failure are already in `<output>/<entity>/
 | Compression (Parquet) | `zstd` (default), `snappy`, `gzip`, `brotli`, `none` |
 | Compression (JSONL) | `gzip`, `bzip2`, `none` (default) |
 
-`--compression-level` overrides a codec's own default. Valid ranges come from each library: JSONL gzip 0-9
+`--compression-level` overrides the codec's default level. Valid ranges come from each library: JSONL gzip 0-9
 (defaults to **6**: on the 2026-10-01 dump, gzip output was 4.15% larger at level 6 than 9 across all four
 entities, for roughly 56-68% less compression CPU — see [#32](https://github.com/jmfontaine/discogskit/issues/32)),
 JSONL bzip2 1-9, Parquet brotli 0-11, Parquet gzip 1-9, Parquet zstd -131072 to 22. `snappy` and `none` don't take a
@@ -194,8 +203,14 @@ M3 (8 cores, 24 GB RAM, macOS) and otherwise default options:
 | `gzip` (9) | 8,326 MB (−12%) | 1,886 s | 1,677 s |
 | `brotli` (8) | 7,625 MB (−19%) | 1,126 s | 934 s |
 
-The Parquet writes run on one thread, so once a codec makes them slower than parsing, the whole run slows with them.
-`brotli` makes the smallest files; `gzip` makes larger files than `brotli`, and more slowly.
+The Parquet writes run on one thread, which compresses every row group, so once a codec makes them slower than
+parsing, the whole run slows with them: `gzip` took more than twice as long as `zstd`. `brotli` makes the smallest
+files; `gzip` makes larger files than `brotli`, and more slowly.
+
+Parquet `zstd` defaults to pyarrow's level 1, not zstd's own default of 3, and a Parquet file records its codec but
+not its level. Higher levels cost little on releases: in another series of single runs on the same machine,
+`--compression-level 3` wrote 8,572 MB (−9%) in 807 s and `--compression-level 9` 8,087 MB (−14%) in 856 s, against
+9,434 MB in 756 s and 859 s for two runs at level 1.
 
 <details>
 <summary>Full command help</summary>

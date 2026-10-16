@@ -1,7 +1,8 @@
 """Generate the agent skill's references from the code, so they can't drift from it.
 
 - ``commands.md`` from the CLI's own parameters, as ``--help`` reports them.
-- ``schemas.md`` from each entity's Arrow schemas, with the column types each writer maps them to.
+- ``schemas.md`` from each entity's Arrow schemas, with the type a Parquet reader gets back and the column
+  types each database writer maps them to.
 - ``ddl.md`` from the statements the SQLite and PostgreSQL writers run.
 
 Run ``just skill-references`` after changing a command, an option, a schema or a writer's DDL;
@@ -15,6 +16,8 @@ import inspect
 import sys
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import typer
 from typer.core import TyperArgument, TyperGroup
 
@@ -98,13 +101,22 @@ def render_commands() -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
+def _read_back(schema: pa.Schema) -> pa.Schema:
+    """``schema`` as pyarrow reads it back from a Parquet file: a list's item is then named ``element``."""
+    sink = pa.BufferOutputStream()
+    pq.write_table(schema.empty_table(), sink)
+    return pq.read_schema(pa.BufferReader(sink.getvalue()))
+
+
 def render_schemas() -> str:
     lines = [
         "# Table schemas",
         "",
         _NOTE,
         "",
-        "Each entity's tables, root table first. Parquet files carry the Arrow types; `load` maps them to the",
+        "Each entity's tables, root table first. The Arrow (Parquet) column gives the type pyarrow reads back from",
+        "a Parquet file (`pq.read_schema()`, `pq.read_table()`): a list's item is named `element` there, the standard",
+        "Parquet name, while the Arrow schema the file also embeds names it `item`. `load` maps the same types to the",
         "PostgreSQL and SQLite types shown, and JSONL writes the same columns as JSON values. A column that isn't",
         "nullable is never `NULL` (`null` in JSONL).",
     ]
@@ -128,11 +140,15 @@ def render_schemas() -> str:
                 "|---|---|---|---|---|",
             ]
             lines += [
-                f"| `{field.name}` | `{field.type}` "
+                f"| `{field.name}` | `{parquet.type}` "
                 f"| `{postgresql._arrow_to_pg_type(field.type).as_string(None)}` "
                 f"| `{sqlite._arrow_to_sqlite_type(field.type)}` "
                 f"| {'yes' if field.nullable else 'no'} |"
-                for field in entity.schemas[table]
+                for field, parquet in zip(
+                    entity.schemas[table],
+                    _read_back(entity.schemas[table]),
+                    strict=True,
+                )
             ]
     return "\n".join(lines) + "\n"
 
