@@ -15,6 +15,7 @@ from discogskit.entities._def import (
     child_elements,
     leaf_text,
     leaf_texts,
+    second_copy,
 )
 
 # ------------------------------------------------------------------------------------------------------------------------
@@ -103,6 +104,7 @@ def append_record(
     artist_id = int(id_text)
 
     data_quality = None
+    id_seen = False
     name = None
     name_variations = None
     profile = None
@@ -112,26 +114,41 @@ def append_record(
     for child in elem:
         tag = child.tag
         if tag == "id":
-            # Already extracted via findtext above.
+            # Already extracted via findtext above, which reads the first <id>.
+            if id_seen:
+                raise second_copy(child)
+            id_seen = True
             if unknown is not None:
                 check_leaf(child, "", unknown)
         elif tag == "aliases":
             _parse_refs(cols, "artist_aliases", artist_id, child, unknown)
         elif tag == "data_quality":
+            if data_quality is not None:
+                raise second_copy(child)
             data_quality = leaf_text(child, "", unknown)
         elif tag == "groups":
             _parse_refs(cols, "artist_groups", artist_id, child, unknown)
         elif tag == "members":
             _parse_refs(cols, "artist_members", artist_id, child, unknown)
         elif tag == "name":
+            if name is not None:
+                raise second_copy(child)
             name = leaf_text(child, "", unknown)
         elif tag == "namevariations":
+            if name_variations is not None:
+                raise second_copy(child)
             name_variations = leaf_texts(child, "name", "", unknown)
         elif tag == "profile":
+            if profile is not None:
+                raise second_copy(child)
             profile = leaf_text(child, "", unknown)
         elif tag == "realname":
+            if real_name is not None:
+                raise second_copy(child)
             real_name = leaf_text(child, "", unknown)
         elif tag == "urls":
+            if urls is not None:
+                raise second_copy(child)
             urls = leaf_texts(child, "url", "", unknown)
         elif unknown is not None:
             unknown.add(tag)

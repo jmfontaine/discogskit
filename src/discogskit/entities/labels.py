@@ -15,6 +15,7 @@ from discogskit.entities._def import (
     child_elements,
     leaf_text,
     leaf_texts,
+    second_copy,
 )
 
 # ------------------------------------------------------------------------------------------------------------------------
@@ -60,6 +61,7 @@ def append_record(
 
     contact_info = None
     data_quality = None
+    id_seen = False
     name = None
     parent_label_id = None
     parent_label_name = None
@@ -69,20 +71,33 @@ def append_record(
     for child in elem:
         tag = child.tag
         if tag == "id":
-            # Already extracted via findtext above.
+            # Already extracted via findtext above, which reads the first <id>.
+            if id_seen:
+                raise second_copy(child)
+            id_seen = True
             if unknown is not None:
                 check_leaf(child, "", unknown)
         elif tag == "contactinfo":
+            if contact_info is not None:
+                raise second_copy(child)
             contact_info = leaf_text(child, "", unknown)
         elif tag == "data_quality":
+            if data_quality is not None:
+                raise second_copy(child)
             data_quality = leaf_text(child, "", unknown)
         elif tag == "name":
+            if name is not None:
+                raise second_copy(child)
             name = leaf_text(child, "", unknown)
         elif tag == "parentLabel":
+            if parent_label_name is not None:
+                raise second_copy(child)
             pl_id_str = child.get("id")
             parent_label_id = int(pl_id_str) if pl_id_str else None
             parent_label_name = leaf_text(child, "", unknown)
         elif tag == "profile":
+            if profile is not None:
+                raise second_copy(child)
             profile = leaf_text(child, "", unknown)
         elif tag == "sublabels":
             for sub in child_elements(child, "label", "", unknown):
@@ -96,6 +111,8 @@ def append_record(
                 row["sublabel_id"].append(sub_id)
                 row["name"].append(sub_name)
         elif tag == "urls":
+            if urls is not None:
+                raise second_copy(child)
             urls = leaf_texts(child, "url", "", unknown)
         elif unknown is not None:
             unknown.add(tag)

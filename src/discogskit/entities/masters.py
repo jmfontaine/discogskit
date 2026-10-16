@@ -16,6 +16,7 @@ from discogskit.entities._def import (
     leaf_text,
     leaf_texts,
     parse_bool,
+    second_copy,
 )
 
 # ------------------------------------------------------------------------------------------------------------------------
@@ -74,9 +75,11 @@ def append_record(
 
     data_quality = None
     main_release = None
+    main_release_text = None
     notes = None
     title = None
     year = None
+    year_text = None
     genres = None
     styles = None
 
@@ -84,19 +87,27 @@ def append_record(
         tag = child.tag
         if tag == "artists":
             for artist_elem in child_elements(child, "artist", "", unknown):
-                artist_id = None
+                artist_id_text = None
                 anv = None
                 join_text = None
                 aname = None
                 for ac in artist_elem:
                     at = ac.tag
                     if at == "id":
-                        artist_id = int(ac.text) if ac.text else None
+                        if artist_id_text is not None:
+                            raise second_copy(ac)
+                        artist_id_text = ac.text or ""
                     elif at == "anv":
+                        if anv is not None:
+                            raise second_copy(ac)
                         anv = ac.text or ""
                     elif at == "join":
+                        if join_text is not None:
+                            raise second_copy(ac)
                         join_text = ac.text or ""
                     elif at == "name":
+                        if aname is not None:
+                            raise second_copy(ac)
                         aname = ac.text or ""
                     else:
                         if unknown is not None:
@@ -105,6 +116,7 @@ def append_record(
                     # Every child handled above is text-only.
                     if unknown is not None:
                         check_leaf(ac, "artists/artist/", unknown)
+                artist_id = int(artist_id_text) if artist_id_text else None
                 row = cols["master_artists"]
                 row["master_id"].append(master_id)
                 row["artist_id"].append(artist_id)
@@ -112,18 +124,30 @@ def append_record(
                 row["join"].append(join_text)
                 row["name"].append(aname)
         elif tag == "data_quality":
+            if data_quality is not None:
+                raise second_copy(child)
             data_quality = leaf_text(child, "", unknown)
         elif tag == "genres":
+            if genres is not None:
+                raise second_copy(child)
             genres = leaf_texts(child, "genre", "", unknown)
         elif tag == "main_release":
+            if main_release_text is not None:
+                raise second_copy(child)
             main_release_text = leaf_text(child, "", unknown)
             if main_release_text:
                 main_release = int(main_release_text)
         elif tag == "notes":
+            if notes is not None:
+                raise second_copy(child)
             notes = leaf_text(child, "", unknown)
         elif tag == "styles":
+            if styles is not None:
+                raise second_copy(child)
             styles = leaf_texts(child, "style", "", unknown)
         elif tag == "title":
+            if title is not None:
+                raise second_copy(child)
             title = leaf_text(child, "", unknown)
         elif tag == "videos":
             for video in child_elements(child, "video", "", unknown):
@@ -135,8 +159,12 @@ def append_record(
                 vtitle = None
                 for vc in video:
                     if vc.tag == "description":
+                        if vdesc is not None:
+                            raise second_copy(vc)
                         vdesc = vc.text or ""
                     elif vc.tag == "title":
+                        if vtitle is not None:
+                            raise second_copy(vc)
                         vtitle = vc.text or ""
                     else:
                         if unknown is not None:
@@ -153,6 +181,8 @@ def append_record(
                 row["src"].append(src)
                 row["title"].append(vtitle)
         elif tag == "year":
+            if year_text is not None:
+                raise second_copy(child)
             year_text = leaf_text(child, "", unknown)
             if year_text:
                 year = int(year_text)

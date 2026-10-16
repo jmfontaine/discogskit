@@ -9,7 +9,7 @@ import pytest
 from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.entities.labels import SCHEMAS
-from tests.conftest import ipc_to_tables
+from tests.conftest import assert_second_copy_fails, ipc_to_tables, parse_records
 
 
 class TestLabelsParsing:
@@ -81,3 +81,40 @@ class TestLabelsParsing:
                     end=os.path.getsize(f), entity="labels", file_path=str(f), start=0
                 )
             )
+
+
+_LABEL = ("<label><id>7</id>", "</label>")
+_RECORD = ("", "", "label")
+
+
+class TestRepeatedElements:
+    """An element a label holds one of fails when repeated; a container of repeated items appends (#205)."""
+
+    def test_appending_container_repeated(self, tmp_path):
+        element = '<sublabels><label id="1">S</label></sublabels>'
+        tables = parse_records(
+            tmp_path, "labels", f"<label><id>7</id>{element}{element}</label>\n"
+        )
+        assert tables["label_sublabels"].num_rows == 2
+
+    @pytest.mark.parametrize(
+        ("record", "element"),
+        [
+            pytest.param(("<label>", "</label>"), "<id>7</id>", id="id"),
+            pytest.param(_LABEL, "<name>N</name>", id="name"),
+            pytest.param(_LABEL, "<contactinfo>C</contactinfo>", id="contactinfo"),
+            pytest.param(_LABEL, "<profile>P</profile>", id="profile"),
+            pytest.param(
+                _LABEL, "<data_quality>Correct</data_quality>", id="data_quality"
+            ),
+            pytest.param(
+                _LABEL, '<parentLabel id="1">P</parentLabel>', id="parentLabel"
+            ),
+            pytest.param(_LABEL, "<parentLabel/>", id="parentLabel-empty"),
+            pytest.param(
+                _LABEL, "<urls><url>https://example.com</url></urls>", id="urls"
+            ),
+        ],
+    )
+    def test_second_copy_fails(self, tmp_path, record, element):
+        assert_second_copy_fails(tmp_path, "labels", record, _RECORD, element)

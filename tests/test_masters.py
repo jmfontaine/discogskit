@@ -10,7 +10,7 @@ import pytest
 from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.entities.masters import SCHEMAS
-from tests.conftest import ipc_to_tables
+from tests.conftest import assert_second_copy_fails, ipc_to_tables, parse_records
 
 
 class TestMastersParsing:
@@ -201,3 +201,56 @@ class TestMasterVideoTypedValues:
             match=rf"^Invalid <master> record .*: invalid embed {re.escape(repr(value))}, expected 'true' or 'false'$",
         ):
             self._video(tmp_path, f' embed="{value}"')
+
+
+_MASTER = ("", "", "master")
+_ARTIST = ("<artists><artist>", "</artist></artists>", "artist")
+_VIDEO = ('<videos><video src="https://example.com">', "</video></videos>", "video")
+
+
+class TestRepeatedElements:
+    """An element a master holds one of fails when repeated; a container of repeated items appends (#205)."""
+
+    @pytest.mark.parametrize(
+        ("element", "table"),
+        [
+            ("<artists><artist><id>1</id></artist></artists>", "master_artists"),
+            ('<videos><video src="https://example.com"/></videos>', "master_videos"),
+        ],
+        ids=["artists", "videos"],
+    )
+    def test_appending_container_repeated(self, tmp_path, element, table):
+        tables = parse_records(
+            tmp_path, "masters", f'<master id="7">{element}{element}</master>\n'
+        )
+        assert tables[table].num_rows == 2
+
+    @pytest.mark.parametrize(
+        ("context", "element"),
+        [
+            pytest.param(_MASTER, "<title>T</title>", id="title"),
+            pytest.param(_MASTER, "<year>2000</year>", id="year"),
+            pytest.param(_MASTER, "<year/>", id="year-empty"),
+            pytest.param(_MASTER, "<main_release>5</main_release>", id="main_release"),
+            pytest.param(_MASTER, "<main_release/>", id="main_release-empty"),
+            pytest.param(_MASTER, "<notes>N</notes>", id="notes"),
+            pytest.param(
+                _MASTER, "<data_quality>Correct</data_quality>", id="data_quality"
+            ),
+            pytest.param(_MASTER, "<genres><genre>Rock</genre></genres>", id="genres"),
+            pytest.param(_MASTER, "<styles><style>Punk</style></styles>", id="styles"),
+            pytest.param(_ARTIST, "<id>1</id>", id="artist-id"),
+            pytest.param(_ARTIST, "<id/>", id="artist-id-empty"),
+            pytest.param(_ARTIST, "<name>N</name>", id="artist-name"),
+            pytest.param(_ARTIST, "<anv>A</anv>", id="artist-anv"),
+            pytest.param(_ARTIST, "<join>&amp;</join>", id="artist-join"),
+            pytest.param(_VIDEO, "<title>T</title>", id="video-title"),
+            pytest.param(
+                _VIDEO, "<description>D</description>", id="video-description"
+            ),
+        ],
+    )
+    def test_second_copy_fails(self, tmp_path, context, element):
+        assert_second_copy_fails(
+            tmp_path, "masters", ('<master id="7">', "</master>"), context, element
+        )
