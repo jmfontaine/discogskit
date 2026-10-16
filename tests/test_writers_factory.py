@@ -16,6 +16,14 @@ from discogskit.writers import get_writer
 from tests.conftest import ARTISTS_XML
 
 
+def _create_tables(writer):
+    """Create the artists tables, and so the database file, which a SQLite writer creates only in ``setup()``."""
+    try:
+        writer.setup(discogskit.ENTITIES["artists"])
+    finally:
+        writer.close()
+
+
 class TestGetWriter:
     def test_postgresql_dsn(self):
         with patch("psycopg.connect") as mock_connect:
@@ -53,7 +61,7 @@ class TestGetWriter:
     def test_sqlite_dsn_relative_path(self, monkeypatch, tmp_path):
         """``sqlite:///out.db`` is relative to the working directory, as in SQLAlchemy."""
         monkeypatch.chdir(tmp_path)
-        get_writer("sqlite:///out.db").close()
+        _create_tables(get_writer("sqlite:///out.db"))
         assert [p.name for p in tmp_path.iterdir()] == ["out.db"]
 
     @pytest.mark.parametrize(
@@ -100,7 +108,7 @@ class TestGetWriter:
     def test_file_named_like_memory_is_accepted(self, monkeypatch, tmp_path, dsn):
         """Only the exact in-memory names are rejected, not files whose name merely contains one."""
         monkeypatch.chdir(tmp_path)
-        get_writer(dsn).close()
+        _create_tables(get_writer(dsn))
         assert len(list(tmp_path.iterdir())) == 1
 
     def test_other_url_with_sqlite_suffix_is_unsupported(self, monkeypatch, tmp_path):

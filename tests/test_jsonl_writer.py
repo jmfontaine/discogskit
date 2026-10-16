@@ -138,14 +138,14 @@ class TestJSONLWriter:
     def test_close_without_finalize_leaves_no_output(
         self, tmp_path, entity, ipc_dict, compression
     ):
-        """A run that fails before finalize() leaves no final-named or staged files."""
+        """A run that fails before finalize() leaves no final-named or staged files, nor the directory it created."""
         out = tmp_path / "out"
         writer = JSONLWriter(str(out), compression=compression)
         writer.setup(entity)
         writer.write_chunk(ipc_to_record_batches(ipc_dict))
         writer.close()
 
-        assert list(out.iterdir()) == []
+        assert not out.exists()
 
     @needs_permissions
     def test_unwritable_entity_dir_fails_in_setup(self, tmp_path, entity):
