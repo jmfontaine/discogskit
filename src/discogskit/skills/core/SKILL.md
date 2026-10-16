@@ -159,7 +159,8 @@ tables: re-run the whole load with `--overwrite`.
 so a run that fails before that leaves earlier output untouched. If the move itself fails, files already moved
 sit next to the older ones, and the error names the `.partial-*` directory that holds the rest: move them by hand,
 or run again with `--overwrite`. A `.partial-*` directory left by a killed run, with no run still writing to it, is
-safe to delete.
+safe to delete. A failed `convert` removes an output directory it created and left empty, and a `load` that fails
+before its input is checked creates no SQLite file.
 
 ## Reference docs
 

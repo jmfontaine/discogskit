@@ -1026,6 +1026,91 @@ class TestStrict:
         assert self._published(target, tmp_path)
 
 
+class TestFailedRunLeavesNoNewOutput:
+    """A failed run removes the database file or output directory it created and left empty (#194), never one that
+    existed before."""
+
+    @staticmethod
+    def _existing_db(db: Path, existing: str) -> bytes | None:
+        """Create ``db`` as ``existing`` says (``"none"``, ``"empty"`` or ``"database"``); return its bytes."""
+        if existing == "empty":
+            db.touch()
+        elif existing == "database":
+            conn = sqlite3.connect(db)
+            conn.execute("CREATE TABLE mine (x)")
+            conn.commit()
+            conn.close()
+        return db.read_bytes() if db.exists() else None
+
+    @staticmethod
+    def _truncated_gz(tmp_path: Path) -> Path:
+        records = "".join(
+            f"<artist><id>{i}</id><name>Artist {i}</name></artist>\n"
+            for i in range(1, 5001)
+        )
+        data = gzip.compress(f"<artists>\n{records}</artists>".encode())
+        gz = tmp_path / _ENTITY_FILE
+        gz.write_bytes(data[: len(data) // 2])
+        return gz
+
+    @pytest.mark.parametrize("existing", ["none", "empty", "database"])
+    def test_ctrl_c_before_load(self, tmp_path: Path, existing: str) -> None:
+        db = tmp_path / "out.db"
+        before = self._existing_db(db, existing)
+        gz = _make_gz(tmp_path)
+        with patch("discogskit.cli.pipeline.run", side_effect=KeyboardInterrupt):
+            result = runner.invoke(app, ["load", str(gz), "--dsn", str(db)])
+        assert result.exit_code == 130, _unstyle(result.output)
+        assert (db.read_bytes() if db.exists() else None) == before
+
+    @pytest.mark.parametrize("output_format", ["jsonl", "parquet"])
+    @pytest.mark.parametrize("existing", [False, True])
+    def test_failed_convert(
+        self, tmp_path: Path, existing: bool, output_format: str
+    ) -> None:
+        """A run failing after setup() created ``<output>`` (and its missing parents) leaves none of them."""
+        out = tmp_path / "parent" / "out"
+        if existing:
+            out.mkdir(parents=True)
+        gz = TestStrict._artists_gz(tmp_path, unhandled=True)
+        result = runner.invoke(
+            app,
+            [
+                "convert",
+                str(gz),
+                "-f",
+                output_format,
+                "--no-progress",
+                "--output",
+                str(out),
+                "--parse-workers",
+                "1",
+                "--strict",
+            ],
+        )
+        assert result.exit_code == 1, _unstyle(result.output)
+        if existing:
+            assert list(out.iterdir()) == []
+        else:
+            assert not (tmp_path / "parent").exists()
+
+    @pytest.mark.parametrize("existing", ["none", "empty", "database"])
+    def test_truncated_gz(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, existing: str
+    ) -> None:
+        _widen_console(monkeypatch)
+        db = tmp_path / "out.db"
+        before = self._existing_db(db, existing)
+        gz = self._truncated_gz(tmp_path)
+        result = runner.invoke(
+            app, ["load", str(gz), "--dsn", str(db), "--no-progress"]
+        )
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        assert f"Error: failed to decompress {gz.name}" in output
+        assert (db.read_bytes() if db.exists() else None) == before
+
+
 class TestUnicodeConvert:
     def test_gzip_jsonl_round_trips_unicode_text(self, tmp_path: Path) -> None:
         """Non-ASCII text, entity references and CDATA reach gzip-compressed JSONL intact."""
@@ -1351,6 +1436,33 @@ class TestLoadRejectsPostgreSqlOnlyOptionsForSqlite:
         output = _unstyle(result.output)
         assert result.exit_code == 2, output
         assert "No such option" in output
+
+
+class TestLoadRejectsInMemorySqlite:
+    @pytest.mark.parametrize(
+        "dsn",
+        [
+            "sqlite:///:memory:",
+            "sqlite:///:MEMORY:",
+            "sqlite:///file::memory:",
+            "sqlite:///file::memory:%00.db",
+            "file::memory:#discogs.db",
+        ],
+    )
+    def test_fails_before_decompressing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dsn: str
+    ) -> None:
+        """The whole load would go into a private database and be discarded when the process exits."""
+        _widen_console(monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        gz = _make_gz(tmp_path)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = runner.invoke(app, ["load", str(gz), "--dsn", dsn])
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        assert f"Invalid SQLite DSN: {dsn!r} names an in-memory database" in output
+        run.assert_not_called()
+        assert list(tmp_path.iterdir()) == [gz]
 
 
 class TestConsoleScriptEntryPoint:

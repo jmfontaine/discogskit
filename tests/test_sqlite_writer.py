@@ -245,6 +245,56 @@ class TestSQLiteWriter:
         ]
         conn.close()
 
+    def test_failed_run_leaves_a_concurrent_run_its_database(
+        self, tmp_path, entity, ipc_dict
+    ):
+        """One run failing before setup() must not take the new database file from another run loading into it."""
+        db_path = str(tmp_path / "test.db")
+        failing = SQLiteWriter(db_path)
+        loading = SQLiteWriter(db_path)
+        failing.close()
+        try:
+            loading.setup(entity)
+            loading.write_chunk(ipc_to_record_batches(ipc_dict))
+            loading.finalize(entity)
+        finally:
+            loading.close()
+
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("SELECT count(*) FROM artists").fetchone() == (2,)
+        conn.close()
+
+    def test_missing_directory_fails_before_creating_anything(self, tmp_path):
+        db_path = tmp_path / "missing" / "test.db"
+        with pytest.raises(
+            OSError,
+            match=f"Can't create the SQLite database {db_path}: No such file or directory",
+        ):
+            SQLiteWriter(str(db_path))
+        assert list(tmp_path.iterdir()) == []
+
+    def test_no_file_until_setup(self, tmp_path, entity):
+        """Connecting would create the file, so a run that fails before setup() leaves none."""
+        db_path = tmp_path / "test.db"
+        writer = SQLiteWriter(str(db_path))
+        writer.check(entity)
+        writer.close()
+        assert list(tmp_path.iterdir()) == []
+
+    def test_path_through_symlink_and_dotdot(self, monkeypatch, tmp_path, entity):
+        """``link/../x.db`` is the file the OS names, beside the link's target, not ``x.db`` beside the link."""
+        (tmp_path / "data" / "sub").mkdir(parents=True)
+        (tmp_path / "work").mkdir()
+        (tmp_path / "work" / "link").symlink_to(tmp_path / "data" / "sub")
+        monkeypatch.chdir(tmp_path / "work")
+        writer = SQLiteWriter(os.path.join("link", "..", "test.db"))
+        try:
+            writer.setup(entity)
+        finally:
+            writer.close()
+        assert (tmp_path / "data" / "test.db").exists()
+        assert not (tmp_path / "work" / "test.db").exists()
+
     def test_overwrite_raises_when_tables_exist(self, tmp_path, entity, ipc_dict):
         """setup() raises OutputExistsError when tables exist and overwrite=False."""
         from discogskit.writers import OutputExistsError

@@ -16,6 +16,14 @@ from discogskit.writers import get_writer
 from tests.conftest import ARTISTS_XML
 
 
+def _create_tables(writer):
+    """Create the artists tables, and so the database file, which a SQLite writer creates only in ``setup()``."""
+    try:
+        writer.setup(discogskit.ENTITIES["artists"])
+    finally:
+        writer.close()
+
+
 class TestGetWriter:
     def test_postgresql_dsn(self):
         with patch("psycopg.connect") as mock_connect:
@@ -53,7 +61,7 @@ class TestGetWriter:
     def test_sqlite_dsn_relative_path(self, monkeypatch, tmp_path):
         """``sqlite:///out.db`` is relative to the working directory, as in SQLAlchemy."""
         monkeypatch.chdir(tmp_path)
-        get_writer("sqlite:///out.db").close()
+        _create_tables(get_writer("sqlite:///out.db"))
         assert [p.name for p in tmp_path.iterdir()] == ["out.db"]
 
     @pytest.mark.parametrize(
@@ -75,6 +83,33 @@ class TestGetWriter:
             get_writer(dsn)
         assert reason in str(excinfo.value)
         assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        "dsn",
+        [
+            "sqlite:///:memory:",
+            "sqlite:///:MEMORY:",
+            "SQLITE:///:Memory:",
+            "sqlite:///file::memory:",
+            "sqlite:///FILE:%3Amemory%3A",
+            "file::memory:#discogs.db",
+            "file::memory:%00.db",
+        ],
+    )
+    def test_in_memory_sqlite_dsn_is_rejected(self, monkeypatch, tmp_path, dsn):
+        """An in-memory database would load the whole dump, then discard it when the run ends."""
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ValueError, match="Invalid SQLite DSN") as excinfo:
+            get_writer(dsn)
+        assert "in-memory database" in str(excinfo.value)
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize("dsn", [":memory:.db", "sqlite:///memory.db"])
+    def test_file_named_like_memory_is_accepted(self, monkeypatch, tmp_path, dsn):
+        """Only the exact in-memory names are rejected, not files whose name merely contains one."""
+        monkeypatch.chdir(tmp_path)
+        _create_tables(get_writer(dsn))
+        assert len(list(tmp_path.iterdir())) == 1
 
     def test_other_url_with_sqlite_suffix_is_unsupported(self, monkeypatch, tmp_path):
         """A URL isn't a SQLite path just because it ends in .db."""
@@ -320,6 +355,25 @@ class TestGetFileWriter:
         out = tmp_path / "out"
         with pytest.raises(ValueError, match=match):
             discogskit.get_file_writer(out, output_format, compression=compression)
+        assert not out.exists()
+
+    @pytest.mark.parametrize("level", [1.5, "3", True], ids=["float", "str", "bool"])
+    @pytest.mark.parametrize(
+        "output_format, compression",
+        [("jsonl", "bzip2"), ("jsonl", "gzip"), ("parquet", None)],
+    )
+    def test_rejects_level_that_is_not_an_integer(
+        self, tmp_path, output_format, compression, level
+    ):
+        """Checked before the range, which would let 1.5 and True through and fail on "3" with a TypeError."""
+        out = tmp_path / "out"
+        with pytest.raises(ValueError) as excinfo:
+            discogskit.get_file_writer(
+                out, output_format, compression=compression, compression_level=level
+            )
+        assert str(excinfo.value) == (
+            f"compression level must be an integer, not {level!r}."
+        )
         assert not out.exists()
 
     @pytest.mark.parametrize(

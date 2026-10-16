@@ -175,7 +175,9 @@ Each entity gets its own directory, e.g. `<output>/artists/artists.parquet`. Fil
 directory and moved into place, one at a time, only after all of them are complete. If a run fails before that
 point, no files appear under their final names and any previous output stays unchanged, including with
 `--overwrite`. Don't run two conversions of the same entity into the same output directory at once: their files can
-end up mixed. A process killed mid-run can leave an `<entity>.partial-*` directory behind; it's safe to delete.
+end up mixed. A process killed mid-run can leave an `<entity>.partial-*` directory behind; it's safe to delete. A
+failed run removes the output directory (and its parents) if it created them and they're still empty; directories
+that existed before stay.
 
 A run checks that it can move files into an existing `<output>/<entity>/` before it parses anything, and fails
 early if it can't (e.g. the directory isn't writable). If moving the finished files fails anyway, the run keeps
@@ -353,8 +355,12 @@ server that doesn't answer the cancel request at all can still hold the load unt
 
 `--dsn` accepts `postgresql://` or `postgres://` (both work identically) for PostgreSQL. For SQLite, it accepts
 `sqlite:///<path>` (`sqlite:///discogs.db` is relative to the current directory, `sqlite:////data/discogs.db` is
-absolute) or a plain path ending in `.db`, `.sqlite`, or `.sqlite3`. Other `sqlite:` forms and paths containing `?`
-(SQLite URI parameters such as `?mode=ro` aren't supported) are rejected before any file is created.
+absolute) or a plain path ending in `.db`, `.sqlite`, or `.sqlite3`. Other `sqlite:` forms, paths containing `?`
+(SQLite URI parameters such as `?mode=ro` aren't supported) and in-memory databases (`sqlite:///:memory:`,
+`file::memory:`), which would discard the load when the run ends, are rejected before any file is created. A
+database file that doesn't exist yet is created only once the input has been decompressed and checked, so a run that
+fails before that, such as on a truncated `.xml.gz` or Ctrl+C during decompression, leaves none; the run still fails
+before any work if the file's directory can't hold it.
 
 <details>
 <summary>Full command help</summary>
@@ -526,8 +532,8 @@ and name may change in any release.
 | `UnhandledElementsError` | Raised by a `strict` run whose input has XML elements no parser handled, before the writer's `finalize()`; its `entity` and `paths` attributes name them |
 
 `get_writer()` and `get_file_writer()` raise `ValueError` for an option they can't use, such as a codec the format
-doesn't support or a compression level out of the codec's range, before creating any file. Other failures raise other
-exceptions, e.g. `ValueError` for a value discogskit can't store.
+doesn't support or a compression level that isn't an `int` or is out of the codec's range, before creating any file.
+Other failures raise other exceptions, e.g. `ValueError` for a value discogskit can't store.
 
 ```python
 from pathlib import Path

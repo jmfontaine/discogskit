@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING, Protocol
+from urllib.parse import unquote
 
 if TYPE_CHECKING:
     import os
@@ -75,7 +76,7 @@ def get_file_writer(
     ``compression`` defaults to the format's own: ``"zstd"`` for Parquet (also ``"brotli"``, ``"gzip"``, ``"snappy"``,
     ``"none"``), ``"none"`` for JSONL (also ``"bzip2"``, ``"gzip"``). ``compression_level`` defaults to the codec's
     library default, except JSONL gzip, which uses 6. Raises ``ValueError``, before any file exists, for an unknown
-    format, a codec the format can't use, or a level the codec doesn't accept.
+    format, a codec the format can't use, or a level that isn't an ``int`` or that the codec doesn't accept.
     """
     if output_format == "jsonl":
         from discogskit.writers.jsonl import JSONLWriter
@@ -177,7 +178,8 @@ _SQLITE_SUFFIXES = (".db", ".sqlite", ".sqlite3")
 
 def _sqlite_path(dsn: str) -> str | None:
     """The file a SQLite DSN names, or None if ``dsn`` isn't one. Raises ValueError, before any file exists, if it's
-    malformed: SQLite would otherwise create a file with an unintended name, or fail opaquely.
+    malformed: SQLite would otherwise create a file with an unintended name, or fail opaquely. Or if it names an
+    in-memory database, which would take the whole load and discard it when the run ends.
     """
     if dsn[: len("sqlite:")].lower() == "sqlite:":
         if dsn[: len(_SQLITE_PREFIX)].lower() != _SQLITE_PREFIX:
@@ -196,7 +198,25 @@ def _sqlite_path(dsn: str) -> str | None:
         raise ValueError(
             f"Invalid SQLite DSN: {_redact_dsn(dsn)!r}. The path contains '?': query parameters aren't supported."
         )
+    if _is_in_memory(path):
+        raise ValueError(
+            f"Invalid SQLite DSN: {_redact_dsn(dsn)!r} names an in-memory database, which would be discarded when "
+            "the run ends. Use a file path, such as sqlite:///discogs.db."
+        )
     return path
+
+
+def _is_in_memory(path: str) -> bool:
+    """Whether ``path`` is ``:memory:``, or a ``file:`` URI whose path is, in any case.
+
+    SQLite matches ``:memory:`` exactly, and reads ``file:`` URIs only when built to (``SQLITE_USE_URI``); anything
+    close is rejected regardless, since a file with such a name would be just as unintended. Like SQLite, the URI's
+    path ends at its fragment (``#``) or a decoded NUL (``%00``). A URI's query string (``?mode=memory``) never gets
+    here: ``_sqlite_path`` rejects any ``?`` first.
+    """
+    if path[: len("file:")].lower() == "file:":
+        path = unquote(path[len("file:") :].partition("#")[0]).partition("\0")[0]
+    return path.lower() == ":memory:"
 
 
 # A URL's scheme, at the start: "://" inside a keyword/value DSN (e.g. in a password) doesn't make it a URL.

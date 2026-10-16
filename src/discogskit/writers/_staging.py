@@ -9,6 +9,9 @@ suffix) keeps the original name stored in gzip headers correct.
 Moving the files can fail after hours of parsing, e.g. when ``<output>/<entity>/`` isn't writable or is on another
 filesystem. So the constructor makes the same move with a probe file first, and a failed ``commit()`` keeps the
 staging directory, which then holds the finished files, and names it in its error.
+
+A run that fails removes the directories it created (``<output>``, its missing parents, ``<output>/<entity>/``) if
+they're empty, so no empty directory looks like output. Directories that existed before the run stay.
 """
 
 from __future__ import annotations
@@ -30,13 +33,19 @@ class StagedFiles:
         self, output_dir: Path, entity_name: str, filenames: Iterable[str]
     ) -> None:
         self.filenames = list(filenames)
+        # Absolute, so cleanup acts on these directories even if the working directory changes during the run.
+        output_dir = output_dir.absolute()
         self.final_dir = output_dir / entity_name
-        output_dir.mkdir(exist_ok=True, parents=True)
-        # Visible (not dot-prefixed) so leftovers from a killed process, which can
-        # be many GB, are easy to spot and delete.
-        self.staging_dir = Path(
-            tempfile.mkdtemp(dir=output_dir, prefix=f"{entity_name}.partial-")
-        )
+        # The directories this run created, deepest first: discard() removes the ones still empty.
+        self._created_dirs: list[Path] = []
+        try:
+            self.staging_dir = _make_staging_dir(
+                output_dir, entity_name, self._created_dirs
+            )
+        except BaseException:
+            # No writer holds this object yet to discard() it.
+            _remove_if_empty(self._created_dirs)
+            raise
         self._kept = False
         if self.final_dir.exists():
             self._probe()
@@ -62,11 +71,20 @@ class StagedFiles:
         """Move every staged file into the final directory. Returns their total size in bytes.
 
         If a move fails, the staging directory is kept, ``discard()`` no longer deletes it, and the error names it.
+        A final directory this call created is removed again if no file reached it, also when ``discard()`` follows
+        another failure, such as Ctrl+C.
         """
         total_bytes = 0
         moved = 0
+        created_final = False
         try:
-            self.final_dir.mkdir(exist_ok=True, parents=True)
+            try:
+                self.final_dir.mkdir()
+            except FileExistsError:
+                pass
+            else:
+                created_final = True
+                self._created_dirs.insert(0, self.final_dir)
             for name in self.filenames:
                 final_path = self.final_dir / name
                 os.replace(self.staging_dir / name, final_path)
@@ -74,6 +92,8 @@ class StagedFiles:
                 total_bytes += final_path.stat().st_size
         except OSError as exc:
             self._kept = True
+            if created_final:
+                _remove_if_empty([self.final_dir])
             raise OSError(
                 f"Moving the output into {self.final_dir} failed after {moved} of {len(self.filenames)} files: "
                 f"{exc}. The completed files not moved yet are in {self.staging_dir}."
@@ -82,13 +102,62 @@ class StagedFiles:
         return total_bytes
 
     def discard(self) -> None:
-        """Delete the staging directory, unless a failed ``commit()`` left finished files in it; existing final
-        files stay untouched.
+        """Delete the staging directory, unless a failed ``commit()`` left finished files in it, then the directories
+        this run created, if they're empty; existing final files stay untouched.
         """
         if self._kept:
             return
         # Errors are ignored so cleanup never replaces the error that aborted the run.
         shutil.rmtree(self.staging_dir, ignore_errors=True)
+        _remove_if_empty(self._created_dirs)
 
     def path(self, name: str) -> Path:
         return self.staging_dir / name
+
+
+# Times to create the staging directory when another run's cleanup removes a directory it needs first.
+_STAGING_ATTEMPTS = 10
+
+
+def _make_staging_dir(output_dir: Path, entity_name: str, created: list[Path]) -> Path:
+    """Create ``output_dir`` if needed, then a fresh staging directory in it, which it returns.
+
+    Adds the directories it created for it (``output_dir`` and its missing parents) to ``created``, deepest first,
+    even if it then fails. Only directories this call's own ``mkdir()`` created count: a path such as
+    ``missing/../existing`` names a directory that existed before.
+    """
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            for d in reversed((output_dir, *output_dir.parents)):
+                if d.is_dir():
+                    continue
+                try:
+                    d.mkdir()
+                except FileExistsError:
+                    if d.is_dir():  # Another run created it just now.
+                        continue
+                    raise
+                if d not in created:
+                    created.insert(0, d)
+            # Visible (not dot-prefixed) so leftovers from a killed process, which can
+            # be many GB, are easy to spot and delete.
+            return Path(
+                tempfile.mkdtemp(dir=output_dir, prefix=f"{entity_name}.partial-")
+            )
+        except FileNotFoundError:
+            # Another run that failed removed a directory, empty then, after this one saw or created it: try again.
+            if attempts == _STAGING_ATTEMPTS:
+                raise
+
+
+def _remove_if_empty(dirs: Iterable[Path]) -> None:
+    """Remove each directory of ``dirs``, deepest first, until one isn't empty or can't be removed."""
+    for d in dirs:
+        try:
+            d.rmdir()
+        except FileNotFoundError:
+            continue  # Already removed, by another run that failed.
+        except OSError:
+            return
