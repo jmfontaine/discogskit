@@ -126,8 +126,9 @@ different order (10 positions differed), and the first run's weren't in id order
 outputs weren't checked for id order.
 
 A value discogskit can't store, such as a non-numeric id or one too large for its column, stops the run, and so do a
-record with a missing or empty id and a release sub-track with `<sub_tracks>` of its own (discogskit reads one level
-of sub-tracks). Typed attributes are never coerced: a video `duration` must be an integer, and
+record with a missing or empty id, a release sub-track with `<sub_tracks>` of its own (discogskit reads one level
+of sub-tracks) and a non-empty `<tracks>` in a track's or sub-track's extra artist (only release-level extra artists
+have a `tracks` column). Typed attributes are never coerced: a video `duration` must be an integer, and
 `embed` and `is_main_release` must be `true` or `false`; a missing one is `NULL`, and any other value, including an
 empty one, stops the run. The error names the `.xml` file and the byte range of the chunk being parsed, plus either
 the record's line, counted from the chunk's first byte, and its id when it has one, or the table the value was meant

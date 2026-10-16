@@ -23,6 +23,8 @@ from discogskit.entities._def import (
 
 _ArtistRec = tuple[int | None, str | None, str | None, str | None]
 _ExtraArtistRec = tuple[int | None, str | None, str | None, str | None, str | None]
+# Track-level extra artists have no tracks column, so a <tracks> value there fails instead of vanishing (#202).
+_NO_TRACK_TRACKS = "only release-level extra artists have a tracks column"
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Arrow schemas (single source of truth for column definitions; the first table is the root table)
@@ -217,10 +219,15 @@ def _parse_artist_children(
 
 def _parse_extraartist_children(
     parent_elem: etree._Element, parent_path: str, unknown: set[str] | None
-) -> list[_ExtraArtistRec]:
-    """Parse the <artist> children of an <extraartists> element; ``parent_path`` is that element's parent's path."""
+) -> tuple[list[_ExtraArtistRec], etree._Element | None]:
+    """Parse the <artist> children of an <extraartists> element; ``parent_path`` is that element's parent's path.
+
+    Also returns the first <tracks> element with text, for track-level callers to reject: only release-level extra
+    artists have a tracks column, and a later <tracks> in the same artist would hide it from the records.
+    """
     path = "" if unknown is None else f"{parent_path}{parent_elem.tag}/artist/"
     result = []
+    first_tracks = None
     for a in child_elements(parent_elem, "artist", parent_path, unknown):
         aid = None
         name = None
@@ -239,6 +246,8 @@ def _parse_extraartist_children(
                 role = ch.text or ""
             elif t == "tracks":
                 tracks_text = ch.text or ""
+                if first_tracks is None and tracks_text:
+                    first_tracks = ch
             else:
                 if unknown is not None:
                     unknown.add(f"{path}{t}")
@@ -247,7 +256,7 @@ def _parse_extraartist_children(
             if unknown is not None:
                 check_leaf(ch, path, unknown)
         result.append((aid, name, anv, role, tracks_text))
-    return result
+    return result, first_tracks
 
 
 def _parse_single_track(
@@ -261,14 +270,19 @@ def _parse_single_track(
     list[_ArtistRec],
     list[_ExtraArtistRec],
     etree._Element | None,
+    etree._Element | None,
 ]:
-    """Parse a <track> element; ``path`` is its own path relative to the record, ending in ``/``."""
+    """Parse a <track> element; ``path`` is its own path relative to the record, ending in ``/``.
+
+    Returns its fields, its <sub_tracks> element and the first <tracks> with text in its extra artists, if any.
+    """
     position = None
     title = None
     duration = None
     artists = []
     extraartists = []
     sub_tracks_elem = None
+    tracks_elem = None
     for ch in track_elem:
         tag = ch.tag
         if tag == "position":
@@ -281,7 +295,9 @@ def _parse_single_track(
             artists = _parse_artist_children(ch, path, unknown)
             continue
         elif tag == "extraartists":
-            extraartists = _parse_extraartist_children(ch, path, unknown)
+            extraartists, found = _parse_extraartist_children(ch, path, unknown)
+            if tracks_elem is None:
+                tracks_elem = found
             continue
         elif tag == "sub_tracks":
             sub_tracks_elem = ch
@@ -293,7 +309,15 @@ def _parse_single_track(
         # Only the text-only children above get here.
         if unknown is not None:
             check_leaf(ch, path, unknown)
-    return position, title, duration, artists, extraartists, sub_tracks_elem
+    return (
+        position,
+        title,
+        duration,
+        artists,
+        extraartists,
+        sub_tracks_elem,
+        tracks_elem,
+    )
 
 
 def append_record(
@@ -351,7 +375,7 @@ def append_record(
         elif tag == "artists":
             r_artists = _parse_artist_children(child, "", unknown)
         elif tag == "extraartists":
-            r_extraartists = _parse_extraartist_children(child, "", unknown)
+            r_extraartists, _ = _parse_extraartist_children(child, "", unknown)
         elif tag == "labels":
             for la in child_elements(child, "label", "", unknown):
                 if unknown is not None:
@@ -467,9 +491,15 @@ def append_record(
             # arrays in PG while preserving the hierarchical structure for queries.
             track_idx = 0
             for tr in child_elements(child, "track", "", unknown):
-                pos, ttl, dur, t_art, t_ea, sub_elem = _parse_single_track(
+                pos, ttl, dur, t_art, t_ea, sub_elem, t_tracks = _parse_single_track(
                     tr, "tracklist/track/", unknown
                 )
+                if t_tracks is not None:
+                    # The worker adds the <tracks> element's line.
+                    raise ElementValueError(
+                        f"<tracks> {t_tracks.text!r} in an extra artist of track {pos!r}; {_NO_TRACK_TRACKS}",
+                        t_tracks,
+                    )
                 parent = track_idx
                 r_tracks.append((track_idx, None, pos, ttl, dur, t_art, t_ea))
                 track_idx += 1
@@ -477,8 +507,10 @@ def append_record(
                     for sub in child_elements(
                         sub_elem, "track", "tracklist/track/", unknown
                     ):
-                        s_pos, s_ttl, s_dur, s_art, s_ea, nested = _parse_single_track(
-                            sub, "tracklist/track/sub_tracks/track/", unknown
+                        s_pos, s_ttl, s_dur, s_art, s_ea, nested, s_tracks = (
+                            _parse_single_track(
+                                sub, "tracklist/track/sub_tracks/track/", unknown
+                            )
                         )
                         if nested is not None:
                             # Only one level of sub-tracks is parsed, so fail rather than drop the deeper ones. The
@@ -486,6 +518,12 @@ def append_record(
                             raise ElementValueError(
                                 f"<sub_tracks> nested in sub-track {s_pos!r} of track {pos!r}",
                                 nested,
+                            )
+                        if s_tracks is not None:
+                            raise ElementValueError(
+                                f"<tracks> {s_tracks.text!r} in an extra artist of sub-track {s_pos!r} of track"
+                                f" {pos!r}; {_NO_TRACK_TRACKS}",
+                                s_tracks,
                             )
                         r_tracks.append(
                             (track_idx, parent, s_pos, s_ttl, s_dur, s_art, s_ea)
@@ -592,6 +630,7 @@ def append_record(
             ta["anv"].append(anv)
             ta["join"].append(join_text)
 
+        # The tracklist loop rejected any <tracks> with text here, so the discarded value is None or "".
         for aid, name, anv, role, _tracks in t_extraartists:
             te["release_id"].append(rid)
             te["track_idx"].append(tidx)
