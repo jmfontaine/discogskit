@@ -9,7 +9,7 @@ import pytest
 from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.entities.artists import SCHEMAS
-from tests.conftest import ipc_to_tables
+from tests.conftest import assert_second_copy_fails, ipc_to_tables, parse_records
 
 
 class TestArtistsParsing:
@@ -160,3 +160,50 @@ class TestArtistsParsing:
         )
 
         assert result.unknown == []
+
+
+_ARTIST = ("<artist><id>7</id>", "</artist>")
+_RECORD = ("", "", "artist")
+
+
+class TestRepeatedElements:
+    """An element an artist holds one of fails when repeated; a container of repeated items appends (#205)."""
+
+    @pytest.mark.parametrize(
+        ("element", "table"),
+        [
+            ('<aliases><name id="1">A</name></aliases>', "artist_aliases"),
+            ('<groups><name id="1">G</name></groups>', "artist_groups"),
+            ('<members><name id="1">M</name></members>', "artist_members"),
+        ],
+        ids=["aliases", "groups", "members"],
+    )
+    def test_appending_container_repeated(self, tmp_path, element, table):
+        tables = parse_records(
+            tmp_path, "artists", f"<artist><id>7</id>{element}{element}</artist>\n"
+        )
+        assert tables[table].num_rows == 2
+
+    @pytest.mark.parametrize(
+        ("record", "element"),
+        [
+            pytest.param(("<artist>", "</artist>"), "<id>7</id>", id="id"),
+            pytest.param(_ARTIST, "<name>N</name>", id="name"),
+            pytest.param(_ARTIST, "<realname>R</realname>", id="realname"),
+            pytest.param(_ARTIST, "<profile>P</profile>", id="profile"),
+            pytest.param(
+                _ARTIST, "<data_quality>Correct</data_quality>", id="data_quality"
+            ),
+            pytest.param(
+                _ARTIST,
+                "<namevariations><name>V</name></namevariations>",
+                id="namevariations",
+            ),
+            pytest.param(_ARTIST, "<namevariations/>", id="namevariations-empty"),
+            pytest.param(
+                _ARTIST, "<urls><url>https://example.com</url></urls>", id="urls"
+            ),
+        ],
+    )
+    def test_second_copy_fails(self, tmp_path, record, element):
+        assert_second_copy_fails(tmp_path, "artists", record, _RECORD, element)

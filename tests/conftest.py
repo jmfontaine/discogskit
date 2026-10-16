@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import sys
-from typing import NoReturn
+from pathlib import Path
+from typing import NoReturn, cast
 
 import pyarrow as pa
 import pytest
@@ -43,6 +45,44 @@ def empty_ipc(entity: str) -> dict[str, pa.Buffer]:
     return extract_chunk_to_ipc(
         ChunkArgs(end=0, entity=entity, file_path=__file__, start=0)
     ).tables
+
+
+def parse_records(tmp_path: Path, entity: str, xml: str) -> dict[str, pa.Table]:
+    """Parse raw ``entity`` records (no envelope) into Arrow Tables keyed by table name."""
+    f = tmp_path / f"{entity}.xml"
+    f.write_text(xml)
+    ipc_dict = extract_chunk_to_ipc(
+        ChunkArgs(end=os.path.getsize(f), entity=entity, file_path=str(f), start=0)
+    ).tables
+    return ipc_to_tables(ipc_dict, ENTITIES[entity].schemas)
+
+
+def assert_second_copy_fails(
+    tmp_path: Path,
+    entity: str,
+    record: tuple[str, str],
+    context: tuple[str, str, str],
+    element: str,
+) -> None:
+    """Check that a record holding ``element`` twice fails, naming the record's id ``7`` and the second copy's line.
+
+    ``record`` is the opening and closing XML of the record; ``context`` the opening and closing XML of the elements
+    around the copies, and the tag of the one holding them. A parser that reads one copy would drop the other (#205).
+    """
+    opening, closing, parent = context
+    xml = f"{record[0]}\n{opening}\n{element}\n{element}\n{closing}{record[1]}\n"
+    tag = cast("re.Match[str]", re.match(r"<(\w+)", element))[1]
+    f = tmp_path / "repeat.xml"
+    f.write_text(xml)
+    with pytest.raises(
+        ValueError,
+        match=rf"^Invalid <{ENTITIES[entity].root_tag}> record in .* at chunk line 1 \(chunk bytes \d+-\d+, id='7'\): "
+        + re.escape(f"second <{tag}> in <{parent}>; discogskit reads only one")
+        + " at chunk line 4$",
+    ):
+        extract_chunk_to_ipc(
+            ChunkArgs(end=os.path.getsize(f), entity=entity, file_path=str(f), start=0)
+        )
 
 
 # Root ignores directory permissions, and Windows doesn't apply POSIX modes to directories.

@@ -63,7 +63,8 @@ table and column, with its types per format: [references/schemas.md](references/
   present but empty is `""`. A list column is `NULL` without its element (no `<genres>`), an empty list for an
   empty one (`<genres/>`), and keeps an empty item as `""` (`<genre/>`). Typed values are never coerced: a
   non-numeric id, or a video `duration` or `embed` that isn't an integer or `true`/`false` (an empty one
-  included), stops the run.
+  included), stops the run. So does a second copy of an element read once, such as two `<title>` in a release:
+  nothing is dropped to keep one.
 - **Placeholders are kept, not cleaned.** Seen in real dumps, with likely meanings Discogs doesn't document: `0` in
   `releases.master_id` (no master), `0` in `masters.year` (unknown year), `0` as `artist_id` in
   `release_extraartists`, `release_track_artists` and `release_track_extraartists` (no linked entity; the

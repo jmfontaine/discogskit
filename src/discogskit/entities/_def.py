@@ -49,6 +49,16 @@ class ElementValueError(ValueError):
         self.element = element
 
 
+def second_copy(elem: etree._Element) -> ElementValueError:
+    """The error for ``elem``, a second copy of an element the parser reads one of: keeping either copy would drop the
+    other's data without a word (#205). The chunk worker adds its line."""
+    parent = elem.getparent()
+    where = "" if parent is None else f" in <{parent.tag}>"
+    return ElementValueError(
+        f"second <{elem.tag}>{where}; discogskit reads only one", elem
+    )
+
+
 @dataclass(kw_only=True)
 class EntityDef:
     """Definition for one Discogs entity type.

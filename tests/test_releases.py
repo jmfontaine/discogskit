@@ -10,7 +10,7 @@ import pytest
 from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.entities.releases import SCHEMAS
-from tests.conftest import ipc_to_tables
+from tests.conftest import assert_second_copy_fails, ipc_to_tables, parse_records
 
 
 class TestReleasesParsing:
@@ -527,3 +527,170 @@ class TestReleaseTypedValues:
     def test_is_main_release(self, tmp_path, attr, expected):
         tables = self._release(tmp_path, attr, "")
         assert tables["releases"].column("is_main_release").to_pylist() == [expected]
+
+
+_RELEASE = ("", "", "release")
+_FORMAT = ('<formats><format name="CD">', "</format></formats>", "format")
+_TRACK = ("<tracklist><track>", "</track></tracklist>", "track")
+_SUB_TRACK = (
+    "<tracklist><track><sub_tracks><track>",
+    "</track></sub_tracks></track></tracklist>",
+    "track",
+)
+_ARTIST = ("<artists><artist>", "</artist></artists>", "artist")
+_EXTRA_ARTIST = ("<extraartists><artist>", "</artist></extraartists>", "artist")
+_TRACK_ARTIST = (
+    "<tracklist><track><artists><artist>",
+    "</artist></artists></track></tracklist>",
+    "artist",
+)
+_TRACK_EXTRA_ARTIST = (
+    "<tracklist><track><extraartists><artist>",
+    "</artist></extraartists></track></tracklist>",
+    "artist",
+)
+_COMPANY = ("<companies><company>", "</company></companies>", "company")
+_VIDEO = ('<videos><video src="https://example.com">', "</video></videos>", "video")
+
+
+class TestRepeatedElements:
+    """An element a release holds one of fails when repeated; a container of repeated items appends (#205)."""
+
+    @pytest.mark.parametrize(
+        ("element", "table"),
+        [
+            ('<labels><label id="1" name="L" catno="C"/></labels>', "release_labels"),
+            ('<series><series id="1" name="S"/></series>', "release_series"),
+            ('<formats><format name="CD"/></formats>', "release_formats"),
+            (
+                '<identifiers><identifier type="Barcode" value="1"/></identifiers>',
+                "release_identifiers",
+            ),
+            ('<videos><video src="https://example.com"/></videos>', "release_videos"),
+            (
+                "<companies><company><id>1</id></company></companies>",
+                "release_companies",
+            ),
+        ],
+        ids=["labels", "series", "formats", "identifiers", "videos", "companies"],
+    )
+    def test_appending_container_repeated(self, tmp_path, element, table):
+        tables = parse_records(
+            tmp_path,
+            "releases",
+            f'<release id="7" status="Accepted">{element}{element}</release>\n',
+        )
+        assert tables[table].num_rows == 2
+
+    @pytest.mark.parametrize(
+        ("context", "element"),
+        [
+            pytest.param(_RELEASE, "<title>T</title>", id="title"),
+            pytest.param(_RELEASE, "<country>UK</country>", id="country"),
+            pytest.param(_RELEASE, "<released>2000</released>", id="released"),
+            pytest.param(_RELEASE, "<notes>N</notes>", id="notes"),
+            pytest.param(
+                _RELEASE, "<data_quality>Correct</data_quality>", id="data_quality"
+            ),
+            pytest.param(_RELEASE, "<master_id>5</master_id>", id="master_id"),
+            pytest.param(_RELEASE, "<master_id/>", id="master_id-empty"),
+            pytest.param(_RELEASE, "<genres><genre>Rock</genre></genres>", id="genres"),
+            pytest.param(_RELEASE, "<styles><style>Punk</style></styles>", id="styles"),
+            pytest.param(
+                _RELEASE, "<artists><artist><id>1</id></artist></artists>", id="artists"
+            ),
+            pytest.param(_RELEASE, "<artists/>", id="artists-empty"),
+            pytest.param(
+                _RELEASE,
+                "<extraartists><artist><id>1</id></artist></extraartists>",
+                id="extraartists",
+            ),
+            pytest.param(
+                _RELEASE,
+                "<tracklist><track><position>1</position></track></tracklist>",
+                id="tracklist",
+            ),
+            pytest.param(_RELEASE, "<tracklist/>", id="tracklist-empty"),
+            pytest.param(
+                _FORMAT,
+                "<descriptions><description>Album</description></descriptions>",
+                id="format-descriptions",
+            ),
+            pytest.param(_FORMAT, "<descriptions/>", id="format-descriptions-empty"),
+            pytest.param(_TRACK, "<position>1</position>", id="track-position"),
+            pytest.param(_TRACK, "<title>T</title>", id="track-title"),
+            pytest.param(_TRACK, "<duration>1:00</duration>", id="track-duration"),
+            pytest.param(
+                _TRACK,
+                "<artists><artist><id>1</id></artist></artists>",
+                id="track-artists",
+            ),
+            pytest.param(_TRACK, "<artists/>", id="track-artists-empty"),
+            pytest.param(
+                _TRACK,
+                "<extraartists><artist><id>1</id></artist></extraartists>",
+                id="track-extraartists",
+            ),
+            pytest.param(
+                _TRACK,
+                "<sub_tracks><track><position>1a</position></track></sub_tracks>",
+                id="track-sub_tracks",
+            ),
+            pytest.param(_TRACK, "<sub_tracks/>", id="track-sub_tracks-empty"),
+            pytest.param(
+                _SUB_TRACK, "<position>1a</position>", id="sub-track-position"
+            ),
+            pytest.param(_SUB_TRACK, "<title>T</title>", id="sub-track-title"),
+            pytest.param(
+                _SUB_TRACK, "<duration>1:00</duration>", id="sub-track-duration"
+            ),
+            pytest.param(
+                _SUB_TRACK,
+                "<artists><artist><id>1</id></artist></artists>",
+                id="sub-track-artists",
+            ),
+            pytest.param(
+                _SUB_TRACK,
+                "<extraartists><artist><id>1</id></artist></extraartists>",
+                id="sub-track-extraartists",
+            ),
+            pytest.param(_ARTIST, "<id>1</id>", id="artist-id"),
+            pytest.param(_ARTIST, "<id/>", id="artist-id-empty"),
+            pytest.param(_ARTIST, "<name>N</name>", id="artist-name"),
+            pytest.param(_ARTIST, "<anv>A</anv>", id="artist-anv"),
+            pytest.param(_ARTIST, "<join>&amp;</join>", id="artist-join"),
+            pytest.param(_EXTRA_ARTIST, "<id>1</id>", id="extraartist-id"),
+            pytest.param(_EXTRA_ARTIST, "<name>N</name>", id="extraartist-name"),
+            pytest.param(_EXTRA_ARTIST, "<anv>A</anv>", id="extraartist-anv"),
+            pytest.param(_EXTRA_ARTIST, "<role>Mix</role>", id="extraartist-role"),
+            pytest.param(_EXTRA_ARTIST, "<tracks>A1</tracks>", id="extraartist-tracks"),
+            pytest.param(_TRACK_ARTIST, "<name>N</name>", id="track-artist-name"),
+            pytest.param(
+                _TRACK_EXTRA_ARTIST, "<role>Mix</role>", id="track-extraartist-role"
+            ),
+            pytest.param(_COMPANY, "<id>1</id>", id="company-id"),
+            pytest.param(_COMPANY, "<id/>", id="company-id-empty"),
+            pytest.param(_COMPANY, "<name>N</name>", id="company-name"),
+            pytest.param(_COMPANY, "<catno>C</catno>", id="company-catno"),
+            pytest.param(
+                _COMPANY, "<entity_type>23</entity_type>", id="company-entity_type"
+            ),
+            pytest.param(
+                _COMPANY,
+                "<entity_type_name>Pressed By</entity_type_name>",
+                id="company-entity_type_name",
+            ),
+            pytest.param(_VIDEO, "<title>T</title>", id="video-title"),
+            pytest.param(
+                _VIDEO, "<description>D</description>", id="video-description"
+            ),
+        ],
+    )
+    def test_second_copy_fails(self, tmp_path, context, element):
+        assert_second_copy_fails(
+            tmp_path,
+            "releases",
+            ('<release id="7" status="Accepted">', "</release>"),
+            context,
+            element,
+        )

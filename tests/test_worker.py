@@ -148,12 +148,18 @@ _RECORDS = {
 
 
 def _injected(entity_name: str, level: str) -> str:
-    """One record with <new_tag/> as the only child of the element at ``level``, nested in its ancestors."""
+    """One record with <new_tag/> as the only child of the element at ``level``, nested in its ancestors.
+
+    An artist's or label's <id> level is the record's own <id>: a second <id> would fail the record (#205).
+    """
+    record = _RECORDS[entity_name]
+    if level == "id" and "<id>1</id>" in record:
+        return record.replace("<id>1</id>", "<id>1<new_tag/></id>").format("")
     tags = level.split("/") if level else []
     inner = "".join(f"<{tag}>" for tag in tags)
     inner += "<new_tag/>"
     inner += "".join(f"</{tag}>" for tag in reversed(tags))
-    return _RECORDS[entity_name].format(inner)
+    return record.format(inner)
 
 
 @pytest.mark.parametrize(
