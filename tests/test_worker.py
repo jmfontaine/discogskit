@@ -27,102 +27,148 @@ PLAIN_RECORDS = {
     "releases": RELEASES_XML,
 }
 
-_ARTIST = "<artist><id>2</id><name>A</name><new_tag/></artist>"
-_TRACK = "<track><position>A1</position><title>T</title>{inner}</track>"
+_ARTIST_FIELDS = ["anv", "id", "join", "name"]
+_EXTRAARTIST_FIELDS = ["anv", "id", "name", "role", "tracks"]
 
-# (entity, one record with an element no parser handles, the path --strict reports for it): one case per level where
-# the parsers report unhandled elements.
-_UNHANDLED = [
-    ("artists", "<artist><id>1</id><new_tag/></artist>", "new_tag"),
-    ("labels", "<label><id>1</id><new_tag/></label>", "new_tag"),
-    ("masters", '<master id="1"><new_tag/></master>', "new_tag"),
-    (
-        "masters",
-        f'<master id="1"><artists>{_ARTIST}</artists></master>',
-        "artists/artist/new_tag",
-    ),
-    (
-        "masters",
-        '<master id="1"><videos><video src="u"><new_tag/></video></videos></master>',
-        "videos/video/new_tag",
-    ),
-    ("releases", '<release id="1" status="Accepted"><new_tag/></release>', "new_tag"),
-    (
-        "releases",
-        f'<release id="1" status="Accepted"><artists>{_ARTIST}</artists></release>',
-        "artist/new_tag",
-    ),
-    (
-        "releases",
-        f'<release id="1" status="Accepted"><extraartists>{_ARTIST}</extraartists></release>',
-        "extraartist/new_tag",
-    ),
-    (
-        "releases",
-        '<release id="1" status="Accepted"><videos><video src="u"><new_tag/></video></videos></release>',
-        "videos/video/new_tag",
-    ),
-    (
-        "releases",
-        '<release id="1" status="Accepted"><companies><company><id>3</id><new_tag/></company></companies></release>',
-        "companies/company/new_tag",
-    ),
-    (
-        "releases",
-        '<release id="1" status="Accepted"><tracklist>'
-        + _TRACK.format(inner="<new_tag/>")
-        + "</tracklist></release>",
-        "track/new_tag",
-    ),
-    (
-        "releases",
-        '<release id="1" status="Accepted"><tracklist>'
-        + _TRACK.format(inner=f"<artists>{_ARTIST}</artists>")
-        + "</tracklist></release>",
-        "artist/new_tag",
-    ),
-    (
-        "releases",
-        '<release id="1" status="Accepted"><tracklist>'
-        + _TRACK.format(inner=f"<extraartists>{_ARTIST}</extraartists>")
-        + "</tracklist></release>",
-        "extraartist/new_tag",
-    ),
-    (
-        "releases",
-        '<release id="1" status="Accepted"><tracklist>'
-        + _TRACK.format(
-            inner="<sub_tracks>" + _TRACK.format(inner="<new_tag/>") + "</sub_tracks>"
-        )
-        + "</tracklist></release>",
-        "track/new_tag",
-    ),
-]
+
+def _track_levels(track: str, *, sub_tracks: bool) -> list[str]:
+    levels = [track]
+    levels += [f"{track}/{tag}" for tag in ("duration", "position", "title")]
+    levels += [f"{track}/artists", f"{track}/artists/artist"]
+    levels += [f"{track}/artists/artist/{tag}" for tag in _ARTIST_FIELDS]
+    levels += [f"{track}/extraartists", f"{track}/extraartists/artist"]
+    levels += [f"{track}/extraartists/artist/{tag}" for tag in _EXTRAARTIST_FIELDS]
+    if sub_tracks:
+        levels += [f"{track}/sub_tracks"]
+        levels += _track_levels(f"{track}/sub_tracks/track", sub_tracks=False)
+    return levels
+
+
+# Every element each parser walks, as its path relative to the record ("" for the record itself): an element injected
+# into any of them is one no parser handles (#190).
+_LEVELS = {
+    "artists": [
+        "",
+        "aliases",
+        "aliases/name",
+        "data_quality",
+        "groups",
+        "groups/name",
+        "id",
+        "members",
+        "members/name",
+        "name",
+        "namevariations",
+        "namevariations/name",
+        "profile",
+        "realname",
+        "urls",
+        "urls/url",
+    ],
+    "labels": [
+        "",
+        "contactinfo",
+        "data_quality",
+        "id",
+        "name",
+        "parentLabel",
+        "profile",
+        "sublabels",
+        "sublabels/label",
+        "urls",
+        "urls/url",
+    ],
+    "masters": [
+        "",
+        "artists",
+        "artists/artist",
+        *[f"artists/artist/{tag}" for tag in _ARTIST_FIELDS],
+        "data_quality",
+        "genres",
+        "genres/genre",
+        "main_release",
+        "notes",
+        "styles",
+        "styles/style",
+        "title",
+        "videos",
+        "videos/video",
+        "videos/video/description",
+        "videos/video/title",
+        "year",
+    ],
+    "releases": [
+        "",
+        "artists",
+        "artists/artist",
+        *[f"artists/artist/{tag}" for tag in _ARTIST_FIELDS],
+        "companies",
+        "companies/company",
+        *[
+            f"companies/company/{tag}"
+            for tag in ("catno", "entity_type", "entity_type_name", "id", "name")
+        ],
+        "country",
+        "data_quality",
+        "extraartists",
+        "extraartists/artist",
+        *[f"extraartists/artist/{tag}" for tag in _EXTRAARTIST_FIELDS],
+        "formats",
+        "formats/format",
+        "formats/format/descriptions",
+        "formats/format/descriptions/description",
+        "genres",
+        "genres/genre",
+        "identifiers",
+        "identifiers/identifier",
+        "labels",
+        "labels/label",
+        "master_id",
+        "notes",
+        "released",
+        "series",
+        "series/series",
+        "styles",
+        "styles/style",
+        "title",
+        "tracklist",
+        *_track_levels("tracklist/track", sub_tracks=True),
+        "videos",
+        "videos/video",
+        "videos/video/description",
+        "videos/video/title",
+    ],
+}
+_RECORDS = {
+    "artists": "<artist><id>1</id>{}</artist>",
+    "labels": "<label><id>1</id>{}</label>",
+    "masters": '<master id="1">{}</master>',
+    "releases": '<release id="1" status="Accepted">{}</release>',
+}
+
+
+def _injected(entity_name: str, level: str) -> str:
+    """One record with <new_tag/> as the only child of the element at ``level``, nested in its ancestors."""
+    tags = level.split("/") if level else []
+    inner = "".join(f"<{tag}>" for tag in tags)
+    inner += "<new_tag/>"
+    inner += "".join(f"</{tag}>" for tag in reversed(tags))
+    return _RECORDS[entity_name].format(inner)
 
 
 @pytest.mark.parametrize(
-    ("entity_name", "record", "path"),
-    _UNHANDLED,
+    ("entity_name", "level"),
+    [(entity, level) for entity, levels in _LEVELS.items() for level in levels],
     ids=[
-        "artists",
-        "labels",
-        "masters",
-        "masters-artist",
-        "masters-video",
-        "releases",
-        "releases-artist",
-        "releases-extraartist",
-        "releases-video",
-        "releases-company",
-        "releases-track",
-        "releases-track-artist",
-        "releases-track-extraartist",
-        "releases-sub-track",
+        f"{entity}-{level or 'record'}"
+        for entity, levels in _LEVELS.items()
+        for level in levels
     ],
 )
-def test_strict_reports_unhandled_element_path(tmp_path, entity_name, record, path):
+def test_strict_reports_unhandled_element_path(tmp_path, entity_name, level):
+    """--strict reports an element no parser handles at any level, by its path relative to the record."""
     f = tmp_path / "chunk.xml"
-    f.write_text(record)
+    f.write_text(_injected(entity_name, level))
     args = ChunkArgs(
         end=os.path.getsize(f),
         entity=entity_name,
@@ -131,7 +177,25 @@ def test_strict_reports_unhandled_element_path(tmp_path, entity_name, record, pa
         strict=True,
     )
 
-    assert extract_chunk_to_ipc(args).unknown == [path]
+    assert extract_chunk_to_ipc(args).unknown == [
+        f"{level}/new_tag" if level else "new_tag"
+    ]
+
+
+@pytest.mark.parametrize("entity_name", sorted(PLAIN_RECORDS))
+def test_strict_reports_nothing_on_known_xml(tmp_path, entity_name):
+    """Every element of the fixtures is one the parsers handle, so --strict reports none of them."""
+    f = tmp_path / "chunk.xml"
+    f.write_text(PLAIN_RECORDS[entity_name])
+    args = ChunkArgs(
+        end=os.path.getsize(f),
+        entity=entity_name,
+        file_path=str(f),
+        start=0,
+        strict=True,
+    )
+
+    assert extract_chunk_to_ipc(args).unknown == []
 
 
 @pytest.mark.parametrize("entity_name", sorted(PLAIN_RECORDS))

@@ -108,24 +108,6 @@ class TestArtistsParsing:
                 )
             )
 
-    @pytest.mark.filterwarnings("error")
-    def test_strict_reports_nothing_on_known_xml(self, artists_xml_file):
-        """Strict mode reports nothing when all XML elements are handled."""
-        size = os.path.getsize(artists_xml_file)
-        result = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=size,
-                entity="artists",
-                file_path=str(artists_xml_file),
-                start=0,
-                strict=True,
-            )
-        )
-        tables = ipc_to_tables(result.tables, SCHEMAS)
-
-        assert tables["artists"].num_rows == 2
-        assert result.unknown == []
-
     def test_strict_ignores_comments_and_pis(self, tmp_path):
         """Comments and processing instructions inside a record aren't elements: strict mode reports only the unknown
         element, and the text around a comment is kept whole."""

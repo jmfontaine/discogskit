@@ -8,7 +8,14 @@ from __future__ import annotations
 import pyarrow as pa
 from lxml import etree
 
-from discogskit.entities._def import Cols, EntityDef
+from discogskit.entities._def import (
+    Cols,
+    EntityDef,
+    check_leaf,
+    child_elements,
+    leaf_text,
+    leaf_texts,
+)
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Arrow schemas (the first table is the root table)
@@ -62,30 +69,34 @@ def append_record(
     for child in elem:
         tag = child.tag
         if tag == "id":
-            pass  # already extracted via findtext above
+            # Already extracted via findtext above.
+            if unknown is not None:
+                check_leaf(child, "", unknown)
         elif tag == "contactinfo":
-            contact_info = child.text or ""
+            contact_info = leaf_text(child, "", unknown)
         elif tag == "data_quality":
-            data_quality = child.text or ""
+            data_quality = leaf_text(child, "", unknown)
         elif tag == "name":
-            name = child.text or ""
+            name = leaf_text(child, "", unknown)
         elif tag == "parentLabel":
             pl_id_str = child.get("id")
             parent_label_id = int(pl_id_str) if pl_id_str else None
-            parent_label_name = child.text or ""
+            parent_label_name = leaf_text(child, "", unknown)
         elif tag == "profile":
-            profile = child.text or ""
+            profile = leaf_text(child, "", unknown)
         elif tag == "sublabels":
-            for sub in child.findall("label"):
+            for sub in child_elements(child, "label", "", unknown):
                 sub_id_str = sub.get("id")
                 sub_id = int(sub_id_str) if sub_id_str else None
                 sub_name = sub.text or ""
+                if unknown is not None:
+                    check_leaf(sub, "sublabels/", unknown)
                 row = cols["label_sublabels"]
                 row["label_id"].append(label_id)
                 row["sublabel_id"].append(sub_id)
                 row["name"].append(sub_name)
         elif tag == "urls":
-            urls = [u.text or "" for u in child.findall("url")]
+            urls = leaf_texts(child, "url", "", unknown)
         elif unknown is not None:
             unknown.add(tag)
 

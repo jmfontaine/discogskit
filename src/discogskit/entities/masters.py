@@ -8,7 +8,15 @@ from __future__ import annotations
 import pyarrow as pa
 from lxml import etree
 
-from discogskit.entities._def import Cols, EntityDef, parse_bool
+from discogskit.entities._def import (
+    Cols,
+    EntityDef,
+    check_leaf,
+    child_elements,
+    leaf_text,
+    leaf_texts,
+    parse_bool,
+)
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Arrow schemas (the first table is the root table)
@@ -75,9 +83,7 @@ def append_record(
     for child in elem:
         tag = child.tag
         if tag == "artists":
-            for artist_elem in child:
-                if artist_elem.tag != "artist":
-                    continue
+            for artist_elem in child_elements(child, "artist", "", unknown):
                 artist_id = None
                 anv = None
                 join_text = None
@@ -92,8 +98,13 @@ def append_record(
                         join_text = ac.text or ""
                     elif at == "name":
                         aname = ac.text or ""
-                    elif unknown is not None:
-                        unknown.add(f"artists/artist/{at}")
+                    else:
+                        if unknown is not None:
+                            unknown.add(f"artists/artist/{at}")
+                        continue
+                    # Every child handled above is text-only.
+                    if unknown is not None:
+                        check_leaf(ac, "artists/artist/", unknown)
                 row = cols["master_artists"]
                 row["master_id"].append(master_id)
                 row["artist_id"].append(artist_id)
@@ -101,22 +112,21 @@ def append_record(
                 row["join"].append(join_text)
                 row["name"].append(aname)
         elif tag == "data_quality":
-            data_quality = child.text or ""
+            data_quality = leaf_text(child, "", unknown)
         elif tag == "genres":
-            genres = [g.text or "" for g in child.findall("genre")]
+            genres = leaf_texts(child, "genre", "", unknown)
         elif tag == "main_release":
-            if child.text:
-                main_release = int(child.text)
+            main_release_text = leaf_text(child, "", unknown)
+            if main_release_text:
+                main_release = int(main_release_text)
         elif tag == "notes":
-            notes = child.text or ""
+            notes = leaf_text(child, "", unknown)
         elif tag == "styles":
-            styles = [s.text or "" for s in child.findall("style")]
+            styles = leaf_texts(child, "style", "", unknown)
         elif tag == "title":
-            title = child.text or ""
+            title = leaf_text(child, "", unknown)
         elif tag == "videos":
-            for video in child:
-                if video.tag != "video":
-                    continue
+            for video in child_elements(child, "video", "", unknown):
                 src = video.get("src")
                 dur_str = video.get("duration")
                 duration = None if dur_str is None else int(dur_str)
@@ -128,8 +138,13 @@ def append_record(
                         vdesc = vc.text or ""
                     elif vc.tag == "title":
                         vtitle = vc.text or ""
-                    elif unknown is not None:
-                        unknown.add(f"videos/video/{vc.tag}")
+                    else:
+                        if unknown is not None:
+                            unknown.add(f"videos/video/{vc.tag}")
+                        continue
+                    # Every child handled above is text-only.
+                    if unknown is not None:
+                        check_leaf(vc, "videos/video/", unknown)
                 row = cols["master_videos"]
                 row["master_id"].append(master_id)
                 row["description"].append(vdesc)
@@ -138,8 +153,9 @@ def append_record(
                 row["src"].append(src)
                 row["title"].append(vtitle)
         elif tag == "year":
-            if child.text:
-                year = int(child.text)
+            year_text = leaf_text(child, "", unknown)
+            if year_text:
+                year = int(year_text)
         elif unknown is not None:
             unknown.add(tag)
 
