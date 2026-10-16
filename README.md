@@ -338,8 +338,9 @@ server that doesn't answer the cancel request at all can still hold the load unt
 
 `--dsn` accepts `postgresql://` or `postgres://` (both work identically) for PostgreSQL. For SQLite, it accepts
 `sqlite:///<path>` (`sqlite:///discogs.db` is relative to the current directory, `sqlite:////data/discogs.db` is
-absolute) or a plain path ending in `.db`, `.sqlite`, or `.sqlite3`. Other `sqlite:` forms and paths containing `?`
-(SQLite URI parameters such as `?mode=ro` aren't supported) are rejected before any file is created.
+absolute) or a plain path ending in `.db`, `.sqlite`, or `.sqlite3`. Other `sqlite:` forms, paths containing `?`
+(SQLite URI parameters such as `?mode=ro` aren't supported) and in-memory databases (`sqlite:///:memory:`,
+`file::memory:`), which would discard the load when the run ends, are rejected before any file is created.
 
 <details>
 <summary>Full command help</summary>
