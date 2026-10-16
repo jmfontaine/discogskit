@@ -19,6 +19,9 @@ does for rapidgzip's exceptions.  The parent kills the child on every way
 out, Ctrl+C included.
 If the parent dies, the child stops before it starts writing or after its
 next chunk, so not while rapidgzip hangs.
+The child's stderr, where rapidgzip's native code prints, goes to a temporary
+file: the parent adds its text to the ``DecompressError`` message, and prints
+it on the current console in every other case.
 
 Only an XML discogskit wrote is reused or deleted.  Before that rename,
 decompression writes a ``<name>.xml.discogskit`` marker recording the source
@@ -52,18 +55,22 @@ import multiprocessing
 import os
 import signal
 import struct
+import tempfile
 import threading
 import time
 import zlib
 from collections.abc import Callable
+from contextlib import suppress
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from pathlib import Path
+from typing import BinaryIO
 
 import rapidgzip
 from filelock import ReadWriteLock, Timeout
+from rich.text import Text
 
-from discogskit._console import status
+from discogskit._console import print_text, status
 
 # A blocking acquire waits inside SQLite, where Ctrl+C isn't handled until it
 # returns, so wait in slices this long.
@@ -84,14 +91,24 @@ _STALL_TIMEOUT = 60.0
 # forever for the lock this run holds.
 _START_TIMEOUT = 60.0
 
+# How much of what the decompression child printed the parent reads, from the end: what it prints after a run that
+# didn't fail with a DecompressError, and what it folds into a DecompressError's message, cut to
+# _CHILD_OUTPUT_CHARS characters.  A flood of output must not cost memory or time.
+_CHILD_OUTPUT_BYTES = 16 * 1024
+_CHILD_OUTPUT_CHARS = 2000
+
 
 class DecompressError(Exception):
-    """Raised when the .gz can't be decompressed (truncated, corrupt, not gzip)."""
+    """Raised when the .gz can't be decompressed (truncated, corrupt, not gzip).
 
-    def __init__(self, path: Path) -> None:
-        super().__init__(
+    ``detail``, when set, is what the decompressor printed before failing.
+    """
+
+    def __init__(self, path: Path, detail: str = "") -> None:
+        message = (
             f"failed to decompress {path.name} (truncated, corrupt, or not a gzip file)"
         )
+        super().__init__(f"{message}: {detail}" if detail else message)
 
 
 class ForeignXmlError(Exception):
@@ -313,12 +330,75 @@ def _decompress(
         marker_path.unlink(missing_ok=True)
         raise
     elapsed = time.perf_counter() - t0
-    size_mb = xml_path.stat().st_size / 1024 / 1024
-    status("Decompress", f"{size_mb:,.1f} MB", f"[{elapsed:.2f}s]")
+    size_mib = xml_path.stat().st_size / 2**20
+    status("Decompress", f"{size_mib:,.1f} MiB", f"[{elapsed:.2f}s]")
 
 
 def _run_decompress_child(gz_path: Path, partial_path: Path, workers: int) -> None:
-    """Run ``_decompress_child`` in a new process; raise what it reports.
+    """Run ``_decompress_child`` in a new process, its stderr captured; raise what it reports.
+
+    A ``DecompressError`` carries what the child printed; otherwise it's printed on the current console.
+    """
+    fd, stderr_path = tempfile.mkstemp(prefix="discogskit-decompress-", suffix=".log")
+    try:
+        with open(fd, "rb") as log:
+            # mkstemp's mode goes through the umask; chmod's doesn't, and the child opens the file again to write it.
+            os.chmod(stderr_path, 0o600)
+            try:
+                _supervise_decompress_child(gz_path, partial_path, workers, stderr_path)
+            except DecompressError as exc:
+                output, size = _child_output(log)
+                # On one line, and only its end: the message is a line of output.
+                detail = " ".join(output.split())
+                if size > _CHILD_OUTPUT_BYTES or len(detail) > _CHILD_OUTPUT_CHARS:
+                    # Even if the end is blank: what came before it is cut.
+                    detail = "…" + detail[-_CHILD_OUTPUT_CHARS:]
+                if not detail:
+                    raise
+                raise DecompressError(gz_path, detail) from exc.__cause__
+            except BaseException:
+                _pass_on_child_output(log)
+                raise
+            _pass_on_child_output(log)
+    finally:
+        # The child removes it once it has it open, unless it never got that far or the system can't remove an
+        # open file (Windows).
+        with suppress(OSError):
+            os.remove(stderr_path)
+
+
+def _child_output(log: BinaryIO) -> tuple[str, int]:
+    """The end of what the decompression child printed, at most ``_CHILD_OUTPUT_BYTES`` of it, and the size in
+    bytes of all of it; ``("", 0)`` if ``log`` can't be read.
+    """
+    try:
+        size = os.fstat(log.fileno()).st_size
+        log.seek(max(0, size - _CHILD_OUTPUT_BYTES))
+        return log.read(_CHILD_OUTPUT_BYTES).decode(errors="replace"), size
+    except OSError:
+        return "", 0
+
+
+def _pass_on_child_output(log: BinaryIO) -> None:
+    """Print the end of what the decompression child printed, if anything, literally on the current console."""
+    output, size = _child_output(log)
+    if size > _CHILD_OUTPUT_BYTES:
+        # Even if the end is blank: what came before it is cut.
+        print_text(
+            Text(
+                f"The decompressor printed {size:,} bytes; "
+                f"only the last {_CHILD_OUTPUT_BYTES // 1024} KiB follow."
+            )
+        )
+    output = output.rstrip()
+    if output:
+        print_text(Text(output))
+
+
+def _supervise_decompress_child(
+    gz_path: Path, partial_path: Path, workers: int, stderr_path: str
+) -> None:
+    """Run ``_decompress_child`` in a new process, its stderr going to ``stderr_path``; raise what it reports.
 
     On some truncated input, rapidgzip aborts the process or hangs, in native
     code Python can't catch or interrupt.  In a child, an abort is the child
@@ -331,7 +411,7 @@ def _run_decompress_child(gz_path: Path, partial_path: Path, workers: int) -> No
     ctx = multiprocessing.get_context("spawn")
     receiver, sender = ctx.Pipe(duplex=False)
     child = ctx.Process(
-        args=(gz_path, partial_path, sender, workers),
+        args=(gz_path, partial_path, sender, workers, stderr_path),
         name="discogskit-decompress",
         target=_decompress_child,
     )
@@ -433,16 +513,26 @@ def _decompress_child(
     partial_path: Path,
     result: Connection,
     workers: int,
+    stderr_path: str,
 ) -> None:
     """Decompress ``gz_path`` into ``partial_path``, in the process
-    ``_run_decompress_child`` starts.
+    ``_supervise_decompress_child`` starts.
 
     Sends on ``result``, for the parent's watchdog, the number of bytes
     written so far (an ``int``) once running and after each chunk; then
     ``None`` once ``partial_path`` holds the complete output, or the exception
     that stopped it.  Stops before writing anything or after a chunk, sending
-    nothing more, if the parent has died.
+    nothing more, if the parent has died.  Its stderr goes to ``stderr_path``.
     """
+    # rapidgzip's native code prints to file descriptor 2, which Python's
+    # sys.stderr also writes to: the parent reads it from the file.
+    log = os.open(stderr_path, os.O_WRONLY | os.O_APPEND)
+    os.dup2(log, 2)
+    os.close(log)
+    # The parent reads it through the handle it keeps open: removed now, the
+    # file isn't left behind by a parent killed before its own cleanup.
+    with suppress(OSError):
+        os.remove(stderr_path)
     # The parent handles Ctrl+C, the terminal's for both processes, and kills
     # this one; here it would only print a traceback.
     signal.signal(signal.SIGINT, signal.SIG_IGN)

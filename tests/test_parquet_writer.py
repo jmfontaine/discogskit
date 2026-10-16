@@ -194,6 +194,26 @@ class TestParquetWriter:
         assert not (tmp_path / "parent").exists()
 
     @needs_permissions
+    @pytest.mark.parametrize("existing", [False, True], ids=["fresh", "existing"])
+    def test_unwritable_output_dir_is_named(self, tmp_path, entity, existing):
+        """Like the check on an existing entity directory, the error names the output directory, not a temp path."""
+        locked = tmp_path / "locked"
+        out = locked / "out" if not existing else locked
+        locked.mkdir()
+        locked.chmod(0o500)
+        writer = ParquetWriter(str(out))
+        try:
+            with pytest.raises(OSError) as excinfo:
+                writer.setup(entity)
+        finally:
+            writer.close()
+            locked.chmod(0o700)
+        assert str(excinfo.value) == (
+            f"Can't write output files into {out}: Permission denied"
+        )
+        assert list(locked.iterdir()) == []
+
+    @needs_permissions
     def test_unwritable_entity_dir_fails_in_setup(self, tmp_path, entity):
         """commit() couldn't move files into it, so setup() fails, before any parsing."""
         out = tmp_path / "out"

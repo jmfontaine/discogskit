@@ -392,8 +392,38 @@ class TestSQLiteWriter:
         finally:
             out.chmod(0o700)
 
+    def test_directory_in_place_of_the_file(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db_path.mkdir()
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            SQLiteWriter(str(db_path))
+        assert str(excinfo.value) == (
+            f"Can't open the SQLite database {db_path}: unable to open database file"
+        )
+
+    @needs_permissions
+    def test_read_only_directory_names_the_database(self, tmp_path, entity, ipc_dict):
+        """WAL mode needs new files beside the database, which a read-only directory refuses."""
+        out = tmp_path / "out"
+        out.mkdir()
+        db_path = out / "test.db"
+        self._load(str(db_path), entity, ipc_dict)
+        out.chmod(0o500)
+        try:
+            writer = SQLiteWriter(str(db_path), overwrite=True)
+            try:
+                with pytest.raises(sqlite3.Error) as excinfo:
+                    writer.setup(entity)
+            finally:
+                writer.close()
+        finally:
+            out.chmod(0o700)
+        assert str(excinfo.value).startswith(
+            f"Can't write to the SQLite database {db_path}: "
+        )
+
     def test_failing_drop_keeps_every_table(self, tmp_path, entity, ipc_dict):
-        """With --fk, a user table referencing artists blocks the drop; setup() rolls back every drop."""
+        """With --fk, a user table referencing artists blocks the drop; setup() rolls back every drop and names it."""
         db_path = str(tmp_path / "test.db")
         self._load(db_path, entity, ipc_dict, fk=True)
         conn = sqlite3.connect(db_path)
@@ -401,19 +431,25 @@ class TestSQLiteWriter:
             "CREATE TABLE my_notes (artist_id INTEGER REFERENCES artists(id), note TEXT)"
         )
         conn.execute("INSERT INTO my_notes VALUES (1, 'keep me')")
+        conn.execute("CREATE TABLE my_tags (tag TEXT PRIMARY KEY)")
         conn.commit()
         before = {
             t: conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
-            for t in [*entity.table_order, "my_notes"]
+            for t in [*entity.table_order, "my_notes", "my_tags"]
         }
         conn.close()
 
         writer = SQLiteWriter(db_path, fk=True, overwrite=True)
         try:
-            with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            with pytest.raises(sqlite3.IntegrityError) as excinfo:
                 writer.setup(entity)
         finally:
             writer.close()
+
+        assert str(excinfo.value) == (
+            f"Can't replace the artists tables in {db_path}: my_notes references artists, and --fk enforces "
+            "foreign keys (FOREIGN KEY constraint failed). Every table is unchanged."
+        )
 
         conn = sqlite3.connect(db_path)
         after = {

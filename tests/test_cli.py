@@ -1111,6 +1111,48 @@ class TestFailedRunLeavesNoNewOutput:
         assert (db.read_bytes() if db.exists() else None) == before
 
 
+class TestSizesInMiB:
+    def test_status_lines_report_mib(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Sizes are computed in units of 1,048,576 bytes, so they're labeled MiB (#195)."""
+        _widen_console(monkeypatch)
+        records = "".join(
+            f"<artist><id>{i}</id><name>Artist number {i}</name></artist>\n"
+            for i in range(1, 50001)
+        )
+        xml = f"<artists>\n{records}</artists>".encode()
+        gz = tmp_path / _ENTITY_FILE
+        gz.write_bytes(gzip.compress(xml))
+        out = tmp_path / "out"
+        result = runner.invoke(
+            app,
+            [
+                "convert",
+                str(gz),
+                "-f",
+                "jsonl",
+                "--output",
+                str(out),
+                "--no-progress",
+                "--chunk-mb",
+                "1",
+            ],
+        )
+        output = _unstyle(result.output)
+        assert result.exit_code == 0, output
+        output_bytes = sum(p.stat().st_size for p in (out / "artists").iterdir())
+        lines = [line.strip() for line in output.splitlines()]
+        assert "Chunk size     1 MiB" in lines
+        # A second "Decompress" line reports the time spent decompressing, among the timings.
+        expected = f"Decompress     {len(xml) / 2**20:,.1f} MiB ["
+        assert any(line.startswith(expected) for line in lines), output
+        assert (
+            f"Output         {len(ENTITIES['artists'].table_order)} files, "
+            f"{output_bytes / 2**20:,.1f} MiB total"
+        ) in lines
+
+
 class TestUnicodeConvert:
     def test_gzip_jsonl_round_trips_unicode_text(self, tmp_path: Path) -> None:
         """Non-ASCII text, entity references and CDATA reach gzip-compressed JSONL intact."""
