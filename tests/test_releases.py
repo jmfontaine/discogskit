@@ -45,6 +45,36 @@ class TestReleasesParsing:
         assert a.column("artist_id").to_pylist() == [50]
         assert a.column("name").to_pylist() == ["Release Artist"]
 
+    def test_empty_tracks_in_track_extraartist_accepted(self, tmp_path):
+        """An empty <tracks> in a track's or sub-track's extra artist holds nothing to lose, so it's accepted (#202)."""
+        xml = (
+            '<release id="7" status="Accepted">\n'
+            "  <tracklist>\n"
+            "    <track><position>1</position>\n"
+            "      <extraartists><artist><id>8</id><tracks/></artist></extraartists>\n"
+            "      <sub_tracks><track><position>1a</position>\n"
+            "        <extraartists><artist><id>9</id><tracks></tracks></artist></extraartists>\n"
+            "      </track></sub_tracks>\n"
+            "    </track>\n"
+            "  </tracklist>\n"
+            "</release>\n"
+        )
+        f = tmp_path / "empty_track_tracks.xml"
+        f.write_text(xml)
+
+        ipc_dict = extract_chunk_to_ipc(
+            ChunkArgs(
+                end=os.path.getsize(f),
+                entity="releases",
+                file_path=str(f),
+                start=0,
+                strict=True,
+            )
+        ).tables
+        te = ipc_to_tables(ipc_dict, SCHEMAS)["release_track_extraartists"]
+        assert te.column("track_idx").to_pylist() == [0, 1]
+        assert te.column("artist_id").to_pylist() == [8, 9]
+
     def test_extraartists(self, releases_xml_file):
         tables = self._parse(releases_xml_file)
         ea = tables["release_extraartists"]
@@ -185,6 +215,54 @@ class TestReleasesParsing:
         assert co.num_rows == 1
         assert co.column("company_id").to_pylist() == [60]
         assert co.column("entity_type_name").to_pylist() == ["Pressed By"]
+
+    @pytest.mark.parametrize(
+        ("track", "message"),
+        [
+            (
+                (
+                    "<track><position>1</position>\n"
+                    "      <extraartists><artist><id>8</id><role>Mix</role>\n"
+                    "        <tracks>A1</tracks></artist></extraartists>\n"
+                    "    </track>"
+                ),
+                "<tracks> 'A1' in an extra artist of track '1'",
+            ),
+            (
+                (
+                    "<track><position>1</position><sub_tracks><track><position>1a</position>\n"
+                    "      <extraartists><artist><id>8</id><role>Mix</role>\n"
+                    "        <tracks>A1</tracks></artist></extraartists>\n"
+                    "    </track></sub_tracks></track>"
+                ),
+                "<tracks> 'A1' in an extra artist of sub-track '1a' of track '1'",
+            ),
+        ],
+        ids=["track", "sub-track"],
+    )
+    def test_tracks_in_track_extraartist_fail(self, tmp_path, track, message):
+        """A non-empty <tracks> in a track's or sub-track's extra artist fails: no column stores it (#202)."""
+        xml = (
+            '<release id="7" status="Accepted">\n'
+            "  <tracklist>\n"
+            f"    {track}\n"
+            "  </tracklist>\n"
+            "</release>\n"
+        )
+        f = tmp_path / "track_tracks.xml"
+        f.write_text(xml)
+
+        with pytest.raises(
+            ValueError,
+            match=r"^Invalid <release> record in .* at chunk line 1 \(chunk bytes \d+-\d+, id='7'\): "
+            + re.escape(message)
+            + "; only release-level extra artists have a tracks column at chunk line 5$",
+        ):
+            extract_chunk_to_ipc(
+                ChunkArgs(
+                    end=os.path.getsize(f), entity="releases", file_path=str(f), start=0
+                )
+            )
 
     def test_tracks_with_subtracks(self, releases_xml_file):
         tables = self._parse(releases_xml_file)
