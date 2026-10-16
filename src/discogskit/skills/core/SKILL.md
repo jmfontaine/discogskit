@@ -39,9 +39,9 @@ when a query crosses entities.
 - `convert` writes one file per table: `<output>/<entity>/<table>.parquet`, or `.jsonl` (`.jsonl.gz`,
   `.jsonl.bz2` with `--compression`). Parquet defaults to `zstd` at pyarrow's level 1, not zstd's own 3 (a file
   records its codec, not its level); on releases, `--compression-level 3` made the files 9% smaller and `9` 14%
-  smaller, for little or no extra time. JSONL defaults to no compression. Parquet `gzip` is slow: one thread
-  compresses every row group, and releases took more than twice as long as with `zstd`. Files appear only once
-  every table of the entity is complete.
+  smaller, and single runs didn't show what that costs in time. JSONL defaults to no compression. Parquet `gzip` is
+  slow: one thread compresses every row group, and releases took more than twice as long as with `zstd`. Files
+  appear only once every table of the entity is complete.
 - `load --dsn postgresql://user@host/db` (or the `DATABASE_URL` environment variable; the default is
   `postgresql://localhost/discogskit`) creates the tables in the current schema, or in `--pg-schema`. PostgreSQL
   14+.
@@ -69,9 +69,9 @@ table and column, with its types per format: [references/schemas.md](references/
   `release_extraartists`, `release_track_artists` and `release_track_extraartists` (no linked entity; the
   2026-10-01 dump has no `0` in `release_artists.artist_id` or `release_companies.company_id`, whose missing ids
   are `NULL`). Filter them where they matter, e.g. `WHERE master_id <> 0`.
-- **Row order isn't guaranteed.** Rows aren't in id order, and two runs on the same dump can write them in a
-  different order (seen in the releases Parquet files). Use `ORDER BY` wherever order matters, and always before
-  `LIMIT`.
+- **Row order isn't guaranteed** in any output: use `ORDER BY` wherever order matters, and always before `LIMIT`.
+  Releases Parquet row groups come out in the order the workers finish their chunks, not in id order, and differed
+  between two runs.
 - **Dates are text.** `releases.released` is the dump's string, such as `1994-03-08`, `1999-03-00` (likely an
   unknown day) or `2000`; don't assume it is a full date.
 - **List columns** (`genres`, `styles`, `namevariations`, `urls`, `descriptions`) are Arrow lists in Parquet,

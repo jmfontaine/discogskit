@@ -119,11 +119,11 @@ without an id has `NULL` there.
 
 Filter them in your queries where they matter, e.g. `WHERE master_id <> 0`.
 
-Row order isn't guaranteed. discogskit writes each chunk of records as soon as a parse worker finishes it, so a
-table's rows aren't in id order, and two runs on the same dump can write them in a different order: two conversions
-of the 2026-10-01 releases dump to Parquet wrote the same 234 row groups per file in a different order (10 positions
-differed). The artists, labels and masters files came out byte-identical, and so did two SQLite loads of all four
-dumps, but nothing guarantees it. Use `ORDER BY` wherever order matters, and always before `LIMIT`.
+No output guarantees a row order: use `ORDER BY` wherever order matters, and always before `LIMIT`. discogskit
+writes each chunk of records as soon as a parse worker finishes it, so chunks land in the order the workers finish
+them. In two conversions of the 2026-10-01 releases dump to Parquet, each file's 234 row groups came out in a
+different order (10 positions differed), and the first run's weren't in id order. The artists, labels and masters
+outputs weren't checked for id order.
 
 A value discogskit can't store, such as a non-numeric id or one too large for its column, stops the run, and so do a
 record with a missing or empty id and a release sub-track with `<sub_tracks>` of its own (discogskit reads one level
@@ -210,9 +210,10 @@ parsing, the whole run slows with them: `gzip` took more than twice as long as `
 files; `gzip` makes larger files than `brotli`, and more slowly.
 
 Parquet `zstd` defaults to pyarrow's level 1, not zstd's own default of 3, and a Parquet file records its codec but
-not its level. Higher levels cost little on releases: in another series of single runs on the same machine,
-`--compression-level 3` wrote 8,572 MB (−9%) in 807 s and `--compression-level 9` 8,087 MB (−14%) in 856 s, against
-9,434 MB in 756 s and 859 s for two runs at level 1.
+not its level. In another series of single runs on the same machine, `--compression-level 3` wrote 8,572 MiB (−9%)
+and `--compression-level 9` 8,087 MiB (−14%), against 9,434 MiB at level 1. Leaving decompression out, those two
+runs took 807 s and 855 s, and three runs at level 1 took 689 s, 840 s (the table above) and 859 s (with `--strict`):
+with one run per level and that much spread between runs, what the higher levels cost in time isn't measured.
 
 <details>
 <summary>Full command help</summary>

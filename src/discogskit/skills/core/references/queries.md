@@ -3,9 +3,9 @@
 The ids below are examples: look ids up first (an artist by `name`, a release by `title`), never guess them. Table
 and column details: [schemas.md](schemas.md).
 
-Without `ORDER BY`, rows come back in no guaranteed order: discogskit writes each chunk of records as soon as a
-worker has parsed it, so rows aren't in id order, and two conversions of the same releases dump to Parquet stored the
-same rows in a different order. Add `ORDER BY` wherever order matters, and always before `LIMIT`.
+Without `ORDER BY`, rows come back in no guaranteed order, in any output: discogskit writes each chunk of records as
+soon as a worker has parsed it, and two conversions of the same releases dump to Parquet stored their row groups in a
+different order, not in id order. Add `ORDER BY` wherever order matters, and always before `LIMIT`.
 
 `load` indexes each root table's `id` and each child table's link column (`release_id`, `artist_id`, ...) only.
 A lookup by any other column, such as `release_labels.label_id` or `releases.master_id`, scans the table: for
@@ -184,7 +184,8 @@ Polars reads them too:
 ## JSONL
 
 One JSON object per line, one line per row, with the table's columns as keys; list columns are arrays. `jq` reads the
-lines in file order, which isn't id order: sort its output where order matters, which reads the whole file.
+lines in file order, which isn't guaranteed to be id order: sort its output where order matters, which reads the whole
+file.
 
 ```bash
 # The US releases with the lowest ids; @tsv escapes tabs and line breaks in titles
