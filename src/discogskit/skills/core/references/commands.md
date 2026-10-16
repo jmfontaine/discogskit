@@ -42,7 +42,7 @@ Options:
 - `--compression-level <int>`: Compression level for codecs that support one: JSONL gzip/bzip2, Parquet brotli/gzip/zstd. Rejected for snappy and none. Default: JSONL gzip uses level 6 (faster, slightly larger output than 9; measured in #32); every other codec uses its own library default.
 - `-f, --format <jsonl|parquet>`: Output format [default: parquet]
 - `--output <path>`: Output directory [default: .]
-- `--chunk-mb <int range>`: Split XML into chunks of roughly this size (MB) [default: 256; x>=1]
+- `--chunk-mb <int range>`: Split XML into chunks of roughly this size (MiB) [default: 256; x>=1]
 - `--parse-workers <int range>`: Number of parallel parse workers [default: (half the CPU count, at least 1); x>=1]
 - `--write-queue <int range>`: Chunks parsing may run ahead of writing: at most --parse-workers plus this many chunks are parsing or waiting to be written [default: 2; x>=1]
 - `--keep-xml / --no-keep-xml`: Keep decompressed XML file after converting [default: no-keep-xml]
@@ -66,7 +66,7 @@ Arguments:
 Options:
 
 - `--dsn <str>`: Database DSN (e.g., postgresql://localhost/postgres) or path to SQLite file [env var: DATABASE_URL; default: postgresql://localhost/discogskit]
-- `--chunk-mb <int range>`: Split XML into chunks of roughly this size (MB) [default: 256; x>=1]
+- `--chunk-mb <int range>`: Split XML into chunks of roughly this size (MiB) [default: 256; x>=1]
 - `--parse-workers <int range>`: Number of parallel parse workers [default: (half the CPU count, at least 1); x>=1]
 - `--write-queue <int range>`: Chunks parsing may run ahead of writing: at most --parse-workers plus this many chunks are parsing or waiting to be written [default: 2; x>=1]
 - `--fk / --no-fk`: Enforce foreign key constraints (SQLite and PostgreSQL) [default: no-fk]

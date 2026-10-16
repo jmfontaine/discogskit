@@ -125,8 +125,8 @@ class ParquetWriter:
         self._writers.clear()
         total_bytes = self._staged.commit()
         self._staged = None
-        total_mb = total_bytes / (1024 * 1024)
-        status("Output", f"{n_files} files, {total_mb:,.1f} MB total")
+        total_mib = total_bytes / 2**20
+        status("Output", f"{n_files} files, {total_mib:,.1f} MiB total")
 
     def close(self) -> None:
         """Release file handles; output not committed by ``finalize()`` is deleted, unless a failed commit kept it."""

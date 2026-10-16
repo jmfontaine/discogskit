@@ -191,7 +191,7 @@ class PipelineConfig:
     """Settings for one ``run()``: one dump of one entity.
 
     ``entity`` is a key of ``ENTITIES`` and must match the dump at ``gz_path`` (``detect_entity()`` reads it from a
-    Discogs dump file name). ``chunk_mb`` sets the rough size, in MB, of the chunks the XML is split into, and
+    Discogs dump file name). ``chunk_mb`` sets the rough size, in MiB, of the chunks the XML is split into, and
     ``parse_workers`` the number of parse processes, at least 1. At most ``parse_workers + write_queue`` chunks are
     being parsed or waiting to be written at once. ``keep_xml`` keeps the decompressed XML after a successful run.
     ``profile`` fills ``PipelineResult.profile_data`` and prints per-chunk lines instead of a progress bar;
@@ -496,7 +496,7 @@ def _send_chunk(results: Connection, result: ChunkResult) -> None:
     """Send a parsed chunk to the main process: a ``_ChunkHeader``, then each table's IPC buffer, uncopied.
 
     Pickling the whole result copied every buffer into one message first, which held the chunk's tables twice and
-    raised a long-lived worker's peak by 0.4-0.9 GiB at 256 MB chunks (issue #31).
+    raised a long-lived worker's peak by 0.4-0.9 GiB at 256 MiB chunks (issue #31).
     """
     results.send(_ChunkHeader(tables=list(result.tables), unknown=result.unknown))
     try:

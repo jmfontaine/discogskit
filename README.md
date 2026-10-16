@@ -82,8 +82,8 @@ Both commands decompress each `.xml.gz` to a `.xml` next to it, and delete the `
 `--keep-xml` is set. A run that fails or is interrupted (including Ctrl+C) after decompression finished keeps the
 `.xml`, and the next run reuses it instead of decompressing again. One stopped during decompression leaves no `.xml`.
 A truncated, corrupt or non-gzip `.xml.gz` stops the run with `failed to decompress <name> (truncated, corrupt, or
-not a gzip file)`. Some truncated files make the decompressor hang instead of failing: a decompression that produces
-no output for 60 seconds is reported the same way.
+not a gzip file)`, followed by what the decompressor printed about it, if anything. Some truncated files make the
+decompressor hang instead of failing: a decompression that produces no output for 60 seconds is reported the same way.
 Runs on the same dump can overlap, e.g. a `convert` and a `load`: one decompresses while the others wait, then they all
 read the same `.xml`. A run that finishes while another still reads it leaves it in place for that run. They coordinate
 through a `<name>.xml.lock` file, which stays next to the dump; delete it only while no run is using that dump.
@@ -145,10 +145,10 @@ cores, 24 GB RAM, macOS), once per setting, discogskit's processes together peak
 | `--write-queue 8` | 5.2 GiB | 1.6 GiB | 1.1 GiB |
 | `--pg-write-workers 3` | 4.6 GiB | 1.4 GiB | 1.1 GiB |
 
-The defaults are 4 parse workers, 256 MB chunks, a write queue of 2 and 1 write worker. These are peak footprints
+The defaults are 4 parse workers, 256 MiB chunks, a write queue of 2 and 1 write worker. These are peak footprints
 (macOS `phys_footprint`, which Activity Monitor shows as Memory), summed over the main process and its parse workers
 every 0.25 s; the two default runs differ by 0.5 GiB, so smaller differences are noise. On macOS, a worker keeps
-memory it has freed for reuse, so its footprint grows over its first few chunks: at 256 MB, from about 0.9 GiB during
+memory it has freed for reuse, so its footprint grows over its first few chunks: at 256 MiB, from about 0.9 GiB during
 its first chunk to about 1.1 GiB by its tenth. On Linux (Python 3.13 in Docker on the same Mac), the same worker's
 peak resident set stayed at about 0.9 GiB from its first chunk to its tenth; the table above wasn't measured there.
 Sending each table's Arrow buffer to the main process as it is, instead of a pickled copy, cut that worker's peak from
@@ -192,9 +192,9 @@ M3 (8 cores, 24 GB RAM, macOS) and otherwise default options:
 
 | Codec (default level) | Output | Run time | Parquet writes |
 |---|---:|---:|---:|
-| `zstd` (1) | 9,434 MB | 840 s | 192 s |
-| `gzip` (9) | 8,326 MB (−12%) | 1,886 s | 1,677 s |
-| `brotli` (8) | 7,625 MB (−19%) | 1,126 s | 934 s |
+| `zstd` (1) | 9,434 MiB | 840 s | 192 s |
+| `gzip` (9) | 8,326 MiB (−12%) | 1,886 s | 1,677 s |
+| `brotli` (8) | 7,625 MiB (−19%) | 1,126 s | 934 s |
 
 The Parquet writes run on one thread, so once a codec makes them slower than parsing, the whole run slows with them.
 `brotli` makes the smallest files; `gzip` makes larger files than `brotli`, and more slowly.
@@ -235,7 +235,7 @@ The Parquet writes run on one thread, so once a codec makes them slower than par
 │ --output                                   <path>                   Output directory         │
 │                                                                     [default: .]             │
 │ --chunk-mb                                 <int range> [x>=1]       Split XML into chunks of │
-│                                                                     roughly this size (MB)   │
+│                                                                     roughly this size (MiB)  │
 │                                                                     [default: 256]           │
 │ --parse-workers                            <int range> [x>=1]       Number of parallel parse │
 │                                                                     workers                  │
@@ -367,7 +367,7 @@ before any work if the file's directory can't hold it.
 │                                                          [default:                           │
 │                                                          postgresql://localhost/discogskit]  │
 │ --chunk-mb                           <int range> [x>=1]  Split XML into chunks of roughly    │
-│                                                          this size (MB)                      │
+│                                                          this size (MiB)                     │
 │                                                          [default: 256]                      │
 │ --parse-workers                      <int range> [x>=1]  Number of parallel parse workers    │
 │                                                          [default: (half the CPU count, at   │

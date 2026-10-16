@@ -100,6 +100,22 @@ def _index_ddl(table_name: str, column: str) -> str:
     )
 
 
+def _references_into(conn: sqlite3.Connection, tables: list[str]) -> list[str]:
+    """``"<table> references <target>"`` for each foreign key from a table outside ``tables`` into one of them."""
+    # SQLite matches table names without regard to ASCII case.
+    targets = {t.lower(): t for t in tables}
+    references = set()
+    names = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    for (name,) in names.fetchall():
+        if name.lower() in targets:
+            continue
+        for row in conn.execute(f"PRAGMA foreign_key_list({_quote(name)})"):
+            target = targets.get(row[2].lower())
+            if target is not None:
+                references.add(f"{name} references {target}")
+    return sorted(references)
+
+
 # ------------------------------------------------------------------------------------------------------------------------
 # SQLiteWriter
 # ------------------------------------------------------------------------------------------------------------------------
@@ -131,7 +147,13 @@ class SQLiteWriter:
     def _connection(self) -> sqlite3.Connection:
         """The connection to the database, opened (and the file created, if missing) on first use."""
         if self._conn is None:
-            self._conn = sqlite3.connect(self._abspath, check_same_thread=False)
+            try:
+                self._conn = sqlite3.connect(self._abspath, check_same_thread=False)
+            except sqlite3.Error as exc:
+                # SQLite's own message ("unable to open database file") doesn't say which file.
+                raise type(exc)(
+                    f"Can't open the SQLite database {self._path}: {exc}"
+                ) from exc
         return self._conn
 
     def _probe(self) -> None:
@@ -181,14 +203,20 @@ class SQLiteWriter:
         cur = conn.cursor()
 
         # Performance PRAGMAs, outside the transaction: journal_mode can't change inside one.
-        self._journal_mode = cur.execute("PRAGMA journal_mode").fetchone()[0]
-        cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA synchronous=OFF")
-        cur.execute("PRAGMA cache_size=-64000")
-        cur.execute("PRAGMA temp_store=MEMORY")
+        try:
+            self._journal_mode = cur.execute("PRAGMA journal_mode").fetchone()[0]
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA synchronous=OFF")
+            cur.execute("PRAGMA cache_size=-64000")
+            cur.execute("PRAGMA temp_store=MEMORY")
 
-        if self._fk:
-            cur.execute("PRAGMA foreign_keys=ON")
+            if self._fk:
+                cur.execute("PRAGMA foreign_keys=ON")
+        except sqlite3.OperationalError as exc:
+            # E.g. a read-only file or directory: WAL mode writes the file and creates files beside it.
+            raise sqlite3.OperationalError(
+                f"Can't write to the SQLite database {self._path}: {exc}"
+            ) from exc
 
         # Drop and recreate tables in one transaction, so a refused drop (e.g. a user table referencing the root
         # table, with --fk) leaves every table as it was.
@@ -209,6 +237,15 @@ class SQLiteWriter:
                 )
                 cur.execute(ddl)
             conn.commit()
+        except sqlite3.IntegrityError as exc:
+            conn.rollback()
+            references = _references_into(conn, entity.table_order)
+            if not references:
+                raise
+            raise sqlite3.IntegrityError(
+                f"Can't replace the {entity.name} tables in {self._path}: {', '.join(references)}, and --fk "
+                f"enforces foreign keys ({exc}). Every table is unchanged."
+            ) from exc
         except BaseException:
             conn.rollback()
             raise
