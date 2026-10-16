@@ -25,7 +25,7 @@ from discogskit.entities import ENTITIES
 from discogskit.entities._def import ChunkArgs, Cols, ElementValueError
 
 # Bytes of the chunk read and fed to the parser at a time. Reading the whole chunk and wrapping it in its container
-# held a copy of it for the whole parse, and two while wrapping: 256 MB each at the default chunk size (issue #30).
+# held a copy of it for the whole parse, and two while wrapping: 256 MiB each at the default chunk size (issue #30).
 # Measured on 256 MiB chunks of every entity, 64 KiB slices parse no slower than the whole chunk did, while 1 MiB
 # slices parsed one labels chunk 22-57% slower (#30).
 _FEED_BYTES = 64 * 1024
@@ -258,7 +258,7 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
                 ) from exc
             ordinal += 1
             # Standard lxml memory optimization for incremental parsing: free each element after processing to
-            # prevent the entire tree from accumulating. Without this, a 256 MB chunk would build a multi-GB tree.
+            # prevent the entire tree from accumulating. Without this, a 256 MiB chunk would build a multi-GB tree.
             elem.clear()
             # Each child of the container before this record is checked and deleted here, in document order; those
             # after the chunk's last record are checked once parsing ends. A nested element named like the container

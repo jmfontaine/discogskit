@@ -90,7 +90,11 @@ _STALL_TIMEOUT = 60.0
 # discogskit outside an ``if __name__ == "__main__":`` guard waits there
 # forever for the lock this run holds.
 _START_TIMEOUT = 60.0
-# How much of what the decompression child printed, from the end, goes into a DecompressError's message.
+
+# How much of what the decompression child printed the parent reads, from the end: what it prints after a run that
+# didn't fail with a DecompressError, and what it folds into a DecompressError's message, cut to
+# _CHILD_OUTPUT_CHARS characters.  A flood of output must not cost memory or time.
+_CHILD_OUTPUT_BYTES = 16 * 1024
 _CHILD_OUTPUT_CHARS = 2000
 
 
@@ -343,13 +347,15 @@ def _run_decompress_child(gz_path: Path, partial_path: Path, workers: int) -> No
             try:
                 _supervise_decompress_child(gz_path, partial_path, workers, stderr_path)
             except DecompressError as exc:
+                output, size = _child_output(log)
                 # On one line, and only its end: the message is a line of output.
-                detail = " ".join(_child_output(log).split())
+                detail = " ".join(output.split())
+                if size > _CHILD_OUTPUT_BYTES or len(detail) > _CHILD_OUTPUT_CHARS:
+                    # Even if the end is blank: what came before it is cut.
+                    detail = "…" + detail[-_CHILD_OUTPUT_CHARS:]
                 if not detail:
                     raise
-                raise DecompressError(
-                    gz_path, detail[-_CHILD_OUTPUT_CHARS:]
-                ) from exc.__cause__
+                raise DecompressError(gz_path, detail) from exc.__cause__
             except BaseException:
                 _pass_on_child_output(log)
                 raise
@@ -361,18 +367,30 @@ def _run_decompress_child(gz_path: Path, partial_path: Path, workers: int) -> No
             os.remove(stderr_path)
 
 
-def _child_output(log: BinaryIO) -> str:
-    """What the decompression child printed on its stderr, or ``""`` if ``log`` can't be read."""
+def _child_output(log: BinaryIO) -> tuple[str, int]:
+    """The end of what the decompression child printed, at most ``_CHILD_OUTPUT_BYTES`` of it, and the size in
+    bytes of all of it; ``("", 0)`` if ``log`` can't be read.
+    """
     try:
-        log.seek(0)
-        return log.read().decode(errors="replace")
+        size = os.fstat(log.fileno()).st_size
+        log.seek(max(0, size - _CHILD_OUTPUT_BYTES))
+        return log.read(_CHILD_OUTPUT_BYTES).decode(errors="replace"), size
     except OSError:
-        return ""
+        return "", 0
 
 
 def _pass_on_child_output(log: BinaryIO) -> None:
-    """Print what the decompression child printed, if anything, literally on the current console."""
-    output = _child_output(log).rstrip()
+    """Print the end of what the decompression child printed, if anything, literally on the current console."""
+    output, size = _child_output(log)
+    if size > _CHILD_OUTPUT_BYTES:
+        # Even if the end is blank: what came before it is cut.
+        print_text(
+            Text(
+                f"The decompressor printed {size:,} bytes; "
+                f"only the last {_CHILD_OUTPUT_BYTES // 1024} KiB follow."
+            )
+        )
+    output = output.rstrip()
     if output:
         print_text(Text(output))
 

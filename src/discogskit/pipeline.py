@@ -496,7 +496,7 @@ def _send_chunk(results: Connection, result: ChunkResult) -> None:
     """Send a parsed chunk to the main process: a ``_ChunkHeader``, then each table's IPC buffer, uncopied.
 
     Pickling the whole result copied every buffer into one message first, which held the chunk's tables twice and
-    raised a long-lived worker's peak by 0.4-0.9 GiB at 256 MB chunks (issue #31).
+    raised a long-lived worker's peak by 0.4-0.9 GiB at 256 MiB chunks (issue #31).
     """
     results.send(_ChunkHeader(tables=list(result.tables), unknown=result.unknown))
     try:

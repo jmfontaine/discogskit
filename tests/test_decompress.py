@@ -10,9 +10,11 @@ import multiprocessing
 import os
 import random
 import signal
+import tempfile
 import threading
 import time
 from multiprocessing.context import SpawnProcess
+from types import SimpleNamespace
 
 import pytest
 from filelock import ReadWriteLock, Timeout
@@ -167,6 +169,43 @@ class _NoisyReader(_CompleteGzipReader):
             os.write(2, b"".join(b"rapidgzip: warning %d\n" % i for i in range(100)))
             self.printed = True
         return super().read(size)
+
+
+# 6 MB of decompressor output, one numbered line at a time.
+_FLOOD = b"".join(b"rapidgzip: line %07d\n" % i for i in range(250_000))
+
+
+class _FloodingReader(_CompleteGzipReader):
+    """Prints ``_FLOOD`` to the process's stderr on its first read, then reads normally."""
+
+    printed = False
+
+    def read(self, size=-1):
+        if not self.printed:
+            os.write(2, _FLOOD)
+            self.printed = True
+        return super().read(size)
+
+
+class _FloodingAbortingReader(_CompleteGzipReader):
+    """Prints ``_FLOOD`` to the process's stderr, then aborts."""
+
+    def read(self, size=-1):
+        os.write(2, _FLOOD)
+        os.abort()
+
+
+class _CountingReader(io.BufferedReader):
+    """Counts the bytes read through it."""
+
+    def __init__(self, raw):
+        super().__init__(raw)
+        self.bytes_read = 0
+
+    def read(self, size=-1):
+        data = super().read(size)
+        self.bytes_read += len(data)
+        return data
 
 
 class _InterruptingReader(_CompleteGzipReader):
@@ -574,7 +613,7 @@ class TestNativeFailures:
     def test_child_stderr_after_success_is_passed_on(
         self, capfd, monkeypatch, tmp_path
     ):
-        """All of it, through the console a library caller can silence or redirect."""
+        """All of it, when under the limit, through the console a library caller can silence or redirect."""
         gz_path = _write_gz(tmp_path / "test.xml.gz")
         xml_path = tmp_path / "test.xml"
         _patch_child(monkeypatch, {"rapidgzip.open": _NoisyReader})
@@ -587,6 +626,97 @@ class TestNativeFailures:
         printed = out.getvalue().splitlines()
         assert printed[:100] == [f"rapidgzip: warning {i}" for i in range(100)]
         assert "rapidgzip" not in capfd.readouterr().err
+
+    def test_large_child_output_is_bounded_on_success(self, monkeypatch, tmp_path):
+        """Only the end is printed, after a note that says how much there was."""
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        _patch_child(monkeypatch, {"rapidgzip.open": _FloodingReader})
+        out = io.StringIO()
+
+        with using(Console(file=out, width=200)):
+            ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
+
+        # The child's output, then the "Decompress" status line.
+        printed, _, _ = out.getvalue().partition("  Decompress")
+        note = (
+            f"The decompressor printed {len(_FLOOD):,} bytes; "
+            "only the last 16 KiB follow.\n"
+        )
+        assert printed.startswith(note)
+        assert len(printed) <= len(note) + decompress._CHILD_OUTPUT_BYTES
+        assert printed.endswith("rapidgzip: line 0249999\n")
+
+    def test_large_child_output_is_bounded_in_the_error(self, monkeypatch, tmp_path):
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        _patch_child(monkeypatch, {"rapidgzip.open": _FloodingAbortingReader})
+
+        with pytest.raises(DecompressError) as excinfo:
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        _, _, detail = str(excinfo.value).partition("not a gzip file): ")
+        assert detail.startswith("…")
+        assert len(detail) == 1 + decompress._CHILD_OUTPUT_CHARS
+        assert detail.endswith("rapidgzip: line 0249999")
+
+    def test_child_output_reads_only_the_end(self, tmp_path):
+        log_path = tmp_path / "child.log"
+        log_path.write_bytes(_FLOOD)
+        limit = decompress._CHILD_OUTPUT_BYTES
+
+        with _CountingReader(io.FileIO(log_path)) as log:
+            output = decompress._child_output(log)
+
+        assert output == (_FLOOD[-limit:].decode(), len(_FLOOD))
+        assert log.bytes_read == limit
+
+    def test_truncation_is_noted_when_the_end_is_blank(self, tmp_path):
+        """A warning followed by more than the limit of blank lines isn't dropped silently."""
+        log_path = tmp_path / "child.log"
+        content = b"warning\n" + b"\n" * decompress._CHILD_OUTPUT_BYTES
+        log_path.write_bytes(content)
+        out = io.StringIO()
+
+        with open(log_path, "rb") as log, using(Console(file=out, width=200)):
+            decompress._pass_on_child_output(log)
+
+        assert out.getvalue() == (
+            f"The decompressor printed {len(content):,} bytes; "
+            "only the last 16 KiB follow.\n"
+        )
+
+    @pytest.mark.parametrize("outcome", ["success", "failure", "ctrl_c"])
+    def test_no_log_file_remains(self, monkeypatch, tmp_path, outcome):
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        log_dir = tmp_path / "tmp"
+        log_dir.mkdir()
+        logs = []
+
+        def mkstemp(**kwargs):
+            fd, path = tempfile.mkstemp(dir=log_dir, **kwargs)
+            logs.append(path)
+            return fd, path
+
+        monkeypatch.setattr(decompress, "tempfile", SimpleNamespace(mkstemp=mkstemp))
+        if outcome == "success":
+            _patch_child(monkeypatch, {"rapidgzip.open": _NoisyReader})
+            with using(Console(file=io.StringIO())):
+                ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
+        elif outcome == "failure":
+            _patch_child(monkeypatch, {"rapidgzip.open": _NoisyAbortingReader})
+            with pytest.raises(DecompressError):
+                ensure_xml(gz_path, xml_path, workers=1)
+        else:
+            pids = multiprocessing.get_context("spawn").Queue()
+            reader = functools.partial(_InterruptingReader, pids=pids)
+            _patch_child(monkeypatch, {"rapidgzip.open": reader})
+            with pytest.raises(KeyboardInterrupt):
+                ensure_xml(gz_path, xml_path, workers=1)
+
+        assert len(logs) == 1
+        assert list(log_dir.iterdir()) == []
 
     def test_child_that_never_starts_raises_runtime_error(self, monkeypatch, tmp_path):
         """Like a script without a ``__main__`` guard, run again in the child."""
