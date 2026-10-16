@@ -349,6 +349,25 @@ class TestGetFileWriter:
             discogskit.get_file_writer(out, output_format, compression=compression)
         assert not out.exists()
 
+    @pytest.mark.parametrize("level", [1.5, "3", True], ids=["float", "str", "bool"])
+    @pytest.mark.parametrize(
+        "output_format, compression",
+        [("jsonl", "bzip2"), ("jsonl", "gzip"), ("parquet", None)],
+    )
+    def test_rejects_level_that_is_not_an_integer(
+        self, tmp_path, output_format, compression, level
+    ):
+        """Checked before the range, which would let 1.5 and True through and fail on "3" with a TypeError."""
+        out = tmp_path / "out"
+        with pytest.raises(ValueError) as excinfo:
+            discogskit.get_file_writer(
+                out, output_format, compression=compression, compression_level=level
+            )
+        assert str(excinfo.value) == (
+            f"compression level must be an integer, not {level!r}."
+        )
+        assert not out.exists()
+
     @pytest.mark.parametrize(
         "output_format, compression, level, match",
         [
