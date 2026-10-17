@@ -148,17 +148,23 @@ _RECORDS = {
 
 
 def _injected(entity_name: str, level: str) -> str:
-    """One record with <new_tag/> as the only child of the element at ``level``, nested in its ancestors.
+    """One record whose element at ``level``, nested in its ancestors, has the attribute new_attr="x" and <new_tag/>
+    as its only child.
 
     An artist's or label's <id> level is the record's own <id>: a second <id> would fail the record (#205).
     """
     record = _RECORDS[entity_name]
+    if not level:
+        end = record.index(">")
+        return (record[:end] + ' new_attr="x"' + record[end:]).format("<new_tag/>")
     if level == "id" and "<id>1</id>" in record:
-        return record.replace("<id>1</id>", "<id>1<new_tag/></id>").format("")
-    tags = level.split("/") if level else []
-    inner = "".join(f"<{tag}>" for tag in tags)
-    inner += "<new_tag/>"
-    inner += "".join(f"</{tag}>" for tag in reversed(tags))
+        return record.replace("<id>1</id>", '<id new_attr="x">1<new_tag/></id>').format(
+            ""
+        )
+    *ancestors, tag = level.split("/")
+    inner = "".join(f"<{ancestor}>" for ancestor in ancestors)
+    inner += f'<{tag} new_attr="x"><new_tag/></{tag}>'
+    inner += "".join(f"</{ancestor}>" for ancestor in reversed(ancestors))
     return record.format(inner)
 
 
@@ -172,7 +178,8 @@ def _injected(entity_name: str, level: str) -> str:
     ],
 )
 def test_strict_reports_unhandled_element_path(tmp_path, entity_name, level):
-    """--strict reports an element no parser handles at any level, by its path relative to the record."""
+    """--strict reports an element and an attribute no parser handles at any level, by their paths relative to the
+    record."""
     f = tmp_path / "chunk.xml"
     f.write_text(_injected(entity_name, level))
     args = ChunkArgs(
@@ -183,9 +190,116 @@ def test_strict_reports_unhandled_element_path(tmp_path, entity_name, level):
         strict=True,
     )
 
-    assert extract_chunk_to_ipc(args).unknown == [
-        f"{level}/new_tag" if level else "new_tag"
-    ]
+    path = f"{level}/" if level else ""
+    assert extract_chunk_to_ipc(args).unknown == [f"{path}@new_attr", f"{path}new_tag"]
+
+
+@pytest.mark.parametrize(
+    ("entity_name", "record", "paths"),
+    [
+        ("artists", "<artist>HEAD<id>1</id></artist>", ["text()"]),
+        ("artists", "<artist><id>1</id>TAIL</artist>", ["text()"]),
+        # Not XML whitespace, so it's text.
+        ("artists", "<artist>\u00a0<id>1</id></artist>", ["text()"]),
+        (
+            "artists",
+            "<artist><id>1</id><urls><url>a</url>TAIL<url>b</url></urls></artist>",
+            ["urls/text()"],
+        ),
+        (
+            "artists",
+            '<artist><id>1</id><aliases>HEAD<name id="2">A</name></aliases></artist>',
+            ["aliases/text()"],
+        ),
+        (
+            "labels",
+            '<label><id>1</id><sublabels><label id="2">S</label>TAIL</sublabels></label>',
+            ["sublabels/text()"],
+        ),
+        (
+            "masters",
+            '<master id="1"><artists><artist><id>2</id>TAIL</artist></artists></master>',
+            ["artists/artist/text()"],
+        ),
+        (
+            "masters",
+            '<master id="1"><videos><video src="s">HEAD<title>t</title></video></videos></master>',
+            ["videos/video/text()"],
+        ),
+        (
+            "releases",
+            '<release id="1"><labels><label id="2" name="L">TEXT</label></labels></release>',
+            ["labels/label/text()"],
+        ),
+        (
+            "releases",
+            '<release id="1"><identifiers><identifier type="Barcode">TEXT</identifier></identifiers></release>',
+            ["identifiers/identifier/text()"],
+        ),
+        (
+            "releases",
+            '<release id="1"><formats><format name="CD">TEXT</format></formats></release>',
+            ["formats/format/text()"],
+        ),
+        (
+            "releases",
+            '<release id="1"><companies><company><id>2</id>TAIL</company></companies></release>',
+            ["companies/company/text()"],
+        ),
+        (
+            "releases",
+            (
+                '<release id="1"><tracklist><track><position>1</position>TAIL</track>'
+                "<track><sub_tracks><track><title>t</title>TAIL</track></sub_tracks></track></tracklist></release>"
+            ),
+            ["tracklist/track/sub_tracks/track/text()", "tracklist/track/text()"],
+        ),
+        (
+            "releases",
+            '<release id="1"><extraartists><artist><id>2</id>TAIL</artist></extraartists></release>',
+            ["extraartists/artist/text()"],
+        ),
+        # A text element's reader keeps its text up to its first child; the text after a child is dropped.
+        (
+            "artists",
+            "<artist><id>1</id><name>A<x/>LOST</name></artist>",
+            ["name/text()", "name/x"],
+        ),
+        (
+            "releases",
+            '<release id="1"><artists><artist><id>2</id><name>A<x/>LOST</name></artist></artists></release>',
+            ["artists/artist/name/text()", "artists/artist/name/x"],
+        ),
+        ("labels", "<label><id>1<x/>2</id></label>", ["id/text()", "id/x"]),
+        # Text a parser reads, and whitespace, are not reported.
+        ("artists", "<artist>\n\t <id>1</id>\r\n <name>A</name> </artist>", []),
+        ("artists", "<artist><id>1</id><name>A<x/>\n </name></artist>", ["name/x"]),
+        (
+            "releases",
+            '<release id="1"><master_id is_main_release="true">2</master_id></release>',
+            [],
+        ),
+    ],
+)
+@pytest.mark.parametrize("strict", [True, False])
+def test_strict_reports_unread_text(tmp_path, entity_name, record, paths, strict):
+    """--strict reports text in an element whose text no parser reads, before its first child or after any, and text
+    after a child in one whose text is read; without --strict the record still loads and nothing is reported."""
+    f = tmp_path / "chunk.xml"
+    f.write_text(record + "\n")
+    args = ChunkArgs(
+        end=os.path.getsize(f),
+        entity=entity_name,
+        file_path=str(f),
+        start=0,
+        strict=strict,
+    )
+
+    result = extract_chunk_to_ipc(args)
+
+    assert result.unknown == (paths if strict else [])
+    tables = ipc_to_tables(result.tables, ENTITIES[entity_name].schemas)
+    assert tables[entity_name].column("id").to_pylist() == [1]
 
 
 @pytest.mark.parametrize("entity_name", sorted(PLAIN_RECORDS))
@@ -210,7 +324,7 @@ def test_strict_reports_nothing_on_known_xml(tmp_path, entity_name):
     [
         # Checked when the next record ends.
         "{ns}{plain}",
-        # An element between the namespaced record and the next record must not shield it.
+        # <other/> fails too (#215), but the namespaced record before it is the first problem in the chunk.
         "{ns}<other/>\n{plain}",
         # Checked once the chunk has been parsed.
         "{plain}{ns}",
@@ -273,6 +387,71 @@ def test_namespaced_element_in_nested_container_is_not_a_record(tmp_path):
     ).tables
 
     assert 1 in ipc_to_tables(ipc_dict, SCHEMAS)["artists"].column("id").to_pylist()
+
+
+@pytest.mark.parametrize("entity_name", sorted(PLAIN_RECORDS))
+@pytest.mark.parametrize(
+    ("layout", "found"),
+    [
+        ("{plain}<other>data</other>\n{plain}", "element <other>"),
+        ("{plain}<other>data</other>\n", "element <other>"),
+        ("{plain}  STRAY TEXT\n{plain}", "text 'STRAY TEXT'"),
+        ("\n STRAY TEXT\n{plain}", "text 'STRAY TEXT'"),
+        ("{plain}STRAY TEXT\n", "text 'STRAY TEXT'"),
+        # Of two problems, the first in the chunk is reported.
+        ("{plain}STRAY TEXT\n<other/>{plain}", "text 'STRAY TEXT'"),
+        ("{plain}<other/>STRAY TEXT\n{plain}", "element <other>"),
+    ],
+    ids=[
+        "element-between",
+        "element-after-last",
+        "text-between",
+        "text-before-first",
+        "text-after-last",
+        "text-then-element",
+        "element-then-text",
+    ],
+)
+@pytest.mark.parametrize("feed_bytes", [None, 3], ids=["one-feed", "split-feeds"])
+def test_content_between_records_fails(
+    tmp_path, monkeypatch, entity_name, layout, found, feed_bytes
+):
+    """Elements and text between records were dropped silently, even with --strict (#215); the splitter rejects them
+    before the first record of the file and after its last."""
+    if feed_bytes is not None:
+        monkeypatch.setattr(_worker, "_FEED_BYTES", feed_bytes)
+    entity = ENTITIES[entity_name]
+    xml = layout.format(plain=PLAIN_RECORDS[entity_name])
+    marker = "STRAY" if found.startswith("text") else "<other"
+    line = xml[: xml.index(marker)].count("\n") + 1
+    f = tmp_path / f"{entity_name}.xml"
+    f.write_text(xml)
+    size = os.path.getsize(f)
+
+    with pytest.raises(ValueError) as info:
+        extract_chunk_to_ipc(
+            ChunkArgs(end=size, entity=entity_name, file_path=str(f), start=0)
+        )
+
+    assert str(info.value) == (
+        f"Unsupported {entity_name} XML in {f}, chunk at bytes 0-{size} (line numbers count from byte 0): {found}"
+        f" on line {line}; only <{entity.root_tag}> records may appear in <{entity_name}>"
+    )
+
+
+def test_stray_text_line_is_approximate_when_expat_fails(tmp_path):
+    """Expat rejects some names libxml2 accepts (here U+0370); the line then comes from lxml and mustn't claim to be
+    exact."""
+    xml = '<artist \u0370="x"><id>1</id></artist>\nSTRAY\n<artist><id>2</id></artist>\n'
+    f = tmp_path / "artists.xml"
+    f.write_text(xml, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r": text 'STRAY' near line 1; only <artist>"):
+        extract_chunk_to_ipc(
+            ChunkArgs(
+                end=os.path.getsize(f), entity="artists", file_path=str(f), start=0
+            )
+        )
 
 
 def test_worker_never_holds_the_whole_chunk(tmp_path):

@@ -9,9 +9,13 @@ import pyarrow as pa
 from lxml import etree
 
 from discogskit.entities._def import (
+    ID_ATTR,
+    VIDEO_ATTRS,
     Cols,
     EntityDef,
+    check_attrs,
     check_leaf,
+    check_text,
     child_elements,
     leaf_text,
     leaf_texts,
@@ -72,6 +76,9 @@ def append_record(
     if not id_text:
         raise ValueError("missing or empty id")
     master_id = int(id_text)
+    if unknown is not None:
+        check_attrs(elem, "", unknown, ID_ATTR)
+        check_text(elem, "", unknown)
 
     data_quality = None
     main_release = None
@@ -87,6 +94,9 @@ def append_record(
         tag = child.tag
         if tag == "artists":
             for artist_elem in child_elements(child, "artist", "", unknown):
+                if unknown is not None:
+                    check_attrs(artist_elem, "artists/artist/", unknown)
+                    check_text(artist_elem, "artists/artist/", unknown)
                 artist_id_text = None
                 anv = None
                 join_text = None
@@ -151,6 +161,9 @@ def append_record(
             title = leaf_text(child, "", unknown)
         elif tag == "videos":
             for video in child_elements(child, "video", "", unknown):
+                if unknown is not None:
+                    check_attrs(video, "videos/video/", unknown, VIDEO_ATTRS)
+                    check_text(video, "videos/video/", unknown)
                 src = video.get("src")
                 dur_str = video.get("duration")
                 duration = None if dur_str is None else int(dur_str)
