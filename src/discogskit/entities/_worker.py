@@ -308,8 +308,8 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
         # The slice that holds the malformed XML may also end records before it, whose events feed() queued before
         # raising. Handle them first, so the error reported is the first one in the document, whatever the slices.
         parse_records(parser)
-        # XMLSyntaxError carries an error log that can't be pickled, so the pool would only report "cannot pickle
-        # '_ListErrorLog'" and the real error would be lost (#60). Re-raise as a plain ValueError with the location.
+        # XMLSyntaxError carries an error log that can't be pickled, so the main process would only report "cannot
+        # pickle '_ListErrorLog'" and the real error would be lost (#60). Re-raise as a plain ValueError with the location.
         # Only parsing raises it; errors from append_record get their own context above.
         detail = exc.msg
         raise ValueError(
