@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
 from discogskit._console import status
+from discogskit.writers import OutputExistsError
 from discogskit.writers._compression import check_compression, check_compression_level
 from discogskit.writers._staging import StagedFiles, check_output_dir
 
@@ -115,8 +116,6 @@ class JSONLWriter:
                 f.name for f in entity_dir.iterdir() if f.name.endswith(_EXTENSIONS)
             ]
             if existing:
-                from discogskit.writers import OutputExistsError
-
                 raise OutputExistsError(
                     f"Output files already exist in {entity_dir} "
                     f"(e.g. {existing[0]}). Use --overwrite to replace them."
