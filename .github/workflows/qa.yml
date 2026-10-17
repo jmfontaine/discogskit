@@ -126,9 +126,11 @@ jobs:
       matrix:
         os: ${{ inputs.macos && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
-    # macOS runners have no Docker, so only Ubuntu jobs fail when PostgreSQL tests can't run.
+    # macOS runners have no Docker or GNU time, so only Ubuntu jobs fail when the PostgreSQL or GNU time tests can't
+    # run.
     env:
       DISCOGSKIT_REQUIRE_DOCKER: ${{ matrix.os == 'ubuntu-latest' && '1' || '0' }}
+      DISCOGSKIT_REQUIRE_GNU_TIME: ${{ matrix.os == 'ubuntu-latest' && '1' || '0' }}
       UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

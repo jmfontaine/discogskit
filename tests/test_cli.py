@@ -18,7 +18,6 @@ from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pytest
-from rich.text import Text
 from typer.testing import CliRunner, Result
 
 from discogskit import pipeline
@@ -34,6 +33,8 @@ from tests.conftest import (
     UNICODE_ARTISTS_ROWS,
     UNICODE_ARTISTS_XML,
     needs_permissions,
+    unstyle,
+    write_dump,
 )
 
 runner = CliRunner()
@@ -100,21 +101,15 @@ def _compressible_artists_gz(tmp_path: Path, n: int = 3000) -> Path:
     measurably different output sizes once converted."""
     rng = random.Random(42)
     gz = tmp_path / _ENTITY_FILE
-    with gzip.open(gz, "wb") as f:
-        f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
-        for i in range(1, n + 1):
-            profile = " ".join(rng.choices(_COMPRESSIBLE_WORDS, k=30))
-            f.write(
-                f"<artist><id>{i}</id><name>Artist {i}</name>"
-                f"<profile>{profile}</profile></artist>\n".encode()
-            )
-        f.write(b"</artists>")
+    records = []
+    for i in range(1, n + 1):
+        profile = " ".join(rng.choices(_COMPRESSIBLE_WORDS, k=30))
+        records.append(
+            f"<artist><id>{i}</id><name>Artist {i}</name>"
+            f"<profile>{profile}</profile></artist>\n"
+        )
+    write_dump(gz, "artists", "".join(records))
     return gz
-
-
-def _unstyle(output: str) -> str:
-    """Strip ANSI styling from CLI output (Typer colors its error panels when it detects CI)."""
-    return Text.from_ansi(output).plain
 
 
 def _widen_console(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -167,7 +162,7 @@ class TestNoTracebacks:
             patch("discogskit.cli.get_writer"),
         ):
             result = runner.invoke(app, [command, str(gz)])
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 1, output
         assert type(result.exception) is SystemExit, repr(result.exception)
         assert f"Error: {message}\n" in output
@@ -191,7 +186,7 @@ class TestNoTracebacks:
             patch("discogskit.cli.get_writer"),
         ):
             result = runner.invoke(app, [command, str(gz)])
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 1, output
         # CliRunner turns an escaped exception into result.exception with empty output, so
         # SystemExit (from typer.Exit) is what proves the handler caught it.
@@ -208,7 +203,7 @@ class TestNoTracebacks:
             patch("discogskit.cli.get_writer", side_effect=MemoryError()),
         ):
             result = runner.invoke(app, ["load", str(gz)])
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 1, output
         assert type(result.exception) is SystemExit, repr(result.exception)
         assert "Error: MemoryError\n" in output
@@ -225,13 +220,11 @@ class TestRecordErrorOutput:
         """
         _widen_console(monkeypatch)
         gz = tmp_path / _ENTITY_FILE
-        with gzip.open(gz, "wb") as f:
-            f.write(
-                b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n"
-                b"<artist>\n  <id>1</id>\n</artist>\n"
-                b"<artist>\n  <id>[b]</id>\n</artist>\n"
-                b"</artists>"
-            )
+        write_dump(
+            gz,
+            "artists",
+            "<artist>\n  <id>1</id>\n</artist>\n<artist>\n  <id>[b]</id>\n</artist>\n",
+        )
         result = runner.invoke(
             app,
             [
@@ -260,7 +253,7 @@ class TestRecordErrorOutput:
             f"Invalid <artist> record in {xml} at chunk line 4 (chunk bytes {start}-{end}, id='[b]'): "
         )
         assert result.exit_code == 1
-        assert f"Error: {message}" in _unstyle(result.output).splitlines()
+        assert f"Error: {message}" in unstyle(result.output).splitlines()
 
     @pytest.mark.parametrize("variant", ["empty", "missing"])
     @pytest.mark.parametrize("entity", sorted(_RECORDS_WITHOUT_ID))
@@ -271,11 +264,11 @@ class TestRecordErrorOutput:
         _widen_console(monkeypatch)
         good, missing, empty = _RECORDS_WITHOUT_ID[entity]
         gz = tmp_path / f"discogs_20260301_{entity}.xml.gz"
-        with gzip.open(gz, "wt") as f:
-            f.write(
-                f"<?xml version='1.0' encoding='UTF-8'?>\n<{entity}>\n"
-                f"{good}\n{missing if variant == 'missing' else empty}\n</{entity}>"
-            )
+        write_dump(
+            gz,
+            entity,
+            f"{good}\n{missing if variant == 'missing' else empty}\n",
+        )
         result = runner.invoke(
             app,
             [
@@ -290,7 +283,7 @@ class TestRecordErrorOutput:
                 "1",
             ],
         )
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 1, output
         assert re.search(
             rf"^Error: Invalid <{entity[:-1]}> record in .* at chunk line 2 .*: missing or empty id$",
@@ -321,7 +314,7 @@ class TestWriterAlwaysClosed:
         ):
             result = runner.invoke(app, ["convert", str(gz), "-f", "parquet"])
         assert result.exit_code == expected_exit_code
-        assert expected_message in _unstyle(result.output)
+        assert expected_message in unstyle(result.output)
         close.assert_called_once()
 
     def test_convert_closes_writer_once_on_success(self, tmp_path: Path) -> None:
@@ -333,7 +326,7 @@ class TestWriterAlwaysClosed:
         ):
             result = runner.invoke(app, ["convert", str(gz), "-f", "parquet"])
         assert result.exit_code == 0
-        assert "0 artists converted" in _unstyle(result.output)
+        assert "0 artists converted" in unstyle(result.output)
         close.assert_called_once()
 
     @pytest.mark.parametrize(
@@ -356,7 +349,7 @@ class TestWriterAlwaysClosed:
         ):
             result = runner.invoke(app, ["load", str(gz)])
         assert result.exit_code == expected_exit_code
-        assert expected_message in _unstyle(result.output)
+        assert expected_message in unstyle(result.output)
         mock_writer.close.assert_called_once()
 
     def test_load_closes_writer_once_on_success(self, tmp_path: Path) -> None:
@@ -369,7 +362,7 @@ class TestWriterAlwaysClosed:
         ):
             result = runner.invoke(app, ["load", str(gz)])
         assert result.exit_code == 0
-        assert "0 artists loaded" in _unstyle(result.output)
+        assert "0 artists loaded" in unstyle(result.output)
         mock_writer.close.assert_called_once()
 
 
@@ -389,7 +382,7 @@ class TestUncompressedXmlInput:
         ):
             result = runner.invoke(app, [command, str(gz), str(xml)])
         assert result.exit_code == 1
-        assert "uncompressed .xml input is not supported" in _unstyle(result.output)
+        assert "uncompressed .xml input is not supported" in unstyle(result.output)
         run.assert_not_called()
         assert xml.read_bytes() == b"<labels></labels>"
 
@@ -421,18 +414,13 @@ class TestUnrecognizedFileExtension:
         ):
             result = runner.invoke(app, [command, str(gz), str(other)])
         assert result.exit_code == 1
-        assert f"{other}: not a .xml.gz dump" in _unstyle(result.output)
+        assert f"{other}: not a .xml.gz dump" in unstyle(result.output)
         run.assert_not_called()
 
 
 def _dump_gz(directory: Path, entity: str, xml: str, date: str = "20260301") -> Path:
     """A real ``discogs_<date>_<entity>.xml.gz`` holding ``xml`` (records without their envelope)."""
-    gz = directory / f"discogs_{date}_{entity}.xml.gz"
-    with gzip.open(gz, "wb") as f:
-        f.write(f"<?xml version='1.0' encoding='UTF-8'?>\n<{entity}>\n".encode())
-        f.write(xml.encode())
-        f.write(f"</{entity}>".encode())
-    return gz
+    return write_dump(directory / f"discogs_{date}_{entity}.xml.gz", entity, xml)
 
 
 def _two_months(tmp_path: Path) -> tuple[list[Path], str]:
@@ -503,8 +491,8 @@ class TestDuplicateInputs:
         _widen_console(monkeypatch)
         with patch("discogskit.cli.pipeline.run") as run:
             result = runner.invoke(app, [command, *map(str, paths), *extra])
-        assert result.exit_code == 1, _unstyle(result.output)
-        assert f"Error: {message}\n" in _unstyle(result.output)
+        assert result.exit_code == 1, unstyle(result.output)
+        assert f"Error: {message}\n" in unstyle(result.output)
         run.assert_not_called()
         assert not db.exists()
         assert not (tmp_path / "out").exists()
@@ -533,12 +521,12 @@ class TestExistingOutputCheckedUpFront:
         artists = _dump_gz(tmp_path, "artists", ARTISTS_XML)
         labels = _dump_gz(tmp_path, "labels", LABELS_XML)
         first = self._run(args, labels)
-        assert first.exit_code == 0, _unstyle(first.output)
+        assert first.exit_code == 0, unstyle(first.output)
 
         _widen_console(monkeypatch)
         with patch("discogskit.cli.pipeline.run") as run:
             result = self._run(args, artists, labels)
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 1, output
         [message] = [line for line in output.splitlines() if line.strip()]
         assert message.startswith("Error: ")
@@ -554,7 +542,7 @@ class TestExistingOutputCheckedUpFront:
         args = self._args("jsonl", tmp_path)
         labels = _dump_gz(tmp_path, "labels", LABELS_XML)
         first = self._run(args, labels)
-        assert first.exit_code == 0, _unstyle(first.output)
+        assert first.exit_code == 0, unstyle(first.output)
         out = tmp_path / "out"
         before = {p: p.read_bytes() for p in out.rglob("*") if p.is_file()}
 
@@ -562,7 +550,7 @@ class TestExistingOutputCheckedUpFront:
         with patch("discogskit.cli.pipeline.run") as run:
             result = self._run([*args, "--compression", "gzip"], labels)
 
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 1, output
         assert "Use --overwrite to replace them." in output
         run.assert_not_called()
@@ -576,10 +564,10 @@ class TestExistingOutputCheckedUpFront:
         artists = _dump_gz(tmp_path, "artists", ARTISTS_XML)
         labels = _dump_gz(tmp_path, "labels", LABELS_XML)
         first = self._run(args, labels)
-        assert first.exit_code == 0, _unstyle(first.output)
+        assert first.exit_code == 0, unstyle(first.output)
 
         result = self._run([*args, "--overwrite"], artists, labels)
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 0, output
         assert "artists converted" in output or "artists loaded" in output
         assert "labels converted" in output or "labels loaded" in output
@@ -589,13 +577,13 @@ class TestExistingOutputCheckedUpFront:
         args = self._args("jsonl", tmp_path)
         labels = _dump_gz(tmp_path, "labels", LABELS_XML)
         first = self._run(args, labels)
-        assert first.exit_code == 0, _unstyle(first.output)
+        assert first.exit_code == 0, unstyle(first.output)
         labels_dir = tmp_path / "out" / "labels"
         (labels_dir / "notes.txt").write_text("keep me")
 
         result = self._run([*args, "--compression", "gzip", "--overwrite"], labels)
 
-        assert result.exit_code == 0, _unstyle(result.output)
+        assert result.exit_code == 0, unstyle(result.output)
         tables = ENTITIES["labels"].table_order
         assert sorted(p.name for p in labels_dir.iterdir()) == sorted(
             [*(f"{table}.jsonl.gz" for table in tables), "notes.txt"]
@@ -631,7 +619,7 @@ class TestUnwritableOutputCheckedUpFront:
         self, fmt: str, out: Path, named: Path, tmp_path: Path
     ) -> None:
         result, gz = self._convert(fmt, out, tmp_path)
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 1, output
         assert "Decompress" not in output
         [message] = [line for line in output.splitlines() if line.strip()]
@@ -677,7 +665,7 @@ class TestUnwritableOutputCheckedUpFront:
         if existing:
             (out / "artists").mkdir(parents=True)
         result, _ = self._convert(fmt, out, tmp_path)
-        assert result.exit_code == 0, _unstyle(result.output)
+        assert result.exit_code == 0, unstyle(result.output)
         assert [p.name for p in (tmp_path / "parent").iterdir()] == ["out"]
         assert [p.name for p in out.iterdir()] == ["artists"]
         assert sorted(p.name for p in (out / "artists").iterdir()) == sorted(
@@ -699,7 +687,7 @@ class TestLiteralText:
     @staticmethod
     def _assert_clean_error(result: Result, message: str) -> None:
         """Exit 1 through typer.Exit with ``message`` intact, not a MarkupError from the handler."""
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 1, output
         assert type(result.exception) is SystemExit, repr(result.exception)
         assert f"Error: {message}\n" in output
@@ -789,10 +777,7 @@ class TestLiteralText:
         parent = tmp_path / "dumps [backup]"
         parent.mkdir()
         gz = parent / "discogs_20260301 [backup]_artists.xml.gz"
-        with gzip.open(gz, "wb") as f:
-            f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
-            f.write(ARTISTS_XML.encode())
-            f.write(b"</artists>")
+        write_dump(gz, "artists", ARTISTS_XML)
         _widen_console(monkeypatch)
         result = runner.invoke(
             app,
@@ -808,7 +793,7 @@ class TestLiteralText:
                 "--no-progress",
             ],
         )
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 0, output
         lines = output.splitlines()
         assert f"Artists  {gz.name}" in lines
@@ -863,7 +848,7 @@ class TestPreflight:
         _widen_console(monkeypatch)
         with patch("discogskit.cli.pipeline.run") as run:
             result = runner.invoke(app, ["load", str(p), "--dsn", str(db), *extra])
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 1, output
         assert type(result.exception) is SystemExit, repr(result.exception)
         assert f"Error: {message.format(p=p)}\n" in output
@@ -873,7 +858,7 @@ class TestPreflight:
     def test_version(self) -> None:
         result = runner.invoke(app, ["--version"])
         assert result.exit_code == 0, result.output
-        assert _unstyle(result.output) == f"discogskit {version('discogskit')}\n"
+        assert unstyle(result.output) == f"discogskit {version('discogskit')}\n"
 
 
 class TestFormatAndCompressionOptions:
@@ -909,7 +894,7 @@ class TestFormatAndCompressionOptions:
                 app, ["convert", str(gz), "-f", fmt, "--compression", compression]
             )
         assert result.exit_code == 1
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert f"unsupported compression '{compression}' for {fmt}" in output
         run.assert_not_called()
 
@@ -942,7 +927,7 @@ class TestFormatAndCompressionOptions:
         with patch("discogskit.cli.pipeline.run") as run:
             result = runner.invoke(app, ["convert", str(gz), "-f", "bogus"])
         assert result.exit_code == 2
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert "'bogus'" in output
         assert "'parquet'" in output
         assert "'jsonl'" in output
@@ -959,7 +944,7 @@ class TestFormatAndCompressionOptions:
                 app, ["convert", str(gz), "-f", "jsonl", "--compression-level", "5"]
             )
         assert result.exit_code == 1
-        assert _unstyle(result.output) == (
+        assert unstyle(result.output) == (
             "Error: JSONL output is uncompressed by default; --compression-level needs --compression gzip or bzip2.\n"
         )
         run.assert_not_called()
@@ -995,7 +980,7 @@ class TestOptionMinimums:
         with patch("discogskit.cli.pipeline.run") as run:
             result = runner.invoke(app, [command, str(gz), option, value])
         assert result.exit_code == 2
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         # Typer colors the error panel when it detects CI (GITHUB_ACTIONS).
         assert option in output
         assert "is not in the range x>=1" in output
@@ -1012,7 +997,7 @@ class TestOptionMinimums:
         with patch("discogskit.cli.pipeline.run") as run:
             result = runner.invoke(app, ["load", str(gz), option, "1"])
         assert result.exit_code == 2
-        assert "No such option" in _unstyle(result.output)
+        assert "No such option" in unstyle(result.output)
         run.assert_not_called()
 
 
@@ -1024,10 +1009,7 @@ class TestFkOption:
         ``test_sqlite_writer.py``'s ``test_fk_rejects_orphan_child_row`` covers it.
         """
         gz = tmp_path / "discogs_20260301_artists.xml.gz"
-        with gzip.open(gz, "wb") as f:
-            f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
-            f.write(ARTISTS_XML.encode())
-            f.write(b"</artists>")
+        write_dump(gz, "artists", ARTISTS_XML)
 
         db = tmp_path / "out.db"
         result = runner.invoke(
@@ -1043,7 +1025,7 @@ class TestFkOption:
                 "--no-progress",
             ],
         )
-        assert result.exit_code == 0, _unstyle(result.output)
+        assert result.exit_code == 0, unstyle(result.output)
 
         conn = sqlite3.connect(db)
         fks = conn.execute("PRAGMA foreign_key_list(artist_aliases)").fetchall()
@@ -1057,7 +1039,7 @@ class TestProfile:
     @staticmethod
     def _flush_table_rows(output: str) -> list[str]:
         """First cell of each row in the "Per-table flush" table."""
-        lines = _unstyle(output).splitlines()
+        lines = unstyle(output).splitlines()
         start = next(i for i, line in enumerate(lines) if "Per-table flush" in line)
         # Skip the title, the header row and the rule under it; the table ends at the first blank line.
         rows = []
@@ -1070,10 +1052,7 @@ class TestProfile:
     @staticmethod
     def _artists_gz(tmp_path: Path) -> Path:
         gz = tmp_path / _ENTITY_FILE
-        with gzip.open(gz, "wb") as f:
-            f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
-            f.write(ARTISTS_XML.encode())
-            f.write(b"</artists>")
+        write_dump(gz, "artists", ARTISTS_XML)
         return gz
 
     @pytest.mark.parametrize("fmt", ["jsonl", "parquet"])
@@ -1097,7 +1076,7 @@ class TestProfile:
                 "--no-progress",
             ],
         )
-        assert result.exit_code == 0, _unstyle(result.output)
+        assert result.exit_code == 0, unstyle(result.output)
         assert self._flush_table_rows(result.output) == ENTITIES["artists"].table_order
 
     def test_sqlite_load_has_commit_row(
@@ -1118,7 +1097,7 @@ class TestProfile:
                 "--no-progress",
             ],
         )
-        assert result.exit_code == 0, _unstyle(result.output)
+        assert result.exit_code == 0, unstyle(result.output)
         assert self._flush_table_rows(result.output) == [
             *ENTITIES["artists"].table_order,
             "commit",
@@ -1144,12 +1123,9 @@ class TestStrict:
     @staticmethod
     def _artists_gz(tmp_path: Path, *, unhandled: bool) -> Path:
         gz = tmp_path / _ENTITY_FILE
-        with gzip.open(gz, "wt", encoding="utf-8") as f:
-            f.write("<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
-            f.write(ARTISTS_XML)
-            if unhandled:
-                f.write(TestStrict._UNHANDLED)
-            f.write("</artists>")
+        write_dump(
+            gz, "artists", ARTISTS_XML + (TestStrict._UNHANDLED if unhandled else "")
+        )
         return gz
 
     @staticmethod
@@ -1173,7 +1149,7 @@ class TestStrict:
     ) -> None:
         gz = self._artists_gz(tmp_path, unhandled=False)
         result = runner.invoke(app, [*self._args(target, gz, tmp_path), "--strict"])
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 0, output
         assert "Strict" not in output
         assert self._published(target, tmp_path)
@@ -1185,7 +1161,7 @@ class TestStrict:
         _widen_console(monkeypatch)
         gz = self._artists_gz(tmp_path, unhandled=True)
         result = runner.invoke(app, [*self._args(target, gz, tmp_path), "--strict"])
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 1, output
         assert type(result.exception) is SystemExit, repr(result.exception)
         lines = [line.strip() for line in output.splitlines()]
@@ -1204,7 +1180,7 @@ class TestStrict:
     ) -> None:
         gz = self._artists_gz(tmp_path, unhandled=True)
         result = runner.invoke(app, self._args(target, gz, tmp_path))
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 0, output
         assert "Strict" not in output
         assert self._published(target, tmp_path)
@@ -1244,7 +1220,7 @@ class TestFailedRunLeavesNoNewOutput:
         gz = _make_gz(tmp_path)
         with patch("discogskit.cli.pipeline.run", side_effect=KeyboardInterrupt):
             result = runner.invoke(app, ["load", str(gz), "--dsn", str(db)])
-        assert result.exit_code == 130, _unstyle(result.output)
+        assert result.exit_code == 130, unstyle(result.output)
         assert (db.read_bytes() if db.exists() else None) == before
 
     @pytest.mark.parametrize("output_format", ["jsonl", "parquet"])
@@ -1272,7 +1248,7 @@ class TestFailedRunLeavesNoNewOutput:
                 "--strict",
             ],
         )
-        assert result.exit_code == 1, _unstyle(result.output)
+        assert result.exit_code == 1, unstyle(result.output)
         if existing:
             assert list(out.iterdir()) == []
         else:
@@ -1289,7 +1265,7 @@ class TestFailedRunLeavesNoNewOutput:
         result = runner.invoke(
             app, ["load", str(gz), "--dsn", str(db), "--no-progress"]
         )
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 1, output
         assert f"Error: failed to decompress {gz.name}" in output
         assert (db.read_bytes() if db.exists() else None) == before
@@ -1323,7 +1299,7 @@ class TestSizesInMiB:
                 "1",
             ],
         )
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 0, output
         output_bytes = sum(p.stat().st_size for p in (out / "artists").iterdir())
         lines = [line.strip() for line in output.splitlines()]
@@ -1341,10 +1317,7 @@ class TestUnicodeConvert:
     def test_gzip_jsonl_round_trips_unicode_text(self, tmp_path: Path) -> None:
         """Non-ASCII text, entity references and CDATA reach gzip-compressed JSONL intact."""
         gz = tmp_path / _ENTITY_FILE
-        with gzip.open(gz, "wt", encoding="utf-8") as f:
-            f.write("<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
-            f.write(UNICODE_ARTISTS_XML)
-            f.write("</artists>")
+        write_dump(gz, "artists", UNICODE_ARTISTS_XML)
         out = tmp_path / "out"
 
         result = runner.invoke(
@@ -1364,7 +1337,7 @@ class TestUnicodeConvert:
             ],
         )
 
-        assert result.exit_code == 0, _unstyle(result.output)
+        assert result.exit_code == 0, unstyle(result.output)
         for table_name in ENTITIES["artists"].table_order:
             with gzip.open(
                 out / "artists" / f"{table_name}.jsonl.gz", "rt", encoding="utf-8"
@@ -1398,7 +1371,7 @@ class TestCompressionLevel:
                 *extra_args,
             ],
         )
-        assert result.exit_code == 0, _unstyle(result.output)
+        assert result.exit_code == 0, unstyle(result.output)
 
     @pytest.mark.parametrize(
         "fmt, compression, low, high",
@@ -1510,7 +1483,7 @@ class TestCompressionLevel:
             ],
         )
         assert result.exit_code == 1
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert "none does not support a compression level." in output
 
     def test_rejects_level_for_snappy(self, tmp_path: Path) -> None:
@@ -1529,7 +1502,7 @@ class TestCompressionLevel:
             ],
         )
         assert result.exit_code == 1
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert "snappy does not support a compression level." in output
 
     @pytest.mark.parametrize(
@@ -1577,7 +1550,7 @@ class TestCompressionLevel:
             ],
         )
         assert result.exit_code == 1
-        assert "is out of range for" in _unstyle(result.output)
+        assert "is out of range for" in unstyle(result.output)
 
     def test_format_compression_mismatch_error_still_wins(self, tmp_path: Path) -> None:
         """An invalid format/compression pairing is rejected before --compression-level is even looked at."""
@@ -1597,7 +1570,7 @@ class TestCompressionLevel:
                 ],
             )
         assert result.exit_code == 1
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert "unsupported compression 'zstd' for jsonl" in output
         assert "compression-level" not in output
         run.assert_not_called()
@@ -1612,7 +1585,7 @@ class TestLoadRejectsPostgreSqlOnlyOptionsForSqlite:
         pipeline_result = pipeline.PipelineResult(None, 0.0, 0.0, 0.0, 0.0, 0)
         with patch("discogskit.cli.pipeline.run", return_value=pipeline_result):
             result = runner.invoke(app, ["load", str(gz), "--dsn", str(db)])
-        assert result.exit_code == 0, _unstyle(result.output)
+        assert result.exit_code == 0, unstyle(result.output)
 
     @pytest.mark.parametrize(
         "flag, value",
@@ -1645,7 +1618,7 @@ class TestLoadRejectsPostgreSqlOnlyOptionsForSqlite:
         pipeline_result = pipeline.PipelineResult(None, 0.0, 0.0, 0.0, 0.0, 0)
         with patch("discogskit.cli.pipeline.run", return_value=pipeline_result):
             result = runner.invoke(app, args)
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 1, output
         assert flag in output
         assert "can only be used with PostgreSQL, not a SQLite DSN." in output
@@ -1659,7 +1632,7 @@ class TestLoadRejectsPostgreSqlOnlyOptionsForSqlite:
         result = runner.invoke(
             app, ["load", str(gz), "--dsn", str(db), "--pg-bogus-option"]
         )
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 2, output
         assert "No such option" in output
 
@@ -1684,7 +1657,7 @@ class TestLoadRejectsInMemorySqlite:
         gz = _make_gz(tmp_path)
         with patch("discogskit.cli.pipeline.run") as run:
             result = runner.invoke(app, ["load", str(gz), "--dsn", dsn])
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 1, output
         assert f"Invalid SQLite DSN: {dsn!r} names an in-memory database" in output
         run.assert_not_called()
@@ -1717,7 +1690,7 @@ class TestLoadHidesPasswordInMalformedPostgreSqlDsn:
         gz = _make_gz(tmp_path)
         with patch("discogskit.cli.pipeline.run") as run:
             result = runner.invoke(app, ["load", str(gz), "--dsn", dsn])
-        output = _unstyle(result.output)
+        output = unstyle(result.output)
         assert result.exit_code == 1, output
         assert f"Invalid PostgreSQL DSN: {shown!r}." in output
         assert "s3" not in output
@@ -1770,13 +1743,11 @@ class TestPipedOutput:
         """Off a terminal, the default run prints per-chunk lines, each as its chunk is written, not all at exit
         (#105)."""
         gz = tmp_path / _ENTITY_FILE
-        with gzip.open(gz, "wb", compresslevel=1) as f:
-            f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
-            for i in range(1, 50_001):
-                f.write(
-                    b"<artist><id>%d</id><name>Artist %d</name></artist>\n" % (i, i)
-                )
-            f.write(b"</artists>")
+        records = b"".join(
+            b"<artist><id>%d</id><name>Artist %d</name></artist>\n" % (i, i)
+            for i in range(1, 50_001)
+        )
+        write_dump(gz, "artists", records, compresslevel=1)
         args = ["convert", str(gz), "-f", "jsonl", "--output", str(tmp_path / "out")]
         args += ["--chunk-mb", "1", "--parse-workers", "1"]
 

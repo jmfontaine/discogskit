@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -68,7 +69,10 @@ def _rss_bytes() -> int:
     return int(out) * 1024
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="measures RSS with ps")
+@pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("ps") is None,
+    reason="measures RSS with ps",
+)
 def test_scan_does_not_keep_the_file_resident(tmp_path, monkeypatch):
     """Scanning through one mapping kept every page it read in the process's RSS until the scan ended: up to 7 GiB
     of the 62.7 GB releases dump (issue #83). Each page is the file's own, so a file several windows long shows it."""
@@ -98,6 +102,7 @@ def test_scan_does_not_keep_the_file_resident(tmp_path, monkeypatch):
     splits = find_split_points(str(path), 32 * mib, "item", "items")
 
     assert len(splits) == 4
+    assert mid_scan, "the scan never reached the 96 MiB sample point"
     assert mid_scan[0] - before < 48 * mib
 
 

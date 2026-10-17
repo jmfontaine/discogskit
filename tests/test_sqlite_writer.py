@@ -10,8 +10,6 @@ import pyarrow as pa
 import pytest
 
 from discogskit.entities import ENTITIES
-from discogskit.entities._def import ChunkArgs
-from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers.sqlite import SQLiteWriter
 from tests.conftest import (
     ARTISTS_XML,
@@ -22,6 +20,7 @@ from tests.conftest import (
     ipc_to_record_batches,
     ipc_to_tables,
     needs_permissions,
+    parse_file,
 )
 
 
@@ -41,9 +40,7 @@ def test_every_entity_loads(tmp_path, entity_name, xml, fk):
     entity = ENTITIES[entity_name]
     f = tmp_path / f"{entity_name}.xml"
     f.write_text(xml)
-    ipc_dict = extract_chunk_to_ipc(
-        ChunkArgs(end=os.path.getsize(f), entity=entity_name, file_path=str(f), start=0)
-    ).tables
+    ipc_dict = parse_file(f, entity_name)
     expected = {
         name: table.num_rows
         for name, table in ipc_to_tables(ipc_dict, entity.schemas).items()
@@ -131,16 +128,8 @@ class TestSQLiteWriter:
         f2 = tmp_path / "chunk2.xml"
         f2.write_text(xml2)
 
-        ipc1 = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=os.path.getsize(f1), entity="artists", file_path=str(f1), start=0
-            )
-        ).tables
-        ipc2 = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=os.path.getsize(f2), entity="artists", file_path=str(f2), start=0
-            )
-        ).tables
+        ipc1 = parse_file(f1, "artists")
+        ipc2 = parse_file(f2, "artists")
 
         db_path = str(tmp_path / "test.db")
         writer = SQLiteWriter(db_path)
@@ -534,11 +523,7 @@ class TestSQLiteWriter:
         )
         f = tmp_path / "artists.xml"
         f.write_text(xml, encoding="utf-8")
-        ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=os.path.getsize(f), entity="artists", file_path=str(f), start=0
-            )
-        ).tables
+        ipc_dict = parse_file(f, "artists")
         db_path = str(tmp_path / "test.db")
         self._load(db_path, entity, ipc_dict)
 

@@ -65,9 +65,9 @@ A new entity module also needs its `ENTITY` added to the tuple in `entities/__in
 ## Testing
 
 - Unit tests run without external services. Integration tests are the ones that need a PostgreSQL container (testcontainers, Docker); mark only those `integration`. SQLite, JSONL, Parquet and decompression tests are unit tests.
-- PostgreSQL tests skip when Docker is unavailable. With `DISCOGSKIT_REQUIRE_DOCKER=1`, set on the Ubuntu CI jobs, they fail instead.
+- PostgreSQL tests skip when Docker is unavailable. With `DISCOGSKIT_REQUIRE_DOCKER=1`, set on the Ubuntu CI jobs, they fail instead. The `benchmarks/run.py` tests that need GNU `time` do the same with `DISCOGSKIT_REQUIRE_GNU_TIME=1`; `require_or_skip()` in `tests/conftest.py` implements both.
 - Test markers: `unit` (default), `integration`.
-- Fixtures with XML snippets in `tests/conftest.py`.
+- Fixtures with XML snippets in `tests/conftest.py`, with shared helpers such as `parse_file()` (parse a file as one chunk), `write_dump()` (write a gzipped dump) and `unstyle()` (strip ANSI styling from CLI output); use them rather than repeating their code.
 
 ## Quality gates
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gzip
 import re
 import sqlite3
 import subprocess
@@ -13,12 +12,18 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
-from rich.text import Text
 from typer.testing import CliRunner, Result
 
 from discogskit.cli import app
 from scripts import skill_references
-from tests.conftest import ARTISTS_XML, LABELS_XML, MASTERS_XML, RELEASES_XML
+from tests.conftest import (
+    ARTISTS_XML,
+    LABELS_XML,
+    MASTERS_XML,
+    RELEASES_XML,
+    unstyle,
+    write_dump,
+)
 
 runner = CliRunner()
 
@@ -28,11 +33,6 @@ CORE = SKILLS / "core"
 
 def _invoke(*args: str) -> Result:
     return runner.invoke(app, ["skills", *args])
-
-
-def _unstyle(output: str) -> str:
-    """Strip ANSI styling (Rich colors error messages when it detects CI)."""
-    return Text.from_ansi(output).plain
 
 
 def _references() -> list[Path]:
@@ -85,7 +85,7 @@ class TestGet:
 
         assert result.exit_code == 1
         assert (
-            _unstyle(result.output) == "Error: unknown skill 'nope'. Available: core.\n"
+            unstyle(result.output) == "Error: unknown skill 'nope'. Available: core.\n"
         )
 
 
@@ -140,8 +140,7 @@ def _write_dumps(directory: Path) -> None:
         ("masters", MASTERS_XML),
         ("releases", RELEASES_XML),
     ]:
-        with gzip.open(directory / f"discogs_20260301_{entity}.xml.gz", "wt") as f:
-            f.write(f"<{entity}>\n{xml}</{entity}>\n")
+        write_dump(directory / f"discogs_20260301_{entity}.xml.gz", entity, xml)
 
 
 def _documented_parquet_types() -> dict[tuple[str, str], str]:

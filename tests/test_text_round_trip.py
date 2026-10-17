@@ -3,19 +3,16 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from discogskit.entities._def import ChunkArgs
-from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.writers.jsonl import JSONLWriter
 from discogskit.writers.parquet import ParquetWriter
 from discogskit.writers.sqlite import SQLiteWriter
-from tests.conftest import UNICODE_ARTISTS_ROWS, ipc_to_record_batches
+from tests.conftest import UNICODE_ARTISTS_ROWS, ipc_to_record_batches, parse_file
 
 
 def _read_jsonl(tmp_path, table_name, schema):
@@ -55,12 +52,7 @@ def _read_sqlite(tmp_path, table_name, schema):
 def test_unicode_text_round_trips(
     tmp_path, entity, unicode_artists_xml_file, make_writer, read
 ):
-    size = os.path.getsize(unicode_artists_xml_file)
-    ipc_dict = extract_chunk_to_ipc(
-        ChunkArgs(
-            end=size, entity="artists", file_path=str(unicode_artists_xml_file), start=0
-        )
-    ).tables
+    ipc_dict = parse_file(unicode_artists_xml_file, "artists")
     writer = make_writer(tmp_path)
     try:
         writer.setup(entity)

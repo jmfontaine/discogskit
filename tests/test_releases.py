@@ -10,17 +10,17 @@ import pytest
 from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.entities.releases import SCHEMAS
-from tests.conftest import assert_second_copy_fails, ipc_to_tables, parse_records
+from tests.conftest import (
+    assert_second_copy_fails,
+    ipc_to_tables,
+    parse_file,
+    parse_records,
+)
 
 
 class TestReleasesParsing:
     def _parse(self, releases_xml_file):
-        size = os.path.getsize(releases_xml_file)
-        ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=size, entity="releases", file_path=str(releases_xml_file), start=0
-            )
-        ).tables
+        ipc_dict = parse_file(releases_xml_file, "releases")
         return ipc_to_tables(ipc_dict, SCHEMAS)
 
     def test_releases_table(self, releases_xml_file):
@@ -109,11 +109,7 @@ class TestReleasesParsing:
         f = tmp_path / "nameless_artists.xml"
         f.write_text(xml)
 
-        ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=os.path.getsize(f), entity="releases", file_path=str(f), start=0
-            )
-        ).tables
+        ipc_dict = parse_file(f, "releases")
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         assert tables["release_artists"].to_pylist() == [
@@ -258,11 +254,7 @@ class TestReleasesParsing:
             + re.escape(message)
             + "; only release-level extra artists have a tracks column at chunk line 5$",
         ):
-            extract_chunk_to_ipc(
-                ChunkArgs(
-                    end=os.path.getsize(f), entity="releases", file_path=str(f), start=0
-                )
-            )
+            parse_file(f, "releases")
 
     def test_tracks_with_subtracks(self, releases_xml_file):
         tables = self._parse(releases_xml_file)
@@ -299,11 +291,7 @@ class TestReleasesParsing:
             match=r"^Invalid <release> record in .* at chunk line 1 \(chunk bytes \d+-\d+, id='7'\):"
             r" <sub_tracks> nested in sub-track '1a' of track '1' at chunk line 6$",
         ):
-            extract_chunk_to_ipc(
-                ChunkArgs(
-                    end=os.path.getsize(f), entity="releases", file_path=str(f), start=0
-                )
-            )
+            parse_file(f, "releases")
 
     def test_nested_sub_tracks_line_past_libxml2_limit(self, tmp_path):
         """The nested <sub_tracks> line is its own past line 65535, where lxml reports its parent's line 1 (#96)."""
@@ -321,11 +309,7 @@ class TestReleasesParsing:
             match=r"^Invalid <release> record in .* at chunk line 1 \(chunk bytes \d+-\d+, id='7'\):"
             r" <sub_tracks> nested in sub-track '1a' of track '1' at chunk line 70001$",
         ):
-            extract_chunk_to_ipc(
-                ChunkArgs(
-                    end=os.path.getsize(f), entity="releases", file_path=str(f), start=0
-                )
-            )
+            parse_file(f, "releases")
 
     def test_track_artists(self, releases_xml_file):
         tables = self._parse(releases_xml_file)
@@ -364,11 +348,7 @@ class TestReleasesParsing:
             ValueError,
             match=r"^Invalid <release> record in .* at chunk line 2 .*: missing or empty id$",
         ):
-            extract_chunk_to_ipc(
-                ChunkArgs(
-                    end=os.path.getsize(f), entity="releases", file_path=str(f), start=0
-                )
-            )
+            parse_file(f, "releases")
 
     def test_missing_is_null_and_empty_is_empty_string(self, tmp_path):
         """Absent elements/attributes are NULL; present but empty ones are "" (#21)."""
@@ -387,11 +367,7 @@ class TestReleasesParsing:
         f = tmp_path / "missing_vs_empty.xml"
         f.write_text(xml)
 
-        ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=os.path.getsize(f), entity="releases", file_path=str(f), start=0
-            )
-        ).tables
+        ipc_dict = parse_file(f, "releases")
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         rel = tables["releases"].to_pylist()[0]
@@ -443,11 +419,7 @@ class TestReleasesParsing:
         f = tmp_path / "bogus_tags.xml"
         f.write_text(xml)
 
-        ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=os.path.getsize(f), entity="releases", file_path=str(f), start=0
-            )
-        ).tables
+        ipc_dict = parse_file(f, "releases")
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         assert tables["release_artists"].num_rows == 1
@@ -466,11 +438,7 @@ class TestReleaseTypedValues:
             f'<release id="1" status="Accepted"><master_id{master_id_attrs}>5</master_id>'
             f'<videos><video src="http://x"{video_attrs}/></videos></release>\n'
         )
-        ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=os.path.getsize(f), entity="releases", file_path=str(f), start=0
-            )
-        ).tables
+        ipc_dict = parse_file(f, "releases")
         return ipc_to_tables(ipc_dict, SCHEMAS)
 
     @pytest.mark.parametrize(

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import gzip
-import os
 import signal
 import threading
 import time
@@ -18,9 +16,14 @@ import pytest
 from typer.testing import CliRunner
 
 from discogskit.entities import ENTITIES
-from discogskit.entities._def import ChunkArgs
-from discogskit.entities._worker import extract_chunk_to_ipc
-from tests.conftest import ARTISTS_XML, LABELS_XML, empty_ipc, ipc_to_record_batches
+from tests.conftest import (
+    ARTISTS_XML,
+    LABELS_XML,
+    empty_ipc,
+    ipc_to_record_batches,
+    parse_file,
+    write_dump,
+)
 
 
 def _load(dsn, entity, ipc_dict, **options):
@@ -33,6 +36,20 @@ def _load(dsn, entity, ipc_dict, **options):
         writer.finalize(entity)
     finally:
         writer.close()
+
+
+@pytest.fixture()
+def dsn(pg_dsn):
+    """A DSN whose search_path is a fresh schema, dropped after the test."""
+    import psycopg
+    from psycopg import sql
+
+    schema = f"test_{uuid.uuid4().hex[:8]}"
+    with psycopg.connect(pg_dsn, autocommit=True) as conn:
+        conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    yield f"{pg_dsn}?options=-csearch_path%3D{schema}"
+    with psycopg.connect(pg_dsn, autocommit=True) as conn:
+        conn.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
 @pytest.mark.integration
@@ -502,12 +519,7 @@ class TestWriteGroupFailure:
 
         gate, _, events = groups
         entity = ENTITIES["artists"]
-        size = os.path.getsize(artists_xml_file)
-        ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=size, entity="artists", file_path=str(artists_xml_file), start=0
-            )
-        ).tables
+        ipc_dict = parse_file(artists_xml_file, "artists")
         errors = []
         writer = PostgreSQLWriter(pg_dsn, overwrite=True, write_workers=2)
 
@@ -548,10 +560,7 @@ class TestWriteGroupFailure:
 
         monkeypatch.setattr(PostgreSQLWriter, "close", close)
         gz = tmp_path / "discogs_20260301_artists.xml.gz"
-        with gzip.open(gz, "wb") as f:
-            f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
-            f.write(ARTISTS_XML.encode())
-            f.write(b"</artists>")
+        write_dump(gz, "artists", ARTISTS_XML)
 
         # The CLI runs on this thread, so another opens the gate a second after
         # the sibling group reaches it: long enough for a close() that doesn't
@@ -718,20 +727,6 @@ class TestIndexAbort:
     """
 
     _HOLD = 15
-
-    @pytest.fixture()
-    def dsn(self, pg_dsn):
-        import psycopg
-        from psycopg import sql
-
-        schema = f"idx_{uuid.uuid4().hex[:8]}"
-        with psycopg.connect(pg_dsn, autocommit=True) as conn:
-            conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-        yield f"{pg_dsn}?options=-csearch_path%3D{schema}"
-        with psycopg.connect(pg_dsn, autocommit=True) as conn:
-            conn.execute(
-                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
-            )
 
     @staticmethod
     def _indexed_tables(dsn):
@@ -916,20 +911,6 @@ class TestInterruptCancelsCopy:
 
     _HOLD = 15
 
-    @pytest.fixture()
-    def dsn(self, pg_dsn):
-        import psycopg
-        from psycopg import sql
-
-        schema = f"copy_{uuid.uuid4().hex[:8]}"
-        with psycopg.connect(pg_dsn, autocommit=True) as conn:
-            conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-        yield f"{pg_dsn}?options=-csearch_path%3D{schema}"
-        with psycopg.connect(pg_dsn, autocommit=True) as conn:
-            conn.execute(
-                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
-            )
-
     @staticmethod
     def _backends(conn, app_name, *, copy_waiting_on_lock=False):
         query = (
@@ -952,10 +933,7 @@ class TestInterruptCancelsCopy:
         from discogskit.writers.postgresql import PostgreSQLWriter
 
         gz = tmp_path / "discogs_20260301_artists.xml.gz"
-        with gzip.open(gz, "wb") as f:
-            f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
-            f.write(ARTISTS_XML.encode())
-            f.write(b"</artists>")
+        write_dump(gz, "artists", ARTISTS_XML)
         config = pipeline.PipelineConfig(
             chunk_mb=1,
             entity="artists",
@@ -1158,10 +1136,7 @@ class TestPgSchema:
             return conn
 
         gz = tmp_path / "discogs_20260301_artists.xml.gz"
-        with gzip.open(gz, "wt") as f:
-            f.write(
-                f"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n{ARTISTS_XML}</artists>"
-            )
+        write_dump(gz, "artists", ARTISTS_XML)
         schema = f"pgoptions_{uuid.uuid4().hex[:8]}"
         args = [
             "load",
@@ -1483,28 +1458,9 @@ class TestPgSchema:
 class TestExistingTablesCheckedUpFront:
     """Existing tables for any job fail the load before the first job starts (#102)."""
 
-    @pytest.fixture()
-    def dsn(self, pg_dsn):
-        import psycopg
-        from psycopg import sql
-
-        schema = f"upfront_{uuid.uuid4().hex[:8]}"
-        with psycopg.connect(pg_dsn, autocommit=True) as conn:
-            conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-        yield f"{pg_dsn}?options=-csearch_path%3D{schema}"
-        with psycopg.connect(pg_dsn, autocommit=True) as conn:
-            conn.execute(
-                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
-            )
-
     @staticmethod
     def _gz(tmp_path, entity, xml):
-        gz = tmp_path / f"discogs_20260301_{entity}.xml.gz"
-        with gzip.open(gz, "wb") as f:
-            f.write(f"<?xml version='1.0' encoding='UTF-8'?>\n<{entity}>\n".encode())
-            f.write(xml.encode())
-            f.write(f"</{entity}>".encode())
-        return gz
+        return write_dump(tmp_path / f"discogs_20260301_{entity}.xml.gz", entity, xml)
 
     @staticmethod
     def _load_cli(dsn, *paths, overwrite=False):
@@ -1541,8 +1497,9 @@ class TestExistingTablesCheckedUpFront:
         assert result.exit_code == 1, output
         # Rich may wrap the message at the terminal width.
         message = " ".join(output.split())
-        assert message.startswith("Error: Tables already exist in schema upfront_")
-        assert message.endswith(
+        schema = dsn.rsplit("search_path%3D", 1)[1]
+        assert message == (
+            f"Error: Tables already exist in schema {schema} "
             "(e.g. label_sublabels). Use --overwrite to replace them."
         )
         run.assert_not_called()

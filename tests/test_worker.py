@@ -18,6 +18,7 @@ from tests.conftest import (
     MASTERS_XML,
     RELEASES_XML,
     ipc_to_tables,
+    parse_file,
 )
 
 PLAIN_RECORDS = {
@@ -351,11 +352,7 @@ def test_namespaced_record_fails(tmp_path, entity_name, layout):
     f.write_text(xml)
 
     with pytest.raises(ValueError) as info:
-        extract_chunk_to_ipc(
-            ChunkArgs(
-                end=os.path.getsize(f), entity=entity_name, file_path=str(f), start=0
-            )
-        )
+        parse_file(f, entity_name)
 
     message = str(info.value)
     assert str(f) in message
@@ -370,11 +367,7 @@ def test_namespaced_line_past_65535_is_approximate_when_expat_fails(tmp_path):
     f.write_text(xml, encoding="utf-8")
 
     with pytest.raises(ValueError, match=r"<\{urn:x\}artist> near line \d+;"):
-        extract_chunk_to_ipc(
-            ChunkArgs(
-                end=os.path.getsize(f), entity="artists", file_path=str(f), start=0
-            )
-        )
+        parse_file(f, "artists")
 
 
 def test_namespaced_element_in_nested_container_is_not_a_record(tmp_path):
@@ -387,9 +380,7 @@ def test_namespaced_element_in_nested_container_is_not_a_record(tmp_path):
     f = tmp_path / "artists.xml"
     f.write_text(xml)
 
-    ipc_dict = extract_chunk_to_ipc(
-        ChunkArgs(end=os.path.getsize(f), entity="artists", file_path=str(f), start=0)
-    ).tables
+    ipc_dict = parse_file(f, "artists")
 
     assert 1 in ipc_to_tables(ipc_dict, SCHEMAS)["artists"].column("id").to_pylist()
 
@@ -434,9 +425,7 @@ def test_content_between_records_fails(
     size = os.path.getsize(f)
 
     with pytest.raises(ValueError) as info:
-        extract_chunk_to_ipc(
-            ChunkArgs(end=size, entity=entity_name, file_path=str(f), start=0)
-        )
+        parse_file(f, entity_name)
 
     assert str(info.value) == (
         f"Unsupported {entity_name} XML in {f}, chunk at bytes 0-{size} (line numbers count from byte 0): {found}"
@@ -452,11 +441,7 @@ def test_stray_text_line_is_approximate_when_expat_fails(tmp_path):
     f.write_text(xml, encoding="utf-8")
 
     with pytest.raises(ValueError, match=r": text 'STRAY' near line 1; only <artist>"):
-        extract_chunk_to_ipc(
-            ChunkArgs(
-                end=os.path.getsize(f), entity="artists", file_path=str(f), start=0
-            )
-        )
+        parse_file(f, "artists")
 
 
 def test_worker_never_holds_the_whole_chunk(tmp_path):
@@ -782,11 +767,7 @@ class TestIntegerValues:
         f.write_text(
             f'<artist><id>1</id><aliases><name id="{value}">A</name></aliases></artist>\n'
         )
-        tables = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=os.path.getsize(f), entity="artists", file_path=str(f), start=0
-            )
-        ).tables
+        tables = parse_file(f, "artists")
         assert ipc_to_tables(tables, SCHEMAS)["artist_aliases"].column(
             "alias_id"
         ).to_pylist() == [expected]
@@ -848,20 +829,19 @@ class TestTableErrorContext:
     ``_to_batch`` through a bug; its error must still name the file, chunk and table."""
 
     @pytest.mark.parametrize(
-        "value, detail",
-        [
-            (3_000_000_000, "Value 3000000000 too large to fit in C integer type"),
-            (2**70, "Python int too large to convert to C long"),
-        ],
-        ids=["int32-overflow", "int64-overflow"],
+        "value", [3_000_000_000, 2**70], ids=["int32-overflow", "int64-overflow"]
     )
-    def test_out_of_range_value_names_file_chunk_and_table(self, value, detail):
+    def test_out_of_range_value_names_file_chunk_and_table(self, value):
         args = ChunkArgs(end=80, entity="artists", file_path="artists.xml", start=32)
         columns = {"alias_id": [value], "artist_id": [1], "name": ["A"]}
         with pytest.raises(ValueError) as info:
             _worker._to_batch(
                 args, columns, "artist_aliases", SCHEMAS["artist_aliases"]
             )
-        assert str(info.value) == (
-            f"Invalid artist_aliases table values in artists.xml (chunk bytes 32-80): {detail}"
+        # The cause's own text follows, worded by pyarrow or CPython.
+        prefix = (
+            "Invalid artist_aliases table values in artists.xml (chunk bytes 32-80): "
         )
+        message = str(info.value)
+        assert message.startswith(prefix)
+        assert message != prefix

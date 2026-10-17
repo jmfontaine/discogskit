@@ -29,6 +29,8 @@ class TestGetWriter:
         with patch("psycopg.connect") as mock_connect:
             mock_connect.return_value = mock_connect
             writer = get_writer("postgresql://user:pass@localhost/db")
+        # Joins the cancel thread the writer started.
+        writer.close()
         from discogskit.writers.postgresql import PostgreSQLWriter
 
         assert isinstance(writer, PostgreSQLWriter)
@@ -70,6 +72,7 @@ class TestGetWriter:
         with patch("psycopg.connect") as mock_connect:
             mock_connect.return_value = mock_connect
             writer = get_writer("postgres://user:pass@localhost/db")
+        writer.close()
         from discogskit.writers.postgresql import PostgreSQLWriter
 
         assert isinstance(writer, PostgreSQLWriter)
