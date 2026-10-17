@@ -199,8 +199,9 @@ end up mixed. A process killed mid-run can leave an `<entity>.partial-*` directo
 failed run removes the output directory (and its parents) if it created them and they're still empty; directories
 that existed before stay.
 
-A run checks that it can move files into an existing `<output>/<entity>/` before it parses anything, and fails
-early if it can't (e.g. the directory isn't writable). If moving the finished files fails anyway, the run keeps
+Before it decompresses anything, a run checks that it can create files in the output directory (or, if that doesn't
+exist yet, in its nearest existing parent) and move them into an existing `<output>/<entity>/`, and fails early if it
+can't (e.g. a directory isn't writable, or a parent is a file). If moving the finished files fails anyway, the run keeps
 them: the error names the `<entity>.partial-*` directory that holds the files not moved yet, which can then be
 moved by hand. Files moved before the failure are already in `<output>/<entity>/`, next to any older files.
 

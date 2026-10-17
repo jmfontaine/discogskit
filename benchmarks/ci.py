@@ -95,10 +95,13 @@ def _cpu_stat(cgroup: Path) -> dict[str, int]:
     }
 
 
-def measure(command: list[str], cgroup: Path, log: Path, name: str) -> Run:
-    """Run ``command`` in a fresh ``cgroup``, with its output in ``log``; raise BenchmarkError if it fails.
+def measure(
+    command: list[str], env: dict[str, str], cgroup: Path, log: Path, name: str
+) -> Run:
+    """Run ``command`` with environment ``env`` in a fresh ``cgroup``, with its output in ``log``; raise
+    BenchmarkError if it fails.
 
-    The error names the run as ``name``, not ``command``, which can hold a DSN with a password.
+    The error names the run as ``name``, not ``command``.
     """
     cgroup.mkdir()
     try:
@@ -106,6 +109,7 @@ def measure(command: list[str], cgroup: Path, log: Path, name: str) -> Run:
             start = time.perf_counter()
             returncode = subprocess.call(
                 ["/bin/sh", "-c", _WRAPPER, str(cgroup), *command],
+                env=env,
                 stderr=subprocess.STDOUT,
                 stdout=output,
             )
@@ -125,12 +129,17 @@ def measure(command: list[str], cgroup: Path, log: Path, name: str) -> Run:
         cgroup.rmdir()
 
 
-def _command(target: str, path: Path, work: Path, dsn: str) -> list[str]:
-    """The discogskit command benchmarked for ``target``, with default tuning and no progress bar."""
+def _command(
+    target: str, path: Path, work: Path, dsn: str
+) -> tuple[list[str], dict[str, str]]:
+    """The discogskit command benchmarked for ``target``, with default tuning and no progress bar, and its environment.
+
+    A load gets its database in ``DATABASE_URL``, never on the command line, where ``ps`` would show a DSN's password.
+    """
     # The venv's entry point directly, not `uv run`, which would add its own startup to every run.
     executable = str(Path(sys.executable).parent / "discogskit")
     if target in ("jsonl", "parquet"):
-        return [
+        command = [
             executable,
             "convert",
             "--format",
@@ -140,8 +149,12 @@ def _command(target: str, path: Path, work: Path, dsn: str) -> list[str]:
             str(work / target),
             str(path),
         ]
+        return command, dict(os.environ)
     database = dsn if target == "postgresql" else str(work / "discogs.db")
-    return [executable, "load", "--dsn", database, "--no-progress", str(path)]
+    return [executable, "load", "--no-progress", str(path)], {
+        **os.environ,
+        "DATABASE_URL": database,
+    }
 
 
 def _reset(target: str, work: Path, dsn: str) -> None:
@@ -283,7 +296,9 @@ def main(
     dsn: Annotated[
         str,
         typer.Option(
-            help="PostgreSQL DSN; its public schema is dropped before each run."
+            envvar="DATABASE_URL",
+            help="PostgreSQL DSN; its public schema is dropped before each run. Set DATABASE_URL rather than "
+            "--dsn when it holds a password, which ps shows on a command line.",
         ),
     ],
     output: Annotated[
@@ -323,8 +338,10 @@ def main(
                     name = f"{file['entity']} -> {target}"
                     _reset(target, work, dsn)
                     typer.echo(f"Run {repeat}/{repeats}: {name}")
+                    command, env = _command(target, subset / file["file"], work, dsn)
                     run = measure(
-                        _command(target, subset / file["file"], work, dsn),
+                        command,
+                        env,
                         cgroup / "run",
                         logs / f"{file['entity']}-{target}-{repeat}.log",
                         name,
