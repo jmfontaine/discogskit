@@ -70,6 +70,9 @@ ini_options.filterwarnings = [
 
 [tool.coverage]
 run.source = [ "discogskit" ]
+# Measures the spawned decompress child. The parse workers, which the pipeline terminates, stay unmeasured: run.sigterm
+# would measure them, but coverage's SIGTERM handler can deadlock a worker terminated mid-chunk and hang the run (#226).
+run.patch = [ "subprocess" ]
 
 [tool.deadcode]
 exclude = [ "benchmarks/alternatives" ]  # competitor checkouts from `just bench-setup`

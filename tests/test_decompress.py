@@ -1029,16 +1029,23 @@ class TestDecompress:
         assert xml_path.read_bytes() == xml_content
 
     @pytest.mark.parametrize(
+        "first",
+        # Over 4 MiB, the child records a checkpoint inside the first member, so the
+        # footer check reads back from a non-zero offset.
+        [_XML * 1000, _XML * 120_000],
+        ids=["one_checkpoint", "two_checkpoints"],
+    )
+    @pytest.mark.parametrize(
         "last", [_XML, b""], ids=["non_empty_last_member", "empty_last_member"]
     )
-    def test_multi_member_gz_decompressed(self, tmp_path, last):
+    def test_multi_member_gz_decompressed(self, tmp_path, first, last):
         """The footer check finds the last member's start inside the output,
         and accepts a real empty last member (an all-zero footer).
         """
         gz_path = tmp_path / "test.xml.gz"
-        gz_path.write_bytes(gzip.compress(_XML * 1000) + gzip.compress(last))
+        gz_path.write_bytes(gzip.compress(first) + gzip.compress(last))
         xml_path = tmp_path / "test.xml"
 
         ensure_xml(gz_path, xml_path, workers=1).release(remove_xml=False)
 
-        assert xml_path.read_bytes() == _XML * 1000 + last
+        assert xml_path.read_bytes() == first + last

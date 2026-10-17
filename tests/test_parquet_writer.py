@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import tempfile
@@ -10,6 +11,8 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
+from discogskit.writers import _staging
+from discogskit.writers._staging import StagedFiles
 from discogskit.writers.parquet import ParquetWriter
 from tests.conftest import (
     empty_ipc,
@@ -153,6 +156,58 @@ class TestParquetWriter:
         writer.close()
 
         assert removed
+        assert list(tmp_path.iterdir()) == []
+
+    def test_setup_gives_up_when_the_output_dir_keeps_vanishing(
+        self, monkeypatch, tmp_path
+    ):
+        """Staging retries a bounded number of times, then fails instead of retrying forever."""
+        attempts = []
+
+        def vanishing_mkdtemp(*args, **kwargs):
+            attempts.append(True)
+            raise FileNotFoundError(
+                errno.ENOENT, os.strerror(errno.ENOENT), str(tmp_path / "out")
+            )
+
+        monkeypatch.setattr(tempfile, "mkdtemp", vanishing_mkdtemp)
+        with pytest.raises(OSError, match="Can't write output files into"):
+            StagedFiles(tmp_path / "out", "artists", ["artists.parquet"])
+
+        assert len(attempts) == _staging._STAGING_ATTEMPTS
+        assert list(tmp_path.iterdir()) == []
+
+    def test_setup_uses_an_output_dir_another_run_just_created(
+        self, monkeypatch, tmp_path
+    ):
+        """A directory another run creates between the check and the mkdir() is used, and isn't this run's to remove."""
+        out = tmp_path / "out"
+        mkdir = Path.mkdir
+
+        def mkdir_lost_to_another_run(self, *args, **kwargs):
+            mkdir(self, *args, **kwargs)
+            if self == out:
+                raise FileExistsError(
+                    errno.EEXIST, os.strerror(errno.EEXIST), str(self)
+                )
+
+        monkeypatch.setattr(Path, "mkdir", mkdir_lost_to_another_run)
+        staged = StagedFiles(out, "artists", ["artists.parquet"])
+        monkeypatch.undo()
+        assert staged.staging_dir.parent == out
+        staged.discard()
+
+        assert out.is_dir()
+        assert list(out.iterdir()) == []
+
+    def test_discard_skips_a_created_dir_another_run_already_removed(self, tmp_path):
+        """Cleanup goes on to the parents when another run that failed removed a directory first."""
+        out = tmp_path / "parent" / "out"
+        staged = StagedFiles(out, "artists", ["artists.parquet"])
+        staged.staging_dir.rmdir()
+        out.rmdir()
+        staged.discard()
+
         assert list(tmp_path.iterdir()) == []
 
     def test_close_after_interrupted_commit_removes_the_dirs_it_created(
