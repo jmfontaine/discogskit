@@ -1497,8 +1497,7 @@ class TestPipelineRunWithoutMainGuard:
     @pytest.mark.parametrize("cached", [False, True], ids=["fresh-gz", "cached-xml"])
     def test_unguarded_script_fails_at_once_naming_the_guard(self, tmp_path, cached):
         """With a cached XML the first process started is a parse worker, otherwise the decompression process."""
-        gz_path = tmp_path / "artists.xml.gz"
-        gz_path.write_bytes(gzip.compress(_ARTISTS_GZ_XML))
+        gz_path = write_dump(tmp_path / "artists.xml.gz", "artists", _ARTISTS_RECORDS)
         if cached:
             ensure_xml(gz_path, gz_path.with_suffix(""), workers=1).release(
                 remove_xml=False
