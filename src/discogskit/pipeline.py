@@ -110,7 +110,13 @@ from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import ChunkResult, extract_chunk_to_ipc
 from discogskit.writers import Writer
 
-__all__ = ["PipelineConfig", "PipelineResult", "UnhandledElementsError", "run"]
+__all__ = [
+    "PipelineConfig",
+    "PipelineResult",
+    "ProfileData",
+    "UnhandledElementsError",
+    "run",
+]
 
 
 class _ElapsedEstTotalColumn(ProgressColumn):

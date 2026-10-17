@@ -530,6 +530,7 @@ and name may change in any release.
 | `run(config, writer, *, console=None)` | Runs one dump through the pipeline and returns a `PipelineResult` |
 | `PipelineConfig` | `run()`'s settings: the dump, its entity, and the options `convert` and `load` take |
 | `PipelineResult` | Records loaded and seconds spent per stage |
+| `ProfileData` | The timings in `PipelineResult.profile_data` when `PipelineConfig.profile` is set: seconds the writer waited for parsed chunks (`get_wait`), seconds parsing waited for the writer (`put_blocked`) and seconds spent writing each table (`table_timings`, with any shared commit time under `_commit`) |
 | `get_writer(dsn, ...)` | A SQLite or PostgreSQL `Writer` for a DSN, with `load`'s options as keyword arguments |
 | `get_file_writer(output_dir, output_format, ...)` | A Parquet (`"parquet"`) or JSONL (`"jsonl"`) `Writer` that writes under `output_dir`, with `convert`'s `compression`, `compression_level` and `overwrite` options as keyword arguments |
 | `Writer` | The protocol every writer implements |
@@ -538,6 +539,7 @@ and name may change in any release.
 | `detect_entity(filename)` | The entity a Discogs dump file name holds, e.g. `artists` |
 | `OutputExistsError` | Raised when the output exists and the writer doesn't overwrite it |
 | `DecompressError` | Raised when a `.xml.gz` is truncated, corrupt or not gzip |
+| `ForeignXmlError` | Raised when the `.xml` next to the dump wasn't written by discogskit; move or delete it |
 | `UnhandledElementsError` | Raised by a `strict` run whose input has XML elements no parser handled, before the writer's `finalize()`; its `entity` and `paths` attributes name them |
 
 `get_writer()` and `get_file_writer()` raise `ValueError` for an option they can't use, such as a codec the format
