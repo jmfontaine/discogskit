@@ -1082,6 +1082,81 @@ class TestPgSchema:
                     sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
                 )
 
+    def test_pgoptions_reach_every_connection(self, pg_dsn, tmp_path, monkeypatch):
+        """``load --pg-schema`` runs its write and index connections with PGOPTIONS too, not only its DDL one
+        (#223)."""
+        import adbc_driver_postgresql.dbapi as adbc_pg
+        import psycopg
+        from psycopg import sql
+
+        from discogskit.cli import app
+
+        adbc_connect = adbc_pg.connect
+        psycopg_connect = psycopg.connect
+        # (library, maintenance_work_mem, current_schema()) of each connection the load opens.
+        seen: list[tuple[str, str, str]] = []
+
+        def probe_adbc(*args, **kwargs):
+            conn = adbc_connect(*args, **kwargs)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT current_setting('maintenance_work_mem'), current_schema()"
+                )
+                row = cur.fetchone()
+            assert row is not None
+            seen.append(("adbc", row[0], row[1]))
+            return conn
+
+        def probe_psycopg(*args, **kwargs):
+            conn = psycopg_connect(*args, **kwargs)
+            row = conn.execute(
+                "SELECT current_setting('maintenance_work_mem'), current_schema()"
+            ).fetchone()
+            assert row is not None
+            seen.append(("psycopg", row[0], row[1]))
+            return conn
+
+        gz = tmp_path / "discogs_20260301_artists.xml.gz"
+        with gzip.open(gz, "wt") as f:
+            f.write(
+                f"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n{ARTISTS_XML}</artists>"
+            )
+        schema = f"pgoptions_{uuid.uuid4().hex[:8]}"
+        args = [
+            "load",
+            str(gz),
+            "--dsn",
+            pg_dsn,
+            "--no-progress",
+            "--parse-workers",
+            "1",
+        ]
+        args += ["--pg-create-schema", "--pg-schema", schema]
+        args += ["--pg-index-workers", "2", "--pg-write-workers", "2"]
+        monkeypatch.setenv("PGOPTIONS", "-c maintenance_work_mem=77MB")
+        try:
+            with (
+                patch.object(adbc_pg, "connect", probe_adbc),
+                patch.object(psycopg, "connect", probe_psycopg),
+            ):
+                result = CliRunner().invoke(app, args)
+            assert result.exit_code == 0, click.unstyle(result.output)
+        finally:
+            monkeypatch.delenv("PGOPTIONS")
+            with psycopg.connect(pg_dsn, autocommit=True) as conn:
+                conn.execute(
+                    sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        sql.Identifier(schema)
+                    )
+                )
+
+        assert {setting for _, setting, _ in seen} == {"77MB"}
+        children = len(ENTITIES["artists"].table_order) - 1
+        # The schema check's connection and the two write connections.
+        assert seen.count(("adbc", "77MB", schema)) == 3
+        # One connection per child table's index; the DDL connection is opened before search_path is set.
+        assert seen.count(("psycopg", "77MB", schema)) == children
+
     def test_schema_name_with_a_space(self, pg_dsn, entity, ipc_dict):
         import psycopg
         from psycopg import sql
@@ -1434,13 +1509,14 @@ class TestDsnWithSchema:
         ],
         ids=["url", "key-value-with-options", "url-with-options"],
     )
-    def test_search_path_is_the_quoted_schema(self, dsn, existing, schema):
+    def test_search_path_is_the_quoted_schema(self, dsn, existing, schema, monkeypatch):
         """The server reads back exactly the quoted identifier, after any options already set."""
         from psycopg import sql
         from psycopg.conninfo import conninfo_to_dict
 
         from discogskit.writers.postgresql import _dsn_with_schema
 
+        monkeypatch.delenv("PGOPTIONS", raising=False)
         params = conninfo_to_dict(_dsn_with_schema(dsn, schema))
         options = params.pop("options")
         assert isinstance(options, str)
@@ -1452,6 +1528,41 @@ class TestDsnWithSchema:
         original = conninfo_to_dict(dsn)
         original.pop("options", None)
         assert params == original
+
+    @pytest.mark.parametrize(
+        "dsn, pgoptions, existing",
+        [
+            (
+                "postgresql://u@h/db",
+                "-c maintenance_work_mem=777MB -cstatement_timeout=0",
+                ["-c", "maintenance_work_mem=777MB", "-cstatement_timeout=0"],
+            ),
+            # libpq reads PGOPTIONS only when the DSN sets no options, even empty ones.
+            (
+                "postgresql://u@h/db?options=-cstatement_timeout%3D12345",
+                "-c maintenance_work_mem=777MB",
+                ["-cstatement_timeout=12345"],
+            ),
+            ("postgresql://u@h/db?options=", "-c maintenance_work_mem=777MB", []),
+            ("host=h dbname=db", None, []),
+        ],
+        ids=["pgoptions", "dsn-options", "empty-dsn-options", "neither"],
+    )
+    def test_pgoptions_kept_unless_the_dsn_has_options(
+        self, dsn, pgoptions, existing, monkeypatch
+    ):
+        """Setting options in the DSN stops libpq reading PGOPTIONS, so they're carried over (#223)."""
+        from psycopg.conninfo import conninfo_to_dict
+
+        from discogskit.writers.postgresql import _dsn_with_schema
+
+        if pgoptions is None:
+            monkeypatch.delenv("PGOPTIONS", raising=False)
+        else:
+            monkeypatch.setenv("PGOPTIONS", pgoptions)
+        options = conninfo_to_dict(_dsn_with_schema(dsn, "discogs")).get("options")
+        assert isinstance(options, str)
+        assert _libpq_options(options) == [*existing, '-csearch_path="discogs"']
 
 
 class TestSplitTableGroups:

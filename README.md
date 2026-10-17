@@ -320,13 +320,15 @@ discogskit convert --format parquet --keep-xml discogs_20260301_releases.xml.gz
 
 Load Discogs XML dumps into a database.
 
-In PostgreSQL, tables are created in the current schema — the first existing schema on `search_path` (usually
-`public`), or the schema given with `--pg-schema` (which must already exist, unless `--pg-create-schema` is also
-passed). Without `--overwrite`, the load stops if any of its tables already exist there. With `--overwrite`, the
-existing tables are dropped and recreated, all in one transaction; if your own views or foreign keys depend on them,
-the load stops and lists those objects instead of dropping them. The write connections open before anything is
-dropped, so a load that can't open them (for example, when the server reaches `max_connections`) leaves the existing
-tables as they were.
+In PostgreSQL, tables are created in the current schema — the first existing schema on `search_path` (usually `public`),
+or the schema given with `--pg-schema` (which must already exist, unless `--pg-create-schema` is also passed).
+`--pg-schema` adds `search_path` to the libpq `options` of the write and index connections, after the options the DSN
+sets or, if it sets none, those in `PGOPTIONS`, so settings such as `-c maintenance_work_mem=4GB` apply to every
+connection. Without `--overwrite`, the load stops if any of its tables already exist there. With `--overwrite`, the
+existing tables are dropped and recreated, all in one transaction; if your own views or foreign keys depend on them, the
+load stops and lists those objects instead of dropping them. The write connections open before anything is dropped, so a
+load that can't open them (for example, when the server reaches `max_connections`) leaves the existing tables as they
+were.
 
 `--pg-write-workers` splits each entity's tables into groups, one per worker, and writes each group on its own
 connection. An entity with fewer tables than workers gets one worker per table. With more than one worker, each group
