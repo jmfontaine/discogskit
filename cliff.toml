@@ -1,10 +1,22 @@
 [changelog]
 header = ""
 body = """
+{% set breaking = commits | filter(attribute="breaking", value=true) %}\
+{% if breaking %}\
+    ## Breaking Changes
+    {% for commit in breaking %}
+        - {% if commit.scope %}*({{ commit.scope }})* {% endif %}\
+            {% if commit.footers | filter(attribute="breaking", value=true) | length > 0 %}\
+            {{ commit.breaking_description | trim | replace(from="\n", to=" ") }}\
+            {% else %}{{ commit.message | upper_first }}{% endif %} - \
+            ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/jmfontaine/discogskit/commit/{{ commit.id }}))
+    {%- endfor %}
+{% endif %}\
 {% for group, commits in commits | group_by(attribute="group") %}\
     ## {{ group | striptags | trim | upper_first }}
     {% for commit in commits %}
-        - {% if commit.scope %}*({{ commit.scope }})* {% endif %}\
+        - {% if commit.breaking %}**breaking:** {% endif %}\
+            {% if commit.scope %}*({{ commit.scope }})* {% endif %}\
             {{ commit.message | upper_first }} - \
             ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/jmfontaine/discogskit/commit/{{ commit.id }}))
     {%- endfor %}
