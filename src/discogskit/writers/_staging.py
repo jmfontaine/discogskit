@@ -3,8 +3,7 @@
 Files are written under their final names into a fresh ``<output>/<entity>.partial-XXXXXXXX/`` directory, so
 staging never collides with existing files or another run's staging directory. ``commit()`` then moves them
 into ``<output>/<entity>/`` one file at a time. That is not atomic as a set: a failure part-way through, or two
-runs committing to the same directory, can leave a mix of files. Keeping the final names (rather than adding a
-suffix) keeps the original name stored in gzip headers correct.
+runs committing to the same directory, can leave a mix of files.
 
 Moving the files can fail after hours of parsing, e.g. when ``<output>/<entity>/`` isn't writable or is on another
 filesystem. So the constructor makes the same move with a probe file first, and a failed ``commit()`` keeps the

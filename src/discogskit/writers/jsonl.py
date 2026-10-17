@@ -14,6 +14,15 @@ so write_chunk() still makes two write() calls per row (the JSON text,
 then the newline). Files are staged and only moved to their final names
 by ``finalize()``.
 
+The bytes are fixed so files are portable and reproducible: compact
+separators, non-ASCII as UTF-8 except U+2028, U+2029 and U+0085, which
+are escaped (``str.splitlines()`` and some editors and log tools split
+lines on them), ``\\n`` line endings on every platform, and gzip headers
+with no creation time or file name. Escaping changes no decoded value.
+Running ``str.translate()`` on every line tripled json.dumps()' time on
+200,000 labels rows, so write_chunk() runs it only on lines holding one
+of the three, which three ``in`` checks find for about 5% more.
+
 Existing output means any file in the entity's directory with a JSONL
 extension of any codec, since a reader globbing ``*.jsonl*`` would read
 old files of another codec along with the new ones. For the same reason,
@@ -25,6 +34,7 @@ from __future__ import annotations
 
 import bz2
 import gzip
+import io
 import json
 import time
 from contextlib import suppress
@@ -44,6 +54,11 @@ if TYPE_CHECKING:
 
 
 _COMPRESSED_EXT = {"bzip2": ".jsonl.bz2", "gzip": ".jsonl.gz"}
+
+# Line breaks to str.splitlines() that JSON allows raw in strings, mapped to their JSON escapes.
+_LINE_BREAK_ESCAPES = str.maketrans(
+    {"\u2028": "\\u2028", "\u2029": "\\u2029", "\x85": "\\u0085"}
+)
 
 # Every extension a JSONL table file has, whatever its codec.
 _EXTENSIONS = (".jsonl", *_COMPRESSED_EXT.values())
@@ -80,6 +95,8 @@ class JSONLWriter:
         self._compression_level = compression_level
         self._overwrite = overwrite
         self._files: dict[str, IO] = {}
+        # The files under the gzip streams in _files, which don't close them.
+        self._raw_files: list[IO[bytes]] = []
         self._staged: StagedFiles | None = None
 
     def cancel(self) -> None:
@@ -119,18 +136,30 @@ class JSONLWriter:
         t0 = time.perf_counter()
         for table_name in entity.table_order:
             path = self._staged.path(f"{table_name}{ext}")
-            # File lifetime is managed by finalize()/close(), not a with-block.
+            # File lifetime is managed by finalize()/close(), not a with-block. newline="\n": no "\r\n" on Windows.
             if self._compression == "gzip":
                 level = (
                     6 if self._compression_level is None else self._compression_level
                 )
-                self._files[table_name] = gzip.open(  # noqa: SIM115
-                    path, "wt", compresslevel=level, encoding="utf-8"
+                raw = open(path, "wb")  # noqa: SIM115
+                self._raw_files.append(raw)
+                # An empty file name and mtime 0 keep the header free of both, so identical input gives identical
+                # bytes; gzip.open() records them.
+                self._files[table_name] = io.TextIOWrapper(
+                    gzip.GzipFile(
+                        compresslevel=level,
+                        filename="",
+                        fileobj=raw,
+                        mode="wb",
+                        mtime=0,
+                    ),
+                    encoding="utf-8",
+                    newline="\n",
                 )
             elif self._compression == "bzip2":
                 if self._compression_level is None:
                     self._files[table_name] = bz2.open(  # noqa: SIM115
-                        path, "wt", encoding="utf-8"
+                        path, "wt", encoding="utf-8", newline="\n"
                     )
                 else:
                     self._files[table_name] = bz2.open(  # noqa: SIM115
@@ -138,9 +167,12 @@ class JSONLWriter:
                         "wt",
                         compresslevel=self._compression_level,
                         encoding="utf-8",
+                        newline="\n",
                     )
             else:
-                self._files[table_name] = open(path, "w", encoding="utf-8")  # noqa: SIM115
+                self._files[table_name] = open(  # noqa: SIM115
+                    path, "w", encoding="utf-8", newline="\n"
+                )
         codec = f", {self._compression}" if self._compression != "none" else ""
         status(
             "Create",
@@ -155,7 +187,10 @@ class JSONLWriter:
             if batch.num_rows:
                 f = self._files[table_name]
                 for row in batch.to_pylist():
-                    f.write(json.dumps(row, ensure_ascii=False))
+                    line = json.dumps(row, ensure_ascii=False, separators=(",", ":"))
+                    if "\u2028" in line or "\u2029" in line or "\x85" in line:
+                        line = line.translate(_LINE_BREAK_ESCAPES)
+                    f.write(line)
                     f.write("\n")
             timings[table_name] = time.perf_counter() - t0
         return timings
@@ -166,6 +201,10 @@ class JSONLWriter:
         for f in self._files.values():
             f.close()
         self._files.clear()
+        # After the gzip streams above, whose close() writes their trailers here but leaves these open.
+        for raw in self._raw_files:
+            raw.close()
+        self._raw_files.clear()
         total_bytes = self._staged.commit()
         entity_dir = self._staged.final_dir
         self._staged = None
@@ -178,12 +217,13 @@ class JSONLWriter:
 
     def close(self) -> None:
         """Release file handles; output not committed by ``finalize()`` is deleted, unless a failed commit kept it."""
-        for f in self._files.values():
+        for f in [*self._files.values(), *self._raw_files]:
             # The file is discarded below, so a failing flush doesn't matter and
             # must not replace the error that aborted the run.
             with suppress(Exception):
                 f.close()
         self._files.clear()
+        self._raw_files.clear()
         if self._staged is not None:
             self._staged.discard()
             self._staged = None

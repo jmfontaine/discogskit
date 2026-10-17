@@ -6,7 +6,9 @@ import bz2
 import gzip
 import json
 import re
+import time
 
+import pyarrow as pa
 import pytest
 
 from discogskit.writers.jsonl import JSONLWriter
@@ -17,19 +19,26 @@ from tests.conftest import (
     needs_permissions,
 )
 
-# Each codec's file extension.
+# Each codec's file extension, and how to open its files.
 _EXT = {"bzip2": ".jsonl.bz2", "gzip": ".jsonl.gz", "none": ".jsonl"}
+_OPEN = {"bzip2": bz2.open, "gzip": gzip.open, "none": open}
 
 
-def _convert(out, entity, ipc_dict, compression, *, overwrite=False):
-    """Write ``ipc_dict`` as ``entity``'s complete output under ``out``."""
+def _convert(out, entity, tables, compression, *, overwrite=False):
+    """Write ``tables`` (table name -> RecordBatch) as ``entity``'s complete output under ``out``."""
     writer = JSONLWriter(str(out), compression=compression, overwrite=overwrite)
     try:
         writer.setup(entity)
-        writer.write_chunk(ipc_to_record_batches(ipc_dict))
+        writer.write_chunk(tables)
         writer.finalize(entity)
     finally:
         writer.close()
+
+
+def _read_text(path, compression):
+    """``path``'s decompressed text, with its line endings as written."""
+    with _OPEN[compression](path, "rt", encoding="utf-8", newline="") as f:
+        return f.read()
 
 
 class TestJSONLWriter:
@@ -259,7 +268,7 @@ class TestJSONLWriter:
         from discogskit.writers import OutputExistsError
 
         out = tmp_path / "out"
-        _convert(out, entity, ipc_dict, previous)
+        _convert(out, entity, ipc_to_record_batches(ipc_dict), previous)
         entity_dir = out / "artists"
         before = {p.name: p.read_bytes() for p in entity_dir.iterdir()}
 
@@ -284,7 +293,7 @@ class TestJSONLWriter:
         self, tmp_path, entity, ipc_dict, previous, compression
     ):
         """Only the new codec's table files remain; files that aren't table files stay (#248)."""
-        _convert(tmp_path, entity, ipc_dict, previous)
+        _convert(tmp_path, entity, ipc_to_record_batches(ipc_dict), previous)
         entity_dir = tmp_path / "artists"
         # Not table files, though some share an extension or a table's name.
         unrelated = [
@@ -298,7 +307,13 @@ class TestJSONLWriter:
         for name in unrelated:
             (entity_dir / name).write_text("keep me")
 
-        _convert(tmp_path, entity, ipc_dict, compression, overwrite=True)
+        _convert(
+            tmp_path,
+            entity,
+            ipc_to_record_batches(ipc_dict),
+            compression,
+            overwrite=True,
+        )
 
         tables = {f"{table}{_EXT[compression]}" for table in entity.table_order}
         assert {p.name for p in entity_dir.iterdir()} == tables | set(unrelated)
@@ -312,3 +327,50 @@ class TestJSONLWriterCompression:
         """It used to write plain output while the status line claimed the codec."""
         with pytest.raises(ValueError, match="bzip2, gzip, none"):
             JSONLWriter(str(tmp_path), compression=compression)
+
+
+class TestJSONLWriterFormat:
+    """The bytes of a JSONL file: one record per ``\\n``-terminated line, the same on every run (#249)."""
+
+    def test_gzip_output_is_reproducible(self, monkeypatch, tmp_path, entity, ipc_dict):
+        """No creation time or file name in the gzip header, so identical input gives identical files."""
+        _convert(tmp_path / "a", entity, ipc_to_record_batches(ipc_dict), "gzip")
+        later = time.time() + 3600
+        monkeypatch.setattr(time, "time", lambda: later)
+        _convert(tmp_path / "b", entity, ipc_to_record_batches(ipc_dict), "gzip")
+
+        for table_name in entity.table_order:
+            first = (tmp_path / "a" / "artists" / f"{table_name}.jsonl.gz").read_bytes()
+            second = (
+                tmp_path / "b" / "artists" / f"{table_name}.jsonl.gz"
+            ).read_bytes()
+            assert first == second, table_name
+            assert first[3] & 0x08 == 0, f"{table_name}: FNAME flag set"
+            assert first[4:8] == b"\0\0\0\0", f"{table_name}: MTIME set"
+
+    @pytest.mark.parametrize("compression", sorted(_EXT))
+    def test_line_separators_in_values_are_escaped(self, tmp_path, entity, compression):
+        """U+2028, U+2029 and U+0085 written raw would make str.splitlines() cut the record."""
+        names = ["a\u2028b", "c\u2029d", "e\x85f", "all \u2028\u2029\x85 three"]
+        batch = pa.RecordBatch.from_pylist(
+            [{"id": i, "name": name} for i, name in enumerate(names, 1)],
+            schema=entity.schemas["artists"],
+        )
+        _convert(tmp_path, entity, {"artists": batch}, compression)
+
+        path = tmp_path / "artists" / f"artists{_EXT[compression]}"
+        lines = _read_text(path, compression).splitlines()
+        assert len(lines) == len(names)
+        assert [json.loads(line)["name"] for line in lines] == names
+
+    def test_lines_use_compact_separators(self, tmp_path, entity, ipc_dict):
+        tables = ipc_to_record_batches(ipc_dict)
+        _convert(tmp_path, entity, tables, "none")
+
+        for table_name, batch in tables.items():
+            expected = "".join(
+                json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
+                for row in batch.to_pylist()
+            )
+            path = tmp_path / "artists" / f"{table_name}.jsonl"
+            assert path.read_bytes() == expected.encode(), table_name
