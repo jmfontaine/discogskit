@@ -547,6 +547,27 @@ class TestExistingOutputCheckedUpFront:
         assert "(e.g. label" in message
         run.assert_not_called()
 
+    def test_jsonl_output_stops_a_gzip_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Uncompressed JSONL counts as existing output for a gzip run too (#248)."""
+        args = self._args("jsonl", tmp_path)
+        labels = _dump_gz(tmp_path, "labels", LABELS_XML)
+        first = self._run(args, labels)
+        assert first.exit_code == 0, _unstyle(first.output)
+        out = tmp_path / "out"
+        before = {p: p.read_bytes() for p in out.rglob("*") if p.is_file()}
+
+        _widen_console(monkeypatch)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = self._run([*args, "--compression", "gzip"], labels)
+
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        assert "Use --overwrite to replace them." in output
+        run.assert_not_called()
+        assert {p: p.read_bytes() for p in out.rglob("*") if p.is_file()} == before
+
     @pytest.mark.parametrize("target", ["jsonl", "parquet", "sqlite"])
     def test_overwrite_replaces_existing_output(
         self, target: str, tmp_path: Path
@@ -562,6 +583,24 @@ class TestExistingOutputCheckedUpFront:
         assert result.exit_code == 0, output
         assert "artists converted" in output or "artists loaded" in output
         assert "labels converted" in output or "labels loaded" in output
+
+    def test_overwrite_with_gzip_replaces_jsonl_output(self, tmp_path: Path) -> None:
+        """Only the gzip files remain, next to a file discogskit didn't write (#248)."""
+        args = self._args("jsonl", tmp_path)
+        labels = _dump_gz(tmp_path, "labels", LABELS_XML)
+        first = self._run(args, labels)
+        assert first.exit_code == 0, _unstyle(first.output)
+        labels_dir = tmp_path / "out" / "labels"
+        (labels_dir / "notes.txt").write_text("keep me")
+
+        result = self._run([*args, "--compression", "gzip", "--overwrite"], labels)
+
+        assert result.exit_code == 0, _unstyle(result.output)
+        tables = ENTITIES["labels"].table_order
+        assert sorted(p.name for p in labels_dir.iterdir()) == sorted(
+            [*(f"{table}.jsonl.gz" for table in tables), "notes.txt"]
+        )
+        assert (labels_dir / "notes.txt").read_text() == "keep me"
 
 
 class TestUnwritableOutputCheckedUpFront:
@@ -837,7 +876,7 @@ class TestPreflight:
         assert _unstyle(result.output) == f"discogskit {version('discogskit')}\n"
 
 
-class TestFormatAndCompressionEnums:
+class TestFormatAndCompressionOptions:
     @pytest.mark.parametrize(
         "fmt, compression",
         [
@@ -845,8 +884,21 @@ class TestFormatAndCompressionEnums:
             ("jsonl", "snappy"),
             ("jsonl", "zstd"),
             ("parquet", "bzip2"),
+            ("jsonl", "lz4"),
+            ("jsonl", "GZIP"),
+            ("parquet", "bogus"),
+            ("parquet", "ZSTD"),
         ],
-        ids=["jsonl-brotli", "jsonl-snappy", "jsonl-zstd", "parquet-bzip2"],
+        ids=[
+            "jsonl-brotli",
+            "jsonl-snappy",
+            "jsonl-zstd",
+            "parquet-bzip2",
+            "jsonl-unknown",
+            "jsonl-wrong-case",
+            "parquet-unknown",
+            "parquet-wrong-case",
+        ],
     )
     def test_compression_not_valid_for_format_is_rejected(
         self, tmp_path: Path, fmt: str, compression: str
@@ -885,14 +937,6 @@ class TestFormatAndCompressionEnums:
         parquet_cls.assert_called_once()
         jsonl_cls.assert_not_called()
 
-    def test_invalid_compression_value_is_a_usage_error(self, tmp_path: Path) -> None:
-        gz = _make_gz(tmp_path)
-        with patch("discogskit.cli.pipeline.run") as run:
-            result = runner.invoke(app, ["convert", str(gz), "--compression", "bogus"])
-        assert result.exit_code == 2
-        assert "'bogus'" in _unstyle(result.output)
-        run.assert_not_called()
-
     def test_invalid_format_is_a_usage_error(self, tmp_path: Path) -> None:
         gz = _make_gz(tmp_path)
         with patch("discogskit.cli.pipeline.run") as run:
@@ -902,6 +946,22 @@ class TestFormatAndCompressionEnums:
         assert "'bogus'" in output
         assert "'parquet'" in output
         assert "'jsonl'" in output
+        run.assert_not_called()
+
+    def test_level_without_compression_names_the_jsonl_default(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Not "none does not support a compression level": the user never passed none (#248)."""
+        gz = _make_gz(tmp_path)
+        _widen_console(monkeypatch)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = runner.invoke(
+                app, ["convert", str(gz), "-f", "jsonl", "--compression-level", "5"]
+            )
+        assert result.exit_code == 1
+        assert _unstyle(result.output) == (
+            "Error: JSONL output is uncompressed by default; --compression-level needs --compression gzip or bzip2.\n"
+        )
         run.assert_not_called()
 
 

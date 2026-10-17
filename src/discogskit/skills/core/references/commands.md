@@ -38,7 +38,7 @@ Arguments:
 
 Options:
 
-- `--compression <brotli|bzip2|gzip|none|snappy|zstd>`: Compression codec. Parquet: brotli, gzip, snappy, zstd (default), none. JSONL: bzip2, gzip, none (default).
+- `--compression <codec>`: Compression codec. Parquet: brotli, gzip, snappy, zstd (default), none. JSONL: bzip2, gzip, none (default).
 - `--compression-level <int>`: Compression level for codecs that support one: JSONL gzip/bzip2, Parquet brotli/gzip/zstd. Rejected for snappy and none. Default: JSONL gzip uses level 6 (faster, slightly larger output than 9); every other codec uses its own library default.
 - `-f, --format <jsonl|parquet>`: Output format [default: parquet]
 - `--output <path>`: Output directory [default: .]

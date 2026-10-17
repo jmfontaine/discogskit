@@ -48,7 +48,9 @@ when a query crosses entities.
 - `load --dsn discogs.db` (a path ending in `.db`, `.sqlite` or `.sqlite3`, or `sqlite:///<path>`) writes a SQLite
   file.
 
-Existing output stops the run before anything is written, naming it: pass `--overwrite` to replace it.
+Existing output stops the run before anything is written, naming it: pass `--overwrite` to replace it. For JSONL,
+`.jsonl`, `.jsonl.gz` and `.jsonl.bz2` files all count, and `--overwrite` also deletes the entity's table files of
+the other codecs once the new ones are in place.
 
 Never put a database password on the command line, where `ps` and the shell history show it: use `~/.pgpass` or
 `DATABASE_URL`.

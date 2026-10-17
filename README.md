@@ -200,6 +200,12 @@ end up mixed. A process killed mid-run can leave an `<entity>.partial-*` directo
 failed run removes the output directory (and its parents) if it created them and they're still empty; directories
 that existed before stay.
 
+For JSONL, existing output means a `.jsonl`, `.jsonl.gz` or `.jsonl.bz2` file in `<output>/<entity>/`, whichever
+`--compression` the run uses, so a reader globbing `*.jsonl*` doesn't read two runs' files. For the same reason,
+once the new files are in place, `--overwrite` also deletes the entity's table files of the other codecs, e.g.
+`artists.jsonl` after a `--compression gzip` run. It deletes only files named after one of the entity's tables with
+one of those three extensions; anything else in the directory stays.
+
 Before it decompresses anything, a run checks that it can create files in the output directory (or, if that doesn't
 exist yet, in its nearest existing parent) and move them into an existing `<output>/<entity>/`, and fails early if it
 can't (e.g. a directory isn't writable, or a parent is a file). If moving the finished files fails anyway, the run keeps
@@ -216,7 +222,8 @@ moved by hand. Files moved before the failure are already in `<output>/<entity>/
 (defaults to **6**: on the 2026-10-01 dump, gzip output was 4.15% larger at level 6 than 9 across all four
 entities, for roughly 56-68% less compression CPU — see [#32](https://github.com/jmfontaine/discogskit/issues/32)),
 JSONL bzip2 1-9, Parquet brotli 0-11, Parquet gzip 1-9, Parquet zstd -131072 to 22. `snappy` and `none` don't take a
-level and reject one.
+level and reject one, as does JSONL without `--compression`, which is uncompressed. Codec names are lowercase: any
+other name, such as `GZIP` or `lz4`, fails with `unsupported compression`.
 
 Converting the 2026-10-01 releases dump (62.7 GB of XML) to Parquet with each codec at its default level, on an Apple
 M3 (8 cores, 24 GB RAM, macOS) and otherwise default options:
@@ -250,62 +257,54 @@ with one run per level and that much spread between runs, what the higher levels
 │ *    paths      <path>  One or more .xml.gz files or directories containing them [required]  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────╮
-│ --compression                              <brotli|bzip2|gzip|none  Compression codec.       │
-│                                            |snappy|zstd>            Parquet: brotli, gzip,   │
-│                                                                     snappy, zstd (default),  │
-│                                                                     none. JSONL: bzip2,      │
-│                                                                     gzip, none (default).    │
-│ --compression-level                        <int>                    Compression level for    │
-│                                                                     codecs that support one: │
-│                                                                     JSONL gzip/bzip2,        │
-│                                                                     Parquet                  │
-│                                                                     brotli/gzip/zstd.        │
-│                                                                     Rejected for snappy and  │
-│                                                                     none. Default: JSONL     │
-│                                                                     gzip uses level 6        │
-│                                                                     (faster, slightly larger │
-│                                                                     output than 9); every    │
-│                                                                     other codec uses its own │
-│                                                                     library default.         │
-│ --format             -f                    <jsonl|parquet>          Output format            │
-│                                                                     [default: parquet]       │
-│ --output                                   <path>                   Output directory         │
-│                                                                     [default: .]             │
-│ --chunk-mb                                 <int range> [x>=1]       Split XML into chunks of │
-│                                                                     roughly this size (MiB)  │
-│                                                                     [default: 256]           │
-│ --parse-workers                            <int range> [x>=1]       Number of parallel parse │
-│                                                                     workers                  │
-│                                                                     [default: (half the CPU  │
-│                                                                     count, at least 1)]      │
-│ --write-queue                              <int range> [x>=1]       Chunks parsing may run   │
-│                                                                     ahead of writing: at     │
-│                                                                     most --parse-workers     │
-│                                                                     plus this many chunks    │
-│                                                                     are parsing or waiting   │
-│                                                                     to be written            │
-│                                                                     [default: 2]             │
-│ --keep-xml               --no-keep-xml                              Keep decompressed XML    │
-│                                                                     file after converting    │
-│                                                                     [default: no-keep-xml]   │
-│ --overwrite              --no-overwrite                             Overwrite existing       │
-│                                                                     output files             │
-│                                                                     [default: no-overwrite]  │
-│ --profile                --no-profile                               Print detailed per-table │
-│                                                                     timing breakdown after   │
-│                                                                     convert                  │
-│                                                                     [default: no-profile]    │
-│ --progress               --no-progress                              Show a progress bar      │
-│                                                                     instead of per-chunk     │
-│                                                                     output                   │
-│                                                                     [default: progress]      │
-│ --strict                 --no-strict                                Fail on unhandled XML    │
-│                                                                     elements, attributes and │
-│                                                                     text, after listing them │
-│                                                                     all                      │
-│                                                                     [default: no-strict]     │
-│ --help                                                              Show this message and    │
-│                                                                     exit.                    │
+│ --compression                              <codec>             Compression codec. Parquet:   │
+│                                                                brotli, gzip, snappy, zstd    │
+│                                                                (default), none. JSONL:       │
+│                                                                bzip2, gzip, none (default).  │
+│ --compression-level                        <int>               Compression level for codecs  │
+│                                                                that support one: JSONL       │
+│                                                                gzip/bzip2, Parquet           │
+│                                                                brotli/gzip/zstd. Rejected    │
+│                                                                for snappy and none. Default: │
+│                                                                JSONL gzip uses level 6       │
+│                                                                (faster, slightly larger      │
+│                                                                output than 9); every other   │
+│                                                                codec uses its own library    │
+│                                                                default.                      │
+│ --format             -f                    <jsonl|parquet>     Output format                 │
+│                                                                [default: parquet]            │
+│ --output                                   <path>              Output directory [default: .] │
+│ --chunk-mb                                 <int range> [x>=1]  Split XML into chunks of      │
+│                                                                roughly this size (MiB)       │
+│                                                                [default: 256]                │
+│ --parse-workers                            <int range> [x>=1]  Number of parallel parse      │
+│                                                                workers                       │
+│                                                                [default: (half the CPU       │
+│                                                                count, at least 1)]           │
+│ --write-queue                              <int range> [x>=1]  Chunks parsing may run ahead  │
+│                                                                of writing: at most           │
+│                                                                --parse-workers plus this     │
+│                                                                many chunks are parsing or    │
+│                                                                waiting to be written         │
+│                                                                [default: 2]                  │
+│ --keep-xml               --no-keep-xml                         Keep decompressed XML file    │
+│                                                                after converting              │
+│                                                                [default: no-keep-xml]        │
+│ --overwrite              --no-overwrite                        Overwrite existing output     │
+│                                                                files                         │
+│                                                                [default: no-overwrite]       │
+│ --profile                --no-profile                          Print detailed per-table      │
+│                                                                timing breakdown after        │
+│                                                                convert                       │
+│                                                                [default: no-profile]         │
+│ --progress               --no-progress                         Show a progress bar instead   │
+│                                                                of per-chunk output           │
+│                                                                [default: progress]           │
+│ --strict                 --no-strict                           Fail on unhandled XML         │
+│                                                                elements, attributes and      │
+│                                                                text, after listing them all  │
+│                                                                [default: no-strict]          │
+│ --help                                                         Show this message and exit.   │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
 ```

@@ -17,6 +17,20 @@ from tests.conftest import (
     needs_permissions,
 )
 
+# Each codec's file extension.
+_EXT = {"bzip2": ".jsonl.bz2", "gzip": ".jsonl.gz", "none": ".jsonl"}
+
+
+def _convert(out, entity, ipc_dict, compression, *, overwrite=False):
+    """Write ``ipc_dict`` as ``entity``'s complete output under ``out``."""
+    writer = JSONLWriter(str(out), compression=compression, overwrite=overwrite)
+    try:
+        writer.setup(entity)
+        writer.write_chunk(ipc_to_record_batches(ipc_dict))
+        writer.finalize(entity)
+    finally:
+        writer.close()
+
 
 class TestJSONLWriter:
     def test_full_lifecycle(self, tmp_path, entity, ipc_dict):
@@ -228,6 +242,68 @@ class TestJSONLWriter:
         writer2.setup(entity)
         writer2.write_chunk(ipc_to_record_batches(ipc_dict))
         writer2.finalize(entity)
+
+    @pytest.mark.parametrize(
+        "previous, compression",
+        [
+            (previous, compression)
+            for previous in _EXT
+            for compression in _EXT
+            if previous != compression
+        ],
+    )
+    def test_output_of_another_codec_stops_the_run(
+        self, tmp_path, entity, ipc_dict, previous, compression
+    ):
+        """Without overwrite, a table file of any codec stops setup() before it stages anything (#248)."""
+        from discogskit.writers import OutputExistsError
+
+        out = tmp_path / "out"
+        _convert(out, entity, ipc_dict, previous)
+        entity_dir = out / "artists"
+        before = {p.name: p.read_bytes() for p in entity_dir.iterdir()}
+
+        writer = JSONLWriter(str(out), compression=compression)
+        with pytest.raises(OutputExistsError, match="--overwrite"):
+            writer.setup(entity)
+        writer.close()
+
+        assert {p.name: p.read_bytes() for p in entity_dir.iterdir()} == before
+        assert [p.name for p in out.iterdir()] == ["artists"]
+
+    @pytest.mark.parametrize(
+        "previous, compression",
+        [
+            (previous, compression)
+            for previous in _EXT
+            for compression in _EXT
+            if previous != compression
+        ],
+    )
+    def test_overwrite_removes_output_of_another_codec(
+        self, tmp_path, entity, ipc_dict, previous, compression
+    ):
+        """Only the new codec's table files remain; files that aren't table files stay (#248)."""
+        _convert(tmp_path, entity, ipc_dict, previous)
+        entity_dir = tmp_path / "artists"
+        # Not table files, though some share an extension or a table's name.
+        unrelated = [
+            "notes.txt",
+            "mine.jsonl",
+            "mine.jsonl.gz",
+            "artists.json",
+            "artists.jsonl.zst",
+            "artists.jsonl.bak",
+        ]
+        for name in unrelated:
+            (entity_dir / name).write_text("keep me")
+
+        _convert(tmp_path, entity, ipc_dict, compression, overwrite=True)
+
+        tables = {f"{table}{_EXT[compression]}" for table in entity.table_order}
+        assert {p.name for p in entity_dir.iterdir()} == tables | set(unrelated)
+        for name in unrelated:
+            assert (entity_dir / name).read_text() == "keep me"
 
 
 class TestJSONLWriterCompression:

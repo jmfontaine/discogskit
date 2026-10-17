@@ -20,10 +20,14 @@ def check_compression(
 
 
 def check_compression_level(
-    compression: str, level: int | None, level_range: tuple[int, int] | None
+    compression: str,
+    level: int | None,
+    level_range: tuple[int, int] | None,
+    *,
+    no_level_error: str | None = None,
 ) -> None:
     """Raise ``ValueError`` if ``level`` is set and isn't an ``int``, ``compression`` has no levels (``level_range``
-    None), or it's out of range.
+    None), or it's out of range. ``no_level_error`` replaces the message for a codec with no levels.
     """
     if level is None:
         return
@@ -32,7 +36,9 @@ def check_compression_level(
     if not isinstance(level, int) or isinstance(level, bool):
         raise ValueError(f"compression level must be an integer, not {level!r}.")  # noqa: TRY004
     if level_range is None:
-        raise ValueError(f"{compression} does not support a compression level.")
+        raise ValueError(
+            no_level_error or f"{compression} does not support a compression level."
+        )
     lo, hi = level_range
     if not lo <= level <= hi:
         raise ValueError(
