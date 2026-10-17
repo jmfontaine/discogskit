@@ -83,7 +83,7 @@ def _compile_pattern(tag: bytes) -> re.Pattern[bytes]:
         + rb"(?:\s*(?P<close>>)|(?P<bad_close>(?![^\s>])))"
         + rb"|!(?:--(?:[^-]*(?:-(?!->)[^-]*)*-->|(?P<bad_comment>))"
         + rb"|\[CDATA\[(?:[^\]]*(?:\](?!\]>)[^\]]*)*\]\]>|(?P<bad_cdata>))"
-        + rb"|DOCTYPE(?:[^\[>]*(?:\[[^\]]*\])?\s*>|(?P<bad_doctype>)))"
+        + rb"|DOCTYPE(?:[^\[>]*(?:\[[^\]]*\]\s*)?>|(?P<bad_doctype>)))"
         + rb"|\?(?:[^?]*(?:\?(?!>)[^?]*)*\?>|(?P<bad_pi>))"
         + rb")"
     )

@@ -33,9 +33,10 @@ class Writer(Protocol):
         ...
 
     def check(self, entity: EntityDef) -> None:
-        """Raise ``OutputExistsError`` if ``entity``'s output already exists and overwrite is off.
+        """Raise ``OutputExistsError`` if ``entity``'s output already exists and overwrite is off. File writers also
+        raise ``OSError`` if their output directory can't take ``entity``'s files.
 
-        Changes nothing, so a caller can check every entity before writing any. ``setup()`` checks again.
+        Leaves nothing behind, so a caller can check every entity before writing any. ``setup()`` checks again.
         """
         ...
 

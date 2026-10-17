@@ -58,6 +58,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.1"  # Pinned like every setup-uv step (see qa.yml)
 
       - name: Install dependencies
         run: uv sync --locked --no-dev
@@ -105,12 +107,12 @@ jobs:
 
       - name: Run the benchmarks
         env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/discogskit
           REPEATS: ${{ inputs.repeats }}
           TARGETS: ${{ inputs.targets }}
         run: |
           echo $$ | sudo tee "$CGROUP/harness/cgroup.procs" > /dev/null
-          uv run --no-sync python benchmarks/ci.py --cgroup "$CGROUP" \
-            --dsn postgresql://postgres@localhost:5432/discogskit --output "$RUNNER_TEMP/results" \
+          uv run --no-sync python benchmarks/ci.py --cgroup "$CGROUP" --output "$RUNNER_TEMP/results" \
             --repeats "$REPEATS" --subset "$RUNNER_TEMP/subset" --summary "$GITHUB_STEP_SUMMARY" \
             --targets "$TARGETS" --work "$RUNNER_TEMP/work"
 
