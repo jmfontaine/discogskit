@@ -132,10 +132,11 @@ def get_writer(
     """
     if dsn.startswith(("postgresql://", "postgres://")):
         if not _parses_as_conninfo(dsn):
-            # Raised outside any except block, so libpq's error, which quotes the password, isn't chained either.
+            # Raised outside any except block, so the original error, which can hold the password, isn't chained.
             raise ValueError(
-                f"Invalid PostgreSQL DSN: {_redact_dsn(dsn)!r}. libpq can't parse it: check the host and port, and "
-                "percent-encode special characters in the user name, password and database name ('%' as %25)."
+                f"Invalid PostgreSQL DSN: {_redact_dsn(dsn)!r}. libpq can't parse it, or a value in it isn't valid "
+                "UTF-8: check the host and port, and percent-encode special characters in the user name, password and "
+                "database name ('%' as %25)."
             )
 
         from discogskit.writers.postgresql import PostgreSQLWriter
@@ -181,15 +182,18 @@ def get_writer(
 
 
 def _parses_as_conninfo(dsn: str) -> bool:
-    """Whether libpq can parse ``dsn``. Its parse errors quote the token they reject, or the whole URI, password
-    included, so ``get_writer`` checks first and reports the DSN redacted instead.
+    """Whether libpq can parse ``dsn`` and psycopg can decode its values. libpq's parse errors quote the token they
+    reject, or the whole URI, password included, so ``get_writer`` checks first and reports the DSN redacted instead.
+    psycopg raises ``UnicodeError`` instead for a value that isn't UTF-8: ``UnicodeDecodeError`` for a percent-escape
+    such as ``%ff``, whose ``object`` holds the value's bytes, or ``UnicodeEncodeError`` for a lone surrogate (an
+    environment variable's undecodable byte), whose ``object`` is the whole DSN.
     """
     from psycopg import ProgrammingError
     from psycopg.conninfo import conninfo_to_dict
 
     try:
         conninfo_to_dict(dsn)
-    except ProgrammingError:
+    except (ProgrammingError, UnicodeError):
         return False
     return True
 

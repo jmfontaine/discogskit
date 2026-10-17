@@ -194,6 +194,18 @@ def _dying_once_extract(args):
     raise AssertionError("SIGKILL returned")
 
 
+def _after_first_write_extract(args):
+    """The real parse step, except every call after the first waits for ``<xml dir>/write-started`` to exist."""
+    try:
+        (Path(args.file_path).parent / "first-parsed").touch(exist_ok=False)
+    except FileExistsError:
+        deadline = time.monotonic() + 10
+        while not (Path(args.file_path).parent / "write-started").exists():
+            assert time.monotonic() < deadline, "the first write never started"
+            time.sleep(0.01)
+    return extract_chunk_to_ipc(args)
+
+
 # A result far bigger than a pipe's buffer, so the worker sends it in many writes.
 _MID_SEND_BYTES = 64 * 1024 * 1024
 
@@ -1284,6 +1296,79 @@ class TestPipelineRunParseWorkers:
 
         assert writer.cancels >= 2
         assert writer.active_at_close == 0
+
+    def test_sigint_after_another_failure_cancels_the_in_flight_write(
+        self, monkeypatch, tmp_path
+    ):
+        """Ctrl+C while the pipeline, failing on a parse error, waits for a blocked write (#212).
+
+        The interrupt must still cancel that write, and close() follow it, not run during it.
+        """
+        from discogskit import pipeline
+
+        class BlockingWriter(_StubWriter):
+            """The first write blocks until cancel(), then fails as a cancelled COPY does."""
+
+            def __init__(self, started):
+                self.active = 0
+                self.active_at_close = None
+                self.cancelled = threading.Event()
+                self.cancels = 0
+                self.started = started
+
+            def cancel(self):
+                self.cancels += 1
+                self.cancelled.set()
+
+            def close(self):
+                self.active_at_close = self.active
+
+            def write_chunk(self, tables):
+                self.active += 1
+                try:
+                    self.started.touch()
+                    if not self.cancelled.wait(10):
+                        raise AssertionError("write was never cancelled")
+                    # A cancelled statement takes a moment to fail: close() must still wait for it.
+                    time.sleep(0.2)
+                finally:
+                    self.active -= 1
+                raise RuntimeError("canceling statement due to user request")
+
+        class InterruptingExecutor(pipeline.ThreadPoolExecutor):
+            """Sends SIGINT shortly after the failing pipeline drops the queued writes, while it waits for the
+            in-flight one."""
+
+            def shutdown(self, wait=True, *, cancel_futures=False):
+                if cancel_futures:
+                    threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT)).start()
+                super().shutdown(cancel_futures=cancel_futures, wait=wait)
+
+        monkeypatch.setattr(pipeline, "ThreadPoolExecutor", InterruptingExecutor)
+        monkeypatch.setattr(
+            pipeline, "extract_chunk_to_ipc", _after_first_write_extract
+        )
+        # In the second chunk: the first one is being written when its parse fails.
+        gz_path = _many_artists_gz(tmp_path / "artists.xml.gz", bad_id_at=15_000)
+        # One worker parses the chunks in order.
+        config = dataclasses.replace(_multi_chunk_config(gz_path), parse_workers=1)
+        writer = BlockingWriter(tmp_path / "write-started")
+
+        t0 = time.monotonic()
+        with pytest.raises(KeyboardInterrupt) as excinfo:
+            _run_and_close(config, writer)
+        elapsed = time.monotonic() - t0
+
+        assert isinstance(excinfo.value.__context__, ValueError)
+        assert writer.cancels >= 1
+        assert writer.active_at_close == 0
+        assert elapsed < 5
+        assert multiprocessing.active_children() == []
+        assert not [
+            thread.name
+            for thread in threading.enumerate()
+            if thread.name.startswith("discogskit-writer_")
+        ]
 
     def test_worker_start_failure_restores_the_terminal(self, monkeypatch, tmp_path):
         """A parse worker that fails to start must not leave the progress display running, nor the workers already
