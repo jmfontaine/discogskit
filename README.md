@@ -396,6 +396,15 @@ mode stays in WAL mode, with WAL's usual side files. List columns (e.g. `namevar
 compact JSON text with non-ASCII characters as-is, e.g. `["Björk","ビョーク"]`, so `LIKE` matches them;
 `json_each()` reads them as arrays.
 
+At the end of a SQLite load, SQLite builds the indexes by sorting in temporary files rather than in memory, so Ctrl+C
+stops a build at once instead of after it. These files need free disk space in SQLite's temporary directory: up to
+2.1 GiB for the 2026-10-01 releases dump, while its largest index (`release_tracks`) builds. SQLite deletes each file
+as soon as it opens it, so they don't show up in the directory, and their space comes back once the index is built.
+On Linux and macOS, the directory is the first of `$SQLITE_TMPDIR`, `$TMPDIR`, `/var/tmp`, `/usr/tmp`, `/tmp` and the
+current directory that exists and is writable: a variable naming a missing directory is skipped. To put the files on
+another disk, set `SQLITE_TMPDIR` to a directory there, e.g.
+`SQLITE_TMPDIR=/mnt/scratch discogskit load --dsn discogs.db discogs_20261001_releases.xml.gz`.
+
 After a failed or interrupted `load` (crash, Ctrl+C, lost connection), re-run it with `--overwrite`: the tables
 aren't consistent until a load finishes. Chunks commit as they go, so earlier chunks stay in the tables after a
 failure. With `--pg-write-workers 1` (the default) and with SQLite, a chunk commits in a single transaction on one

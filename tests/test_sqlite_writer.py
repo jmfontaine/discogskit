@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sqlite3
+import threading
+import time
 
 import pyarrow as pa
 import pytest
@@ -524,3 +527,134 @@ class TestSQLiteWriter:
             "SELECT value FROM artists, json_each(namevariations)"
         ).fetchall() == [("Björk",), ("ビョーク",)]
         conn.close()
+
+
+# Enough rows for an index on them to take a few seconds to build here, about half of it sorting when SQLite sorts in
+# memory.
+_MANY_ROWS = 4_000_000
+
+
+def _set_up_with_many_rows(db_path, table):
+    """An artists writer after ``setup()``, with ``_MANY_ROWS`` rows in ``table``, their artist ids in random order."""
+    writer = SQLiteWriter(str(db_path))
+    writer.setup(ENTITIES["artists"])
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        f"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {_MANY_ROWS})"
+        f' INSERT INTO "{table}" (artist_id) SELECT abs(random()) % 2000000000 FROM n'
+    )
+    conn.commit()
+    conn.close()
+    return writer
+
+
+def _indexes(db_path):
+    conn = sqlite3.connect(db_path)
+    try:
+        return {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+    finally:
+        conn.close()
+
+
+class TestSQLiteWriterCtrlC:
+    """#224: Ctrl+C stops ``finalize()`` at once. ``sqlite3`` runs each statement with the GIL released, and without a
+    progress handler running Python code, Python runs a signal handler only once the statement returns."""
+
+    def test_finalize_on_another_thread(self, tmp_path, entity, ipc_dict):
+        """Only the main thread can install a signal handler; elsewhere finalize() runs as it is."""
+        db_path = str(tmp_path / "test.db")
+        errors = []
+
+        def load():
+            try:
+                TestSQLiteWriter._load(db_path, entity, ipc_dict)
+            except BaseException as exc:  # noqa: BLE001 - checked on the test thread
+                errors.append(exc)
+
+        thread = threading.Thread(target=load)
+        thread.start()
+        thread.join()
+
+        assert errors == []
+        assert "artist_members_artist_id_idx" in _indexes(db_path)
+
+    def test_finalize_without_ctrl_c_keeps_the_sigint_handler(
+        self, tmp_path, entity, ipc_dict
+    ):
+        def handler(signum, frame):
+            raise AssertionError("no SIGINT was sent")
+
+        db_path = str(tmp_path / "test.db")
+        previous = signal.signal(signal.SIGINT, handler)
+        try:
+            TestSQLiteWriter._load(db_path, entity, ipc_dict)
+            assert signal.getsignal(signal.SIGINT) is handler
+        finally:
+            signal.signal(signal.SIGINT, previous)
+        assert {
+            "artist_aliases_artist_id_idx",
+            "artist_groups_artist_id_idx",
+            "artist_members_artist_id_idx",
+        } <= _indexes(db_path)
+
+    def test_sigint_between_statements_stops_the_next_one(self, monkeypatch, tmp_path):
+        """A Ctrl+C that lands while no statement runs, when ``Connection.interrupt()`` has nothing to stop. The next
+        statement doesn't run, however short."""
+        from discogskit.writers import sqlite as sqlite_writer
+
+        index_ddl = sqlite_writer._index_ddl
+
+        def interrupting_index_ddl(table, column):
+            if table == "artist_groups":
+                os.kill(os.getpid(), signal.SIGINT)
+            return index_ddl(table, column)
+
+        db_path = tmp_path / "test.db"
+        writer = SQLiteWriter(str(db_path))
+        writer.setup(ENTITIES["artists"])
+        monkeypatch.setattr(sqlite_writer, "_index_ddl", interrupting_index_ddl)
+        handler = signal.getsignal(signal.SIGINT)
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                writer.finalize(ENTITIES["artists"])
+        finally:
+            writer.close()
+
+        indexes = _indexes(db_path)
+        assert "artist_aliases_artist_id_idx" in indexes
+        assert "artist_groups_artist_id_idx" not in indexes
+        assert "artist_members_artist_id_idx" not in indexes
+        assert signal.getsignal(signal.SIGINT) is handler
+
+    def test_sigint_during_an_index_build_stops_it(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        # finalize() starts with this table's index.
+        writer = _set_up_with_many_rows(db_path, "artist_aliases")
+        # Sorted runs of 2 MB rather than the writer's 64 MB, so that the index, sorted in one run otherwise, sorts in
+        # several, as one on a real dump does. In memory, SQLite sorts it in one step, whatever the cache size.
+        writer._connection().execute("PRAGMA cache_size=-2000")
+        handler = signal.getsignal(signal.SIGINT)
+        sent = []
+
+        def interrupt():
+            sent.append(time.monotonic())
+            os.kill(os.getpid(), signal.SIGINT)
+
+        timer = threading.Timer(0.5, interrupt)
+        try:
+            timer.start()
+            with pytest.raises(KeyboardInterrupt):
+                writer.finalize(ENTITIES["artists"])
+            latency = time.monotonic() - sent[0]
+            temp_store = writer._connection().execute("PRAGMA temp_store").fetchone()[0]
+        finally:
+            timer.cancel()
+            writer.close()
+
+        assert latency < 0.5
+        assert "artist_aliases_artist_id_idx" not in _indexes(db_path)
+        assert signal.getsignal(signal.SIGINT) is handler
+        assert temp_store == 2  # MEMORY, as setup() set it

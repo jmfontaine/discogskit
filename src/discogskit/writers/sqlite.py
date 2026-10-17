@@ -24,10 +24,12 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sqlite3
 import tempfile
+import threading
 import time
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -36,6 +38,8 @@ import pyarrow as pa
 from discogskit._console import status
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
     from discogskit.entities import EntityDef
 
 # ------------------------------------------------------------------------------------------------------------------------
@@ -116,6 +120,47 @@ def _references_into(conn: sqlite3.Connection, tables: list[str]) -> list[str]:
     return sorted(references)
 
 
+@contextmanager
+def _interruptible(conn: sqlite3.Connection) -> Iterator[Callable[[], None]]:
+    """On the main thread, make Ctrl+C stop the statement running on ``conn`` and raise ``KeyboardInterrupt``.
+
+    ``sqlite3`` runs a statement with the GIL released, and Python runs a signal handler only between bytecodes on the
+    main thread, so a Ctrl+C would otherwise wait for the statement to end, an index built over minutes included.
+    Yields a function to call right before each statement: it raises ``KeyboardInterrupt`` after a Ctrl+C that landed
+    while no statement was running, which ``Connection.interrupt()`` can't stop.
+    """
+    interrupted = False
+
+    def check() -> None:
+        if interrupted:
+            raise KeyboardInterrupt
+
+    if threading.current_thread() is not threading.main_thread():
+        yield check  # Python delivers Ctrl+C to the main thread only.
+        return
+
+    def on_sigint(signum: int, frame: object) -> None:
+        nonlocal interrupted
+        interrupted = True
+        conn.interrupt()
+
+    previous = signal.signal(signal.SIGINT, on_sigint)
+    # The progress handler runs Python code every 100,000 VM steps, which lets on_sigint run during a statement. Its
+    # return value stops a statement that a Ctrl+C landing after check() but before the statement started left
+    # interrupt() nothing to stop.
+    conn.set_progress_handler(lambda: interrupted, 100_000)
+    try:
+        yield check
+    except sqlite3.OperationalError:
+        if interrupted:
+            raise KeyboardInterrupt from None
+        raise
+    finally:
+        conn.set_progress_handler(None, 0)
+        signal.signal(signal.SIGINT, previous)
+    check()
+
+
 # ------------------------------------------------------------------------------------------------------------------------
 # SQLiteWriter
 # ------------------------------------------------------------------------------------------------------------------------
@@ -171,7 +216,8 @@ class SQLiteWriter:
         os.remove(probe)
 
     def cancel(self) -> None:
-        """Do nothing: a write to a local SQLite file can't stall the way a database server can."""
+        """Do nothing: a write to a local SQLite file can't stall the way a database server can, and ``finalize()``
+        stops at Ctrl+C on its own."""
 
     def check(self, entity: EntityDef) -> None:
         """Raise ``OutputExistsError`` if any of ``entity``'s tables exists and overwrite is off."""
@@ -302,20 +348,37 @@ class SQLiteWriter:
         return timings
 
     def finalize(self, entity: EntityDef) -> None:
-        """Create indexes on FK columns, then make the database durable and restore its journal mode."""
+        """Create indexes on FK columns, then make the database durable and restore its journal mode.
+
+        On the main thread, Ctrl+C stops the statement running and raises ``KeyboardInterrupt``.
+        """
         fk_col = entity.fk_column
+        conn = self._connection()
 
         if len(entity.table_order) > 1:
             t0 = time.perf_counter()
-            conn = self._connection()
-            cur = conn.cursor()
-            for t in entity.table_order[1:]:
-                cur.execute(_index_ddl(t, fk_col))
-            conn.commit()
+            # With temp_store=MEMORY, SQLite sorts all of an index's entries in one VM step, most of the build, which
+            # Ctrl+C can't stop (11-12 s of a 20M-row index's 16 s here). With temporary files, it sorts a cache's
+            # worth (cache_size, 64,000 KiB) at a time into each, and merges them step by step. On the 2026-10-01
+            # releases dump that took the same time, with temporary files peaking at 2.1 GiB and the process at
+            # 0.8 GiB of memory instead of 5.3 GiB; Ctrl+C during the largest index ended the run within 0.8 s.
+            temp_store = conn.execute("PRAGMA temp_store").fetchone()[0]
+            try:
+                conn.execute("PRAGMA temp_store=FILE")
+                with _interruptible(conn) as check:
+                    cur = conn.cursor()
+                    for t in entity.table_order[1:]:
+                        ddl = _index_ddl(t, fk_col)
+                        check()
+                        cur.execute(ddl)
+                    conn.commit()
+            finally:
+                conn.execute(f"PRAGMA temp_store={int(temp_store)}")
             n_idx = len(entity.table_order) - 1
             status("Index", f"{n_idx} indexes", f"[{time.perf_counter() - t0:.2f}s]")
 
-        self._restore_journal_mode()
+        with _interruptible(conn):
+            self._restore_journal_mode()
 
     def _restore_journal_mode(self) -> None:
         """Sync the load to disk and switch the file back to the journal mode it had before ``setup()``."""
