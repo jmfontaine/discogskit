@@ -4,7 +4,7 @@ requires = [ "uv-build>=0.10.9,<0.14" ]
 
 [project]
 name = "discogskit"
-version = "0.2.0.dev0"
+version = "0.2.0"
 description = "Discogs Data Dumps Toolkit"
 readme = "README.md"
 keywords = [ "cli", "discogs", "discogs-dump", "music-database" ]

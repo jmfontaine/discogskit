@@ -436,7 +436,7 @@ wheels = [
 
 [[package]]
 name = "discogskit"
-version = "0.2.0.dev0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "adbc-driver-postgresql" },
