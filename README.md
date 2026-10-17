@@ -311,6 +311,16 @@ with one run per level and that much spread between runs, what the higher levels
 
 </details>
 
+#### JSONL output
+
+Each JSONL file holds one record per line: a JSON object with the table's columns as keys, in the table's column
+order, and list columns as arrays. Every line ends in `\n`, on every platform. Separators are compact (`,` and `:`,
+no spaces). Text is UTF-8, with non-ASCII characters written as they are, except U+2028, U+2029 and U+0085: JSON
+allows them raw, but Python's `str.splitlines()` and some editors and log tools treat them as line breaks, so they're
+escaped as `\u2028`, `\u2029` and `\u0085`, which decode to the same text. gzip output records no creation time or
+file name in its header, so the same rows in the same order give the same bytes. Rows are written in the order the
+parse workers finish their chunks.
+
 #### Examples
 
 ```shell
