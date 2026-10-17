@@ -68,9 +68,10 @@ Key design decisions
   as it happens. Writes queued behind a failed one are skipped.
 - **Stopping**: any failure (writer, parser, dead worker, Ctrl+C) kills the
   parse workers, drops queued writes and waits for the in-flight write, so
-  the writer is idle before the caller closes it. On Ctrl+C, the writer's
-  ``cancel()`` first cancels the in-flight write, which may otherwise wait
-  forever on a stalled database server.
+  the writer is idle before the caller closes it. On Ctrl+C, even one that
+  lands during that wait after another failure, the writer's ``cancel()``
+  first cancels the in-flight write, which may otherwise wait forever on a
+  stalled database server.
 """
 
 from __future__ import annotations
@@ -726,16 +727,34 @@ def _parse_and_write(
                 worker.process.terminate()
         # Drop queued writes now, so none starts while the in-flight one stops.
         write_executor.shutdown(cancel_futures=True, wait=False)
-        if isinstance(exc, KeyboardInterrupt) and writer_done is not None:
-            # Cancel the in-flight write, which may otherwise wait forever on a
-            # stalled server: ADBC's own Ctrl+C handling only covers statements
-            # run on the main thread. After dropping the queued writes, so the
-            # thread exits once that write ends.
-            _cancel_until_done(chunk_writer.writer, writer_done)
-        # Wait for the in-flight write, so the writer is idle before the
-        # caller closes it.
-        write_executor.shutdown()
-        _stop_parse_workers(workers)
+        try:
+            if isinstance(exc, KeyboardInterrupt) and writer_done is not None:
+                # Cancel the in-flight write, which may otherwise wait forever on a
+                # stalled server: ADBC's own Ctrl+C handling only covers statements
+                # run on the main thread. After dropping the queued writes, so the
+                # thread exits once that write ends.
+                _cancel_until_done(chunk_writer.writer, writer_done)
+            elif writer_done is not None:
+                # Wait for the in-flight write, so the writer is idle before the
+                # caller closes it. On the watcher, not with join(): a Ctrl+C
+                # that interrupts join() before Python 3.13 marks the thread as
+                # stopped while it still runs (see _watch()).
+                try:
+                    writer_done.wait()
+                except KeyboardInterrupt:
+                    # That write may be the one blocked on a stalled server:
+                    # cancel it as above.
+                    current().print(
+                        "\n  [yellow]Interrupted — waiting for the in-flight write to stop …[/]"
+                    )
+                    _cancel_until_done(chunk_writer.writer, writer_done)
+                    raise
+        finally:
+            try:
+                # The writer thread has exited by now, or never ran a write.
+                write_executor.shutdown()
+            finally:
+                _stop_parse_workers(workers)
         raise
     finally:
         wake_r.close()
