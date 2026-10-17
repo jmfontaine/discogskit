@@ -23,8 +23,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Pinned like every setup-uv step (see qa.yml): this uv builds what PyPI gets.
       - name: Install uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.1"
 
       # A tag push publishes to PyPI, where a release can't be replaced: refuse a tag that doesn't
       # match project.version.
@@ -72,15 +75,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      # No persisted token: nothing here pushes, and git-cliff downloads its binary unverified.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Generate release notes
         id: changelog
         uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
         with:
           args: --latest
+          version: v2.14.2
       - name: Create GitHub release
         env:
           CHANGELOG_FILE: ${{ steps.changelog.outputs.changelog }}
