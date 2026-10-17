@@ -243,9 +243,10 @@ def _run_jobs(
     except KeyboardInterrupt:
         current().print("\n  [yellow]Interrupted — cleaning up …[/]")
         raise typer.Exit(130) from None
-    # Top-level error boundary: any failure becomes a one-line error and exit 1.
+    # Top-level error boundary: any failure becomes a one-line error and exit 1,
+    # named by its type when it has no message (e.g. MemoryError).
     except Exception as exc:  # noqa: BLE001
-        error(str(exc))
+        error(str(exc) or type(exc).__name__)
         raise typer.Exit(1) from None
     finally:
         writer.close()
@@ -472,7 +473,7 @@ def load(
         )
     # Writer construction can fail many ways (bad DSN, driver, connection).
     except Exception as exc:  # noqa: BLE001
-        error(str(exc))
+        error(str(exc) or type(exc).__name__)
         raise typer.Exit(1) from None
     _run_jobs(
         jobs,
