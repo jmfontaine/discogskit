@@ -16,7 +16,7 @@ import pyarrow.parquet as pq
 
 from discogskit._console import status
 from discogskit.writers._compression import check_compression, check_compression_level
-from discogskit.writers._staging import StagedFiles
+from discogskit.writers._staging import StagedFiles, check_output_dir
 
 if TYPE_CHECKING:
     import os
@@ -69,7 +69,11 @@ class ParquetWriter:
         """Do nothing: a local file write can't stall the way a database server can."""
 
     def check(self, entity: EntityDef) -> None:
-        """Raise ``OutputExistsError`` if ``entity``'s directory holds Parquet files and overwrite is off."""
+        """Raise ``OutputExistsError`` if ``entity``'s directory holds Parquet files and overwrite is off, or
+        ``OSError`` if the output directory can't take the files.
+        """
+        # First, so an entity directory that can't be listed either fails with the probe's error.
+        check_output_dir(self._output_dir, entity.name)
         entity_dir = self._output_dir / entity.name
 
         if not self._overwrite and entity_dir.exists():
