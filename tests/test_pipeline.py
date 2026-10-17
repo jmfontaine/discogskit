@@ -527,6 +527,36 @@ class TestPipelineRunInputValidation:
         conn.close()
         assert rows == [(1, "Test"), (2, "Other")]
 
+    @pytest.mark.parametrize(
+        "option, value, message",
+        [
+            ("chunk_mb", 0, "chunk_mb must be at least 1, got 0"),
+            ("chunk_mb", -1, "chunk_mb must be at least 1, got -1"),
+            ("write_queue", -1, "write_queue must be at least 0, got -1"),
+        ],
+    )
+    def test_invalid_option_fails_before_touching_anything(
+        self, tmp_path, artists_gz, option, value, message
+    ):
+        """A run that would split nothing, or parse nothing and report an empty load, fails before decompressing the
+        dump or replacing existing output (#213)."""
+        from discogskit.writers import get_file_writer
+
+        out = tmp_path / "out"
+        config = dataclasses.replace(_single_chunk_config(artists_gz), keep_xml=False)
+        _run_and_close(config, get_file_writer(out, "jsonl"))
+        before = {p: p.read_bytes() for p in out.rglob("*") if p.is_file()}
+        assert before
+
+        with pytest.raises(ValueError, match=f"^{message}$"):
+            _run_and_close(
+                dataclasses.replace(config, **{option: value}),
+                get_file_writer(out, "jsonl", overwrite=True),
+            )
+
+        assert {p: p.read_bytes() for p in out.rglob("*") if p.is_file()} == before
+        assert not artists_gz.with_suffix("").exists()
+
     @pytest.mark.parametrize("parse_workers", [0, -1])
     def test_no_parse_workers_fails_before_touching_anything(
         self, tmp_path, artists_gz, parse_workers

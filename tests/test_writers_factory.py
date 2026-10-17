@@ -33,6 +33,38 @@ class TestGetWriter:
 
         assert isinstance(writer, PostgreSQLWriter)
 
+    @pytest.mark.parametrize("construct", ["get_writer", "PostgreSQLWriter"])
+    @pytest.mark.parametrize(
+        "kwargs, message",
+        [
+            ({"write_workers": 0}, "write_workers must be at least 1, got 0"),
+            ({"write_workers": -1}, "write_workers must be at least 1, got -1"),
+            ({"create_schema": True}, "create_schema requires schema"),
+            ({"create_schema": True, "schema": ""}, "create_schema requires schema"),
+        ],
+        ids=[
+            "no-write-workers",
+            "negative-write-workers",
+            "create-schema",
+            "create-empty-schema",
+        ],
+    )
+    def test_postgresql_rejects_unusable_options_before_connecting(
+        self, construct, kwargs, message
+    ):
+        """They'd otherwise fail hours into a load, or be ignored (#213)."""
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        factory = {"get_writer": get_writer, "PostgreSQLWriter": PostgreSQLWriter}[
+            construct
+        ]
+        with (
+            patch("psycopg.connect") as connect,
+            pytest.raises(ValueError, match=f"^{message}"),
+        ):
+            factory("postgresql://user@localhost/discogs", **kwargs)
+        connect.assert_not_called()
+
     def test_postgres_scheme_dsn(self):
         """``postgres://`` is accepted alongside ``postgresql://``."""
         with patch("psycopg.connect") as mock_connect:

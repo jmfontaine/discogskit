@@ -543,7 +543,10 @@ and name may change in any release.
 | `UnhandledElementsError` | Raised by a `strict` run whose input has XML elements no parser handled, before the writer's `finalize()`; its `entity` and `paths` attributes name them |
 
 `get_writer()` and `get_file_writer()` raise `ValueError` for an option they can't use, such as a codec the format
-doesn't support or a compression level that isn't an `int` or is out of the codec's range, before creating any file.
+doesn't support, a compression level that isn't an `int` or is out of the codec's range, a `write_workers` below 1 or
+`create_schema` without `schema`, before creating any file or connecting to PostgreSQL. `run()` raises `ValueError` for
+a `PipelineConfig` with a `chunk_mb` or `parse_workers` below 1 or a negative `write_queue`, before it decompresses the
+dump or touches the output.
 Other failures raise other exceptions, e.g. `ValueError` for a value discogskit can't store.
 
 ```python
