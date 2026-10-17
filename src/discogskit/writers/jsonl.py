@@ -27,7 +27,7 @@ from typing import IO, TYPE_CHECKING
 
 from discogskit._console import status
 from discogskit.writers._compression import check_compression, check_compression_level
-from discogskit.writers._staging import StagedFiles
+from discogskit.writers._staging import StagedFiles, check_output_dir
 
 if TYPE_CHECKING:
     import os
@@ -71,7 +71,9 @@ class JSONLWriter:
         """Do nothing: a local file write can't stall the way a database server can."""
 
     def check(self, entity: EntityDef) -> None:
-        """Raise ``OutputExistsError`` if ``entity``'s directory holds JSONL files and overwrite is off."""
+        """Raise ``OutputExistsError`` if ``entity``'s directory holds JSONL files and overwrite is off, or
+        ``OSError`` if the output directory can't take the files.
+        """
         entity_dir = self._output_dir / entity.name
         ext = _COMPRESSED_EXT.get(self._compression, ".jsonl")
 
@@ -84,6 +86,7 @@ class JSONLWriter:
                     f"Output files already exist in {entity_dir} "
                     f"(e.g. {existing[0]}). Use --overwrite to replace them."
                 )
+        check_output_dir(self._output_dir, entity.name)
 
     def setup(self, entity: EntityDef) -> None:
         # Checked again here: output can appear after the caller's own check().

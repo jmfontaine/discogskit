@@ -33,6 +33,7 @@ from tests.conftest import (
     LABELS_XML,
     UNICODE_ARTISTS_ROWS,
     UNICODE_ARTISTS_XML,
+    needs_permissions,
 )
 
 runner = CliRunner()
@@ -521,6 +522,87 @@ class TestExistingOutputCheckedUpFront:
         assert result.exit_code == 0, output
         assert "artists converted" in output or "artists loaded" in output
         assert "labels converted" in output or "labels loaded" in output
+
+
+class TestUnwritableOutputCheckedUpFront:
+    """convert fails on an output directory it can't write into before decompressing anything (#214)."""
+
+    @staticmethod
+    def _convert(fmt: str, out: Path, tmp_path: Path) -> tuple[Result, Path]:
+        dumps = tmp_path / "dumps"
+        dumps.mkdir()
+        gz = _dump_gz(dumps, "artists", ARTISTS_XML)
+        result = runner.invoke(
+            app,
+            [
+                "convert",
+                str(gz),
+                "-f",
+                fmt,
+                "--output",
+                str(out),
+                "--parse-workers",
+                "1",
+                "--no-progress",
+            ],
+        )
+        return result, gz
+
+    def _assert_fails_before_decompressing(
+        self, fmt: str, out: Path, named: Path, tmp_path: Path
+    ) -> None:
+        result, gz = self._convert(fmt, out, tmp_path)
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        assert "Decompress" not in output
+        [message] = [line for line in output.splitlines() if line.strip()]
+        assert message.startswith(f"Error: Can't write output files into {named}: ")
+        assert list(gz.parent.iterdir()) == [gz]
+
+    @pytest.mark.parametrize("fmt", ["jsonl", "parquet"])
+    def test_output_under_a_regular_file(
+        self, monkeypatch: pytest.MonkeyPatch, fmt: str, tmp_path: Path
+    ) -> None:
+        _widen_console(monkeypatch)
+        blocker = tmp_path / "blocker"
+        blocker.write_text("")
+        out = blocker / "out"
+        self._assert_fails_before_decompressing(fmt, out, out, tmp_path)
+
+    @needs_permissions
+    @pytest.mark.parametrize("fmt", ["jsonl", "parquet"])
+    def test_unwritable_entity_dir(
+        self, monkeypatch: pytest.MonkeyPatch, fmt: str, tmp_path: Path
+    ) -> None:
+        """A writable output directory isn't enough when the existing ``<output>/<entity>/`` isn't writable."""
+        _widen_console(monkeypatch)
+        out = tmp_path / "out"
+        entity_dir = out / "artists"
+        entity_dir.mkdir(parents=True)
+        entity_dir.chmod(0o500)
+        try:
+            self._assert_fails_before_decompressing(fmt, out, entity_dir, tmp_path)
+        finally:
+            entity_dir.chmod(0o700)
+        assert list(out.iterdir()) == [entity_dir]
+        assert list(entity_dir.iterdir()) == []
+
+    @pytest.mark.parametrize("fmt", ["jsonl", "parquet"])
+    @pytest.mark.parametrize("existing", [False, True], ids=["missing", "existing"])
+    def test_usable_output_converts_and_leaves_no_probe(
+        self, existing: bool, fmt: str, tmp_path: Path
+    ) -> None:
+        """A missing output directory with missing parents, or an existing empty entity directory, converts."""
+        out = tmp_path / "parent" / "out"
+        if existing:
+            (out / "artists").mkdir(parents=True)
+        result, _ = self._convert(fmt, out, tmp_path)
+        assert result.exit_code == 0, _unstyle(result.output)
+        assert [p.name for p in (tmp_path / "parent").iterdir()] == ["out"]
+        assert [p.name for p in out.iterdir()] == ["artists"]
+        assert sorted(p.name for p in (out / "artists").iterdir()) == sorted(
+            f"{table}.{fmt}" for table in ENTITIES["artists"].table_order
+        )
 
 
 # Discogs text is full of BBCode-style tags that Rich reads as markup: an unmatched closer
