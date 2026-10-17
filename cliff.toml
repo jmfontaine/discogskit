@@ -29,6 +29,8 @@ conventional_commits = true
 filter_unconventional = true
 split_commits = false
 commit_parsers = [
+    # Version bumps around a release (`just release-prepare`, `just release-next`) aren't news.
+    { message = "^chore(\\(release\\))?: (bump version|start .* development|v[0-9])", skip = true },
     { message = "^feat", group = "Features" },
     { message = "^fix", group = "Bug Fixes" },
     { message = "^doc", group = "Documentation" },
