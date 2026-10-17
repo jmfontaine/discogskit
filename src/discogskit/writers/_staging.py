@@ -8,7 +8,9 @@ suffix) keeps the original name stored in gzip headers correct.
 
 Moving the files can fail after hours of parsing, e.g. when ``<output>/<entity>/`` isn't writable or is on another
 filesystem. So the constructor makes the same move with a probe file first, and a failed ``commit()`` keeps the
-staging directory, which then holds the finished files, and names it in its error.
+staging directory, which then holds the finished files, and names it in its error. ``check_output_dir()`` makes the
+same probes before the run, when the staging directory doesn't exist yet, so an unusable output fails before the
+input is decompressed.
 
 A run that fails removes the directories it created (``<output>``, its missing parents, ``<output>/<entity>/``) if
 they're empty, so no empty directory looks like output. Directories that existed before the run stay.
@@ -53,24 +55,11 @@ class StagedFiles:
             raise
         self._kept = False
         if self.final_dir.exists():
-            self._probe()
-
-    def _probe(self) -> None:
-        """Fail now, not after the run, if ``commit()`` can't move files into the existing final directory."""
-        # Named after the staging directory, which is unique in output_dir, so it can't clash with a real file.
-        probe = self.staging_dir / f"{self.staging_dir.name}.probe"
-        target = self.final_dir / probe.name
-        try:
-            probe.touch()
-            # The exact call commit() makes, so a cross-filesystem or permission failure shows up here too.
-            os.replace(probe, target)
-            target.unlink()
-        except OSError as exc:
-            self.discard()
-            # strerror, not the exception: its paths are the probe's, which mean nothing to the user.
-            raise OSError(
-                f"Can't write output files into {self.final_dir}: {exc.strerror or exc}"
-            ) from exc
+            try:
+                _probe(self.final_dir, self.staging_dir, self.final_dir)
+            except OSError:
+                self.discard()
+                raise
 
     def commit(self) -> int:
         """Move every staged file into the final directory. Returns their total size in bytes.
@@ -118,6 +107,46 @@ class StagedFiles:
 
     def path(self, name: str) -> Path:
         return self.staging_dir / name
+
+
+def check_output_dir(output_dir: Path, entity_name: str) -> None:
+    """Raise ``OSError`` now, before any work, if a run can't write ``entity_name``'s files into ``output_dir``.
+
+    Probes the nearest existing directory of ``output_dir``, where ``StagedFiles`` creates the missing ones and its
+    staging directory, and, if ``<output>/<entity>/`` exists, the move ``commit()`` makes into it.
+    """
+    # Absolute, so the walk up ends at the filesystem root rather than at a relative path's first part.
+    output_dir = output_dir.absolute()
+    # A path that exists but isn't a directory is kept: creating the probe in it fails, as the run would.
+    nearest = next(d for d in (output_dir, *output_dir.parents) if d.exists())
+    _probe(output_dir, nearest)
+    final_dir = output_dir / entity_name
+    if final_dir.exists():
+        _probe(final_dir, output_dir, final_dir)
+
+
+def _probe(shown: Path, directory: Path, final_dir: Path | None = None) -> None:
+    """Create a file in ``directory``, move it into ``final_dir`` if given, then delete it.
+
+    Raises ``OSError`` "Can't write output files into ``shown``" if any step fails.
+    """
+    try:
+        fd, name = tempfile.mkstemp(dir=directory, prefix=".discogskit-probe-")
+        os.close(fd)
+        probe = Path(name)
+        try:
+            if final_dir is not None:
+                target = final_dir / probe.name
+                # The exact call commit() makes, so a cross-filesystem or permission failure shows up here too.
+                os.replace(probe, target)
+                probe = target
+        finally:
+            probe.unlink(missing_ok=True)
+    except OSError as exc:
+        # strerror, not the exception: its paths are the probe's, which mean nothing to the user.
+        raise OSError(
+            f"Can't write output files into {shown}: {exc.strerror or exc}"
+        ) from exc
 
 
 # Times to create the staging directory when another run's cleanup removes a directory it needs first.
