@@ -1490,6 +1490,41 @@ def _libpq_options(options: str) -> list[str]:
 
 class TestDsnWithSchema:
     @pytest.mark.parametrize(
+        "dsn, pgoptions, existing",
+        [
+            (
+                "postgresql://u@h/db",
+                "-c maintenance_work_mem=777MB -cstatement_timeout=0",
+                ["-c", "maintenance_work_mem=777MB", "-cstatement_timeout=0"],
+            ),
+            # libpq reads PGOPTIONS only when the DSN sets no options, even empty ones.
+            (
+                "postgresql://u@h/db?options=-cstatement_timeout%3D12345",
+                "-c maintenance_work_mem=777MB",
+                ["-cstatement_timeout=12345"],
+            ),
+            ("postgresql://u@h/db?options=", "-c maintenance_work_mem=777MB", []),
+            ("host=h dbname=db", None, []),
+        ],
+        ids=["pgoptions", "dsn-options", "empty-dsn-options", "neither"],
+    )
+    def test_pgoptions_kept_unless_the_dsn_has_options(
+        self, dsn, pgoptions, existing, monkeypatch
+    ):
+        """Setting options in the DSN stops libpq reading PGOPTIONS, so they're carried over (#223)."""
+        from psycopg.conninfo import conninfo_to_dict
+
+        from discogskit.writers.postgresql import _dsn_with_schema
+
+        if pgoptions is None:
+            monkeypatch.delenv("PGOPTIONS", raising=False)
+        else:
+            monkeypatch.setenv("PGOPTIONS", pgoptions)
+        options = conninfo_to_dict(_dsn_with_schema(dsn, "discogs")).get("options")
+        assert isinstance(options, str)
+        assert _libpq_options(options) == [*existing, '-csearch_path="discogs"']
+
+    @pytest.mark.parametrize(
         "schema",
         ["discogs", 'say "hi"', "back\\slash", "tab\tand space", 'all "\\ \t'],
         ids=["plain", "double-quote", "backslash", "whitespace", "everything"],
@@ -1528,41 +1563,6 @@ class TestDsnWithSchema:
         original = conninfo_to_dict(dsn)
         original.pop("options", None)
         assert params == original
-
-    @pytest.mark.parametrize(
-        "dsn, pgoptions, existing",
-        [
-            (
-                "postgresql://u@h/db",
-                "-c maintenance_work_mem=777MB -cstatement_timeout=0",
-                ["-c", "maintenance_work_mem=777MB", "-cstatement_timeout=0"],
-            ),
-            # libpq reads PGOPTIONS only when the DSN sets no options, even empty ones.
-            (
-                "postgresql://u@h/db?options=-cstatement_timeout%3D12345",
-                "-c maintenance_work_mem=777MB",
-                ["-cstatement_timeout=12345"],
-            ),
-            ("postgresql://u@h/db?options=", "-c maintenance_work_mem=777MB", []),
-            ("host=h dbname=db", None, []),
-        ],
-        ids=["pgoptions", "dsn-options", "empty-dsn-options", "neither"],
-    )
-    def test_pgoptions_kept_unless_the_dsn_has_options(
-        self, dsn, pgoptions, existing, monkeypatch
-    ):
-        """Setting options in the DSN stops libpq reading PGOPTIONS, so they're carried over (#223)."""
-        from psycopg.conninfo import conninfo_to_dict
-
-        from discogskit.writers.postgresql import _dsn_with_schema
-
-        if pgoptions is None:
-            monkeypatch.delenv("PGOPTIONS", raising=False)
-        else:
-            monkeypatch.setenv("PGOPTIONS", pgoptions)
-        options = conninfo_to_dict(_dsn_with_schema(dsn, "discogs")).get("options")
-        assert isinstance(options, str)
-        assert _libpq_options(options) == [*existing, '-csearch_path="discogs"']
 
 
 class TestSplitTableGroups:
