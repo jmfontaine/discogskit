@@ -22,14 +22,17 @@ bounded number of chunks in flight::
         |              v  at most parse_workers + write_queue chunks in flight
         |              |
         +---> [Stage 3b: Writer thread]  one-worker ThreadPoolExecutor
-                  Deserializes IPC, calls writer.write_chunk() which
-                  uses ADBC's COPY protocol under the hood.
+                  Deserializes IPC, calls writer.write_chunk() (ADBC
+                  COPY, SQLite executemany, or staged Parquet/JSONL
+                  files).
                        |
                        v
-                  Database tables (bare, no indexes)
+                  Database tables (no FK-column indexes yet) or staged
+                  files
                        |
                        v
-                  [Stage 4: Indexes]  PK + FK-column indexes (parallel)
+                  [Stage 4: Finalize]  indexes for databases, commit of
+                  staged files
                        |
                        v
                   [Stage 5: Cleanup]  delete XML unless --keep-xml
@@ -55,9 +58,10 @@ Key design decisions
   budget.  If the writer falls behind, parsed chunks wait for it and the
   workers go idle, so the main process never holds more than that many
   parsed chunks, however slow the writer is.
-- **Writer thread**: decouples parsing from database writes.  Without it,
-  the main process would sequentially consume an IPC dict and flush it,
-  leaving parse workers idle during flushes.
+- **Writer thread**: decouples parsing from writes (ADBC COPY, SQLite
+  executemany, or staged Parquet/JSONL files).  Without it, the main
+  process would sequentially consume an IPC dict and write it, leaving
+  parse workers idle during writes.
 - **Parse worker processes owned by the pipeline**: each worker has pipes
   of its own, and the main thread waits on the workers' result pipes, their
   process sentinels and the writes together. A worker holds the only write
