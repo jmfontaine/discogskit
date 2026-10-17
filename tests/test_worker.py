@@ -441,6 +441,35 @@ class TestRecordErrorContext:
         )
 
 
+class TestMalformedXmlError:
+    def test_reports_first_fatal_error(self, tmp_path):
+        """libxml2 logs an undeclared entity, then a bogus follow-on error at the envelope's footer; the first is the
+        cause and the only one in the chunk."""
+        chunk = b"<artist><id>1</id><name>a &foo; b</name></artist>\n"
+        file, start, end, message = _extract_error(tmp_path, "artists", chunk)
+        # The header the worker puts before the chunk is on line 1 too, so columns there count it. libxml2 reports
+        # the column just past the reference.
+        header = b"<?xml version='1.0' encoding='UTF-8'?><artists>"
+        column = len(header) + chunk.index(b"&foo;") + len(b"&foo;") + 1
+        assert message == (
+            f"Malformed artists XML in {file}, chunk at bytes {start}-{end} (line numbers count from byte {start}):"
+            f" Entity 'foo' not defined, line 1, column {column}"
+        )
+
+    def test_reports_its_own_error_after_another_chunk(self, tmp_path):
+        """libxml2's error log is shared by every parser in the thread; one chunk's errors mustn't leak into the next
+        chunk's message."""
+        _extract_error(
+            tmp_path, "artists", b"<artist><id>1</id><name>&foo;</name></artist>\n"
+        )
+        _, _, _, message = _extract_error(
+            tmp_path, "artists", b"<artist><id>2</bad></artist>\n"
+        )
+        assert message.endswith(
+            ": Opening and ending tag mismatch: id line 1 and bad, line 1, column 67"
+        )
+
+
 class TestTableErrorContext:
     @pytest.mark.parametrize(
         "chunk, table, detail",

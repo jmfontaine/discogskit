@@ -269,6 +269,9 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
                     reject_namespaced(parent[0])
                 del parent[0]
 
+    # libxml2's error log is shared by every parser in the thread, and a syntax error copies it whole: cleared here,
+    # the copy holds only this chunk's errors.
+    etree.clear_error_log()
     # Comments and processing instructions aren't elements; kept, their callable .tag would reach the parsers'
     # unknown-element checks. The other options are lxml's hardening, passed explicitly because the defaults vary by
     # lxml version (6.0.x still resolves entities).
@@ -311,7 +314,14 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
         # XMLSyntaxError carries an error log that can't be pickled, so the main process would only report "cannot
         # pickle '_ListErrorLog'" and the real error would be lost (#60). Re-raise as a plain ValueError with the location.
         # Only parsing raises it; errors from append_record get their own context above.
-        detail = exc.msg
+        # exc.msg is the last error libxml2 logged, which can be a follow-on of the first, e.g. at the envelope's
+        # footer after an undeclared entity. The first fatal error is the cause. lxml leaves the column out when it's 0.
+        first = next(iter(exc.error_log.filter_from_fatals()), None)
+        if first is None:
+            detail = exc.msg
+        else:
+            column = f", column {first.column}" if first.column else ""
+            detail = f"{first.message}, line {first.line}{column}"
         raise ValueError(
             f"Malformed {entity.name} XML in {args.file_path}, chunk at bytes {args.start}-{args.end}"
             f" (line numbers count from byte {args.start}): {detail}"
