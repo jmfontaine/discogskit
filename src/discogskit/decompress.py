@@ -86,9 +86,9 @@ _POLL_INTERVAL = 0.5
 _STALL_TIMEOUT = 60.0
 
 # How long the decompression child may take to start running.  Starting it
-# imports discogskit and, with spawn, the calling script again: one that calls
-# discogskit outside an ``if __name__ == "__main__":`` guard waits there
-# forever for the lock this run holds.
+# imports discogskit and, with spawn, the calling script again: one whose
+# top-level code waits for something (the lock this run holds, say) never lets
+# it start.
 _START_TIMEOUT = 60.0
 
 # How much of what the decompression child printed the parent reads, from the end: what it prints after a run that
@@ -439,6 +439,14 @@ def _supervise_decompress_child(
                 message = receiver.recv()
             except EOFError:
                 child.join()
+                if not running and child.exitcode == 1:
+                    # Status 1 is Python's for an uncaught exception: raised while the child imported the calling
+                    # script again, as run() does in a script that calls it outside a __main__ guard, or while the
+                    # child got ready to run.
+                    raise RuntimeError(
+                        "the decompression process exited with status 1 before it started; a script that runs"
+                        ' discogskit must do so under `if __name__ == "__main__":`'
+                    ) from None
                 raise DecompressError(gz_path) from ChildProcessError(
                     f"the decompression process {_describe_exit(child.exitcode)}"
                 )

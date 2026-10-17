@@ -243,6 +243,17 @@ def _never_starting_child(*args):
     time.sleep(3600)
 
 
+def _exiting_child(*args):
+    """Stands in for ``_decompress_child``: exits with status 1 before reporting it's running, as the child of a
+    script that runs discogskit outside a ``__main__`` guard does."""
+    os._exit(1)
+
+
+def _killed_child(*args):
+    """Stands in for ``_decompress_child``: killed before reporting it's running."""
+    os.kill(os.getpid(), signal.SIGKILL)
+
+
 class _StalledReader(_CompleteGzipReader):
     """Never returns, as rapidgzip does on some truncated input."""
 
@@ -719,7 +730,7 @@ class TestNativeFailures:
         assert list(log_dir.iterdir()) == []
 
     def test_child_that_never_starts_raises_runtime_error(self, monkeypatch, tmp_path):
-        """Like a script without a ``__main__`` guard, run again in the child."""
+        """Like a child stuck in the calling script's top-level code, which it imports again."""
         gz_path = _write_gz(tmp_path / "test.xml.gz")
         xml_path = tmp_path / "test.xml"
         monkeypatch.setattr(decompress, "_START_TIMEOUT", 1)
@@ -731,6 +742,34 @@ class TestNativeFailures:
         assert not multiprocessing.active_children()
         assert not xml_path.exists()
         assert not (tmp_path / "test.xml.partial").exists()
+
+    def test_child_exiting_before_it_runs_names_the_main_guard(
+        self, monkeypatch, tmp_path
+    ):
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        monkeypatch.setattr(decompress, "_decompress_child", _exiting_child)
+
+        with pytest.raises(
+            RuntimeError, match=r'exited with status 1 .*if __name__ == "__main__":'
+        ):
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        assert not multiprocessing.active_children()
+        assert not xml_path.exists()
+
+    def test_child_killed_before_it_runs_raises_decompress_error(
+        self, monkeypatch, tmp_path
+    ):
+        """Only status 1, Python's for an exception, can come from a script without a ``__main__`` guard."""
+        gz_path = _write_gz(tmp_path / "test.xml.gz")
+        xml_path = tmp_path / "test.xml"
+        monkeypatch.setattr(decompress, "_decompress_child", _killed_child)
+
+        with pytest.raises(DecompressError) as excinfo:
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        assert "was killed by SIGKILL" in str(excinfo.value.__cause__)
 
     def test_crash_after_success_raises_decompress_error(self, monkeypatch, tmp_path):
         """A child that reports success, then exits non-zero, fails the run."""

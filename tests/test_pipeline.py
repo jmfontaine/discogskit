@@ -9,6 +9,7 @@ import json
 import multiprocessing
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -24,6 +25,7 @@ from filelock import ReadWriteLock
 from rich.live import _RefreshThread
 
 from discogskit._console import console
+from discogskit.decompress import ensure_xml
 from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import ChunkResult, extract_chunk_to_ipc
 from discogskit.pipeline import (
@@ -237,6 +239,11 @@ def _dying_mid_send_extract(args):
     return result._replace(
         tables={**result.tables, "padding": pa.py_buffer(bytes(_MID_SEND_BYTES))}
     )
+
+
+def _exiting_extract(args):
+    """Stands in for the parse step: the worker exits with status 1, as on an error Python can't send back."""
+    os._exit(1)
 
 
 def test_parse_worker_sends_tables_without_copying_them(tmp_path):
@@ -1142,12 +1149,14 @@ class TestPipelineRunParseWorkers:
         monkeypatch.setattr(pipeline, "extract_chunk_to_ipc", extract)
         writer = JSONLWriter(str(tmp_path / "out"))
 
-        with pytest.raises(BrokenProcessPool):
+        with pytest.raises(BrokenProcessPool) as excinfo:
             try:
                 _run_or_fail_on_hang(_multi_chunk_config(gz_path), writer, timeout=15)
             finally:
                 writer.close()
 
+        # Killed, not exited with status 1: the __main__ guard can't be the cause.
+        assert "__main__" not in str(excinfo.value)
         assert (tmp_path / "worker-died").exists()
         assert multiprocessing.active_children() == []
         xml_path = gz_path.with_suffix("")
@@ -1416,6 +1425,29 @@ class TestPipelineRunParseWorkers:
             if thread.name.startswith("discogskit-writer_")
         ]
 
+    def test_worker_exiting_with_status_1_gets_the_main_guard_hint(
+        self, monkeypatch, tmp_path, artists_gz
+    ):
+        """Status 1 is how a worker ends when it runs a script without a ``__main__`` guard again (#222)."""
+        from discogskit import pipeline
+        from discogskit.writers.jsonl import JSONLWriter
+
+        monkeypatch.setattr(pipeline, "extract_chunk_to_ipc", _exiting_extract)
+        writer = JSONLWriter(str(tmp_path / "out"))
+
+        with pytest.raises(BrokenProcessPool) as excinfo:
+            try:
+                _run_or_fail_on_hang(
+                    _single_chunk_config(artists_gz), writer, timeout=15
+                )
+            finally:
+                writer.close()
+
+        message = str(excinfo.value)
+        assert "died with exit code 1 while parsing" in message
+        assert "too much memory" in message
+        assert 'if __name__ == "__main__":' in message
+
     def test_worker_start_failure_restores_the_terminal(self, monkeypatch, tmp_path):
         """A parse worker that fails to start must not leave the progress display running, nor the workers already
         started."""
@@ -1449,6 +1481,95 @@ class TestPipelineRunParseWorkers:
             if isinstance(thread, _RefreshThread):
                 thread.join(timeout=2)
                 assert not thread.is_alive()
+
+
+# Calls run() at top level, as a script without a __main__ guard does. Only the script's own run writes the report:
+# the processes discogskit starts import the script again, as __mp_main__, and run it there too.
+_UNGUARDED_SCRIPT = """\
+import sys
+from pathlib import Path
+
+from rich.console import Console
+
+import discogskit
+
+gz_path, output_dir, report = sys.argv[1:]
+config = discogskit.PipelineConfig(
+    chunk_mb=1,
+    entity="artists",
+    gz_path=Path(gz_path),
+    keep_xml=True,
+    parse_workers=1,
+    profile=False,
+    progress=False,
+    strict=False,
+    write_queue=1,
+)
+writer = discogskit.get_file_writer(output_dir, "jsonl")
+try:
+    discogskit.run(config, writer, console=Console(quiet=True))
+except Exception as exc:
+    if __name__ == "__main__":
+        Path(report).write_text(f"{type(exc).__name__}: {exc}")
+    raise
+finally:
+    writer.close()
+"""
+
+
+class TestPipelineRunWithoutMainGuard:
+    """#222: a script that runs discogskit outside ``if __name__ == "__main__":`` fails at once and says why."""
+
+    @pytest.mark.parametrize("cached", [False, True], ids=["fresh-gz", "cached-xml"])
+    def test_unguarded_script_fails_at_once_naming_the_guard(self, tmp_path, cached):
+        """With a cached XML the first process started is a parse worker, otherwise the decompression process."""
+        gz_path = tmp_path / "artists.xml.gz"
+        gz_path.write_bytes(gzip.compress(_ARTISTS_GZ_XML))
+        if cached:
+            ensure_xml(gz_path, gz_path.with_suffix(""), workers=1).release(
+                remove_xml=False
+            )
+        script = tmp_path / "unguarded.py"
+        script.write_text(_UNGUARDED_SCRIPT)
+        report = tmp_path / "report.txt"
+
+        t0 = time.monotonic()
+        completed = subprocess.run(
+            [sys.executable, script, gz_path, tmp_path / "out", report],
+            capture_output=True,
+            check=False,
+            cwd=tmp_path,
+            # The decompression process's start timeout is 60s.
+            timeout=50,
+        )
+        elapsed = time.monotonic() - t0
+
+        assert completed.returncode != 0
+        assert 'if __name__ == "__main__":' in report.read_text()
+        assert elapsed < 30
+
+    def test_run_inside_a_discogskit_process_raises_before_touching_anything(
+        self, monkeypatch, tmp_path, artists_gz
+    ):
+        """What a script without the guard runs in a parse worker: ``run()`` must not decompress or set up."""
+
+        class SetupRecordingWriter(_StubWriter):
+            def __init__(self):
+                self.setups = 0
+
+            def setup(self, entity):
+                self.setups += 1
+
+        monkeypatch.setattr(
+            multiprocessing.current_process(), "name", "discogskit-parse"
+        )
+        writer = SetupRecordingWriter()
+
+        with pytest.raises(RuntimeError, match=r'if __name__ == "__main__":'):
+            _run_and_close(_single_chunk_config(artists_gz), writer)
+
+        assert writer.setups == 0
+        assert not artists_gz.with_suffix("").exists()
 
 
 class TestPipelineRunConsole:

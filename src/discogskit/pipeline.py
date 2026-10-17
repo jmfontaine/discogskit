@@ -597,9 +597,18 @@ def _worker_died(worker: _ParseWorker) -> BrokenProcessPool:
         if chunk is None
         else f" while parsing {chunk.file_path} (chunk bytes {chunk.start}-{chunk.end})"
     )
+    # Status 1 is Python's for an uncaught exception, such as the one run() raises in a worker that runs, again, a
+    # script calling it outside a __main__ guard. Bootstrapping a worker leaves nothing that tells that apart from
+    # an exception raised later.
+    guard = (
+        " Exit code 1 is also how a worker ends when the script that runs discogskit doesn't do so under `if"
+        ' __name__ == "__main__":`: each worker imports that script again.'
+        if exit_code == 1
+        else ""
+    )
     return BrokenProcessPool(
         f"A parse worker died{how}{where}. A worker killed for using too much"
-        " memory dies this way; fewer parse workers or smaller chunks need less."
+        f" memory dies this way; fewer parse workers or smaller chunks need less.{guard}"
     )
 
 
@@ -801,6 +810,15 @@ def run(
     With ``config.strict``, raises ``UnhandledElementsError`` before ``finalize()`` if the input has XML elements no
     parser handled.
     """
+    # A process discogskit started (a parse worker, the decompression process) imports the calling script again, so
+    # one without a __main__ guard calls run() there too. That run would split the XML and set up the writer before
+    # failing to start a parse worker, as multiprocessing refuses in a process that is still starting. Spawn names the
+    # process before it imports the script.
+    if multiprocessing.current_process().name.startswith("discogskit-"):
+        raise RuntimeError(
+            "discogskit.run() was called again inside one of discogskit's own worker processes: a script that"
+            ' runs discogskit must do so under `if __name__ == "__main__":`'
+        )
     if console is None:
         return _run(config, writer)
     with using(console):
