@@ -40,8 +40,10 @@ when a query crosses entities.
   `.jsonl.bz2` with `--compression`). Parquet defaults to `zstd` at pyarrow's level 1, not zstd's own 3 (a file
   records its codec, not its level); on releases, `--compression-level 3` made the files 9% smaller and `9` 14%
   smaller, and single runs didn't show what that costs in time. JSONL defaults to no compression. Parquet `gzip` is
-  slow: one thread compresses every row group, and releases took more than twice as long as with `zstd`. Files
-  appear only once every table of the entity is complete.
+  slow: one thread compresses every row group, and releases took more than twice as long as with `zstd`. JSONL is
+  slower still: one thread serializes every row, and releases took 2.5 to 2.7 times as long as Parquet `zstd`
+  uncompressed, 3.6 times with JSONL `gzip` (level 6) and 11 times with `bzip2`. DuckDB and Polars can't read bzip2
+  JSONL, so prefer `gzip` when they will. Files appear only once every table of the entity is complete.
 - `load --dsn postgresql://user@host/db` (or the `DATABASE_URL` environment variable; the default is
   `postgresql://localhost/discogskit`) creates the tables in the current schema, or in `--pg-schema`. PostgreSQL
   14+.

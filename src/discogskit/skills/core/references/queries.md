@@ -194,6 +194,49 @@ jq -r 'select(.country == "US") | [.id, .title] | @tsv' jsonl/releases/releases.
 # A gzipped file
 gzip -dc jsonl/releases/releases.jsonl.gz \
   | jq -r 'select((.styles // []) | any(. == "Techno")) | [.id, .title] | @tsv' | sort -n | head
+
+# A bzip2 file
+bzip2 -dc jsonl/releases/releases.jsonl.bz2 \
+  | jq -r 'select((.styles // []) | any(. == "Techno")) | [.id, .title] | @tsv' | sort -n | head
 ```
 
-DuckDB reads JSONL, compressed or not: `SELECT count(*) FROM read_json('jsonl/releases/releases.jsonl.gz');`.
+DuckDB and Polars read uncompressed and gzipped JSONL, but not bzip2 (`--compression bzip2`): on a `.jsonl.bz2` file,
+DuckDB fails with `Malformed JSON` and Polars with `stream did not contain valid UTF-8`. Read bzip2 files with `jq`
+through `bzip2 -dc`, as above; for DuckDB and Polars, decompress them first (`bzip2 -dk`), or convert with
+`--compression gzip` when these tools will read the files.
+
+Both tools infer column types from the data. DuckDB types a column with no value in the whole file as `JSON`, such as
+`releases.status`, which has none in the 2026-10-01 dump: cast it, or pass every column's type with `columns`.
+
+```sql
+SELECT count(*) FROM read_json('jsonl/releases/releases.jsonl.gz');
+
+SELECT id, title, status::VARCHAR AS status
+FROM read_json('jsonl/releases/releases.jsonl.gz')
+WHERE country = 'US'
+ORDER BY id
+LIMIT 20;
+```
+
+Polars infers types from the first 100 lines only, which fails on sparse columns: `release_tracks.parent_idx` is
+null there, so Polars types it `Null` and the scan fails at the first sub-track with
+`got non-null value for NULL-typed column`. It also types a column with no value in the whole file `Null`. Pass the
+table's schema, built from the one discogskit writes:
+
+```python
+import discogskit
+import polars as pl
+
+arrow_schema = discogskit.ENTITIES["releases"].schemas["release_tracks"]
+schema = pl.from_arrow(arrow_schema.empty_table()).schema
+(
+    pl.scan_ndjson("jsonl/releases/release_tracks.jsonl.gz", schema=schema)
+    .filter(pl.col("parent_idx").is_not_null())
+    .sort("release_id", "track_idx")
+    .head(20)
+    .collect()
+)
+```
+
+`infer_schema_length=None` works too, but reads the whole file before the scan starts: 164 s for the 23 GB
+`release_tracks.jsonl` of the 2026-10-01 dump.
