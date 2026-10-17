@@ -179,13 +179,14 @@ class SQLiteWriter:
             return
         if self._conn is None and not os.path.lexists(self._abspath):
             return
+        # SQLite matches table names without regard to ASCII case: setup() would drop a user's "Artists" as "artists".
         existing = {
-            row[0]
+            row[0].lower()
             for row in self._connection().execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-        conflict = existing & set(entity.table_order)
+        conflict = existing & {t.lower() for t in entity.table_order}
         if conflict:
             from discogskit.writers import OutputExistsError
 

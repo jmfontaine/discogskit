@@ -295,6 +295,46 @@ class TestSQLiteWriter:
         assert (tmp_path / "data" / "test.db").exists()
         assert not (tmp_path / "work" / "test.db").exists()
 
+    @pytest.mark.parametrize(
+        "name, example",
+        [
+            ("Artists", "artists"),
+            ("ARTISTS", "artists"),
+            ("Artist_Aliases", "artist_aliases"),
+        ],
+    )
+    def test_overwrite_matches_table_names_without_case(
+        self, tmp_path, entity, ipc_dict, name, example
+    ):
+        """SQLite resolves table names without regard to ASCII case, so setup() would drop and replace a table named
+        ``Artists`` as ``artists`` (#217)."""
+        from discogskit.writers import OutputExistsError
+
+        db_path = str(tmp_path / "test.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute(f'CREATE TABLE "{name}"(x INTEGER)')
+        conn.execute(f'INSERT INTO "{name}" VALUES (1)')
+        conn.commit()
+        conn.close()
+
+        writer = SQLiteWriter(db_path)
+        try:
+            message = rf"\(e\.g\. {example}\)\. Use --overwrite to replace them\.$"
+            with pytest.raises(OutputExistsError, match=message):
+                writer.check(entity)
+            with pytest.raises(OutputExistsError, match=message):
+                writer.setup(entity)
+        finally:
+            writer.close()
+        conn = sqlite3.connect(db_path)
+        assert conn.execute(f'SELECT x FROM "{name}"').fetchall() == [(1,)]
+        conn.close()
+
+        self._load(db_path, entity, ipc_dict, overwrite=True)
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("SELECT count(*) FROM artists").fetchone() == (2,)
+        conn.close()
+
     def test_overwrite_raises_when_tables_exist(self, tmp_path, entity, ipc_dict):
         """setup() raises OutputExistsError when tables exist and overwrite=False."""
         from discogskit.writers import OutputExistsError
