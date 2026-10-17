@@ -6,10 +6,11 @@ The entity modules import from here rather than from the ``discogskit.entities``
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
 
 import pyarrow as pa
 
@@ -207,3 +208,33 @@ def parse_bool(name: str, value: str | None) -> bool | None:
         raise ValueError(
             f"invalid {name} {value!r}, expected 'true' or 'false'"
         ) from None
+
+
+# Every integer column is int32. Only ASCII digits after an optional minus are integers: int() would also take
+# whitespace, "+", "_" and other scripts' digits (#216). Leading zeros aside, an int32 has at most 10 digits, so longer
+# values are out of range without converting them: int() refuses thousands of digits with an error of its own.
+_INT = re.compile(r"(-?)0*([0-9]{1,10})")
+_INT32_MAX = 2**31 - 1
+_INT32_MIN = -(2**31)
+
+
+@overload
+def parse_int(name: str, value: str) -> int: ...
+@overload
+def parse_int(name: str, value: str | None) -> int | None: ...
+
+
+def parse_int(name: str, value: str | None) -> int | None:
+    """Parse the integer ``name``: ``None`` when it's missing, an int32 otherwise. Any other value, including an empty
+    one (``<id/>``, ``<id></id>`` or ``id=""``), raises ``ValueError`` naming ``name``; the chunk worker adds the
+    record. Pass a text element's text as ``leaf_text`` returns it, ``""`` when empty, and ``None`` only when the
+    element is missing."""
+    if value is None:
+        return None
+    if (match := _INT.fullmatch(value)) is not None:
+        number = -int(match[2]) if match[1] else int(match[2])
+        if _INT32_MIN <= number <= _INT32_MAX:
+            return number
+    raise ValueError(
+        f"invalid {name} {value!r}, expected an integer from {_INT32_MIN} to {_INT32_MAX}"
+    )

@@ -20,6 +20,7 @@ from discogskit.entities._def import (
     leaf_text,
     leaf_texts,
     parse_bool,
+    parse_int,
     second_copy,
 )
 
@@ -75,17 +76,15 @@ def append_record(
     id_text = record_id(elem)
     if not id_text:
         raise ValueError("missing or empty id")
-    master_id = int(id_text)
+    master_id = parse_int("id", id_text)
     if unknown is not None:
         check_attrs(elem, "", unknown, ID_ATTR)
         check_text(elem, "", unknown)
 
     data_quality = None
-    main_release = None
     main_release_text = None
     notes = None
     title = None
-    year = None
     year_text = None
     genres = None
     styles = None
@@ -126,7 +125,7 @@ def append_record(
                     # Every child handled above is text-only.
                     if unknown is not None:
                         check_leaf(ac, "artists/artist/", unknown)
-                artist_id = int(artist_id_text) if artist_id_text else None
+                artist_id = parse_int("artist id", artist_id_text)
                 row = cols["master_artists"]
                 row["master_id"].append(master_id)
                 row["artist_id"].append(artist_id)
@@ -145,8 +144,6 @@ def append_record(
             if main_release_text is not None:
                 raise second_copy(child)
             main_release_text = leaf_text(child, "", unknown)
-            if main_release_text:
-                main_release = int(main_release_text)
         elif tag == "notes":
             if notes is not None:
                 raise second_copy(child)
@@ -165,8 +162,7 @@ def append_record(
                     check_attrs(video, "videos/video/", unknown, VIDEO_ATTRS)
                     check_text(video, "videos/video/", unknown)
                 src = video.get("src")
-                dur_str = video.get("duration")
-                duration = None if dur_str is None else int(dur_str)
+                duration = parse_int("duration", video.get("duration"))
                 embed = parse_bool("embed", video.get("embed"))
                 vdesc = None
                 vtitle = None
@@ -197,11 +193,12 @@ def append_record(
             if year_text is not None:
                 raise second_copy(child)
             year_text = leaf_text(child, "", unknown)
-            if year_text:
-                year = int(year_text)
         elif unknown is not None:
             unknown.add(tag)
 
+    # Parsed after the loop, as an artist credit's <id> is, so a second copy fails first, even after an empty one.
+    main_release = parse_int("main release", main_release_text)
+    year = parse_int("year", year_text)
     r = cols["masters"]
     r["id"].append(master_id)
     r["data_quality"].append(data_quality)

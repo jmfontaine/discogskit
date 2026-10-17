@@ -760,7 +760,7 @@ class TestPipelineRun:
         gz_path = _many_artists_gz(tmp_path / "artists.xml.gz", bad_id_at=_MANY_ARTISTS)
         writer = SlowTrackingWriter()
 
-        with pytest.raises(ValueError, match="invalid literal for int"):
+        with pytest.raises(ValueError, match="invalid id .*, expected an integer"):
             try:
                 _run_or_fail_on_hang(_multi_chunk_config(gz_path), writer)
             finally:

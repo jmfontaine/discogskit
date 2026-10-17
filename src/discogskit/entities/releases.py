@@ -22,6 +22,7 @@ from discogskit.entities._def import (
     leaf_text,
     leaf_texts,
     parse_bool,
+    parse_int,
     second_copy,
 )
 
@@ -244,7 +245,7 @@ def _parse_artist_children(
             # Every child handled above is text-only.
             if unknown is not None:
                 check_leaf(ch, path, unknown)
-        result.append((int(aid_text) if aid_text else None, name, anv, join_text))
+        result.append((parse_int("artist id", aid_text), name, anv, join_text))
     return result
 
 
@@ -300,7 +301,7 @@ def _parse_extraartist_children(
             if unknown is not None:
                 check_leaf(ch, path, unknown)
         result.append(
-            (int(aid_text) if aid_text else None, name, anv, role, tracks_text)
+            (parse_int("extra artist id", aid_text), name, anv, role, tracks_text)
         )
     return result, first_tracks
 
@@ -386,7 +387,7 @@ def append_record(
     id_text = record_id(elem)
     if not id_text:
         raise ValueError("missing or empty id")
-    rid = int(id_text)
+    rid = parse_int("id", id_text)
     status = elem.get("status")
     if unknown is not None:
         check_attrs(elem, "", unknown, _RELEASE_ATTRS)
@@ -397,7 +398,6 @@ def append_record(
     released = None
     notes = None
     data_quality = None
-    master_id = None
     master_id_text = None
     is_main_release = None
     genres = None
@@ -442,7 +442,6 @@ def append_record(
             master_id_text = child.text or ""
             if unknown is not None:
                 check_leaf(child, "", unknown, _MASTER_ID_ATTRS)
-            master_id = int(master_id_text) if master_id_text else None
             is_main_release = parse_bool(
                 "is_main_release", child.get("is_main_release")
             )
@@ -467,10 +466,9 @@ def append_record(
                 if unknown is not None:
                     check_leaf(la, "labels/", unknown, _LABEL_ATTRS)
                     check_text(la, "labels/label/", unknown)
-                la_id_str = la.get("id")
                 r_labels.append(
                     (
-                        int(la_id_str) if la_id_str else None,
+                        parse_int("label id", la.get("id")),
                         la.get("name"),
                         la.get("catno"),
                     )
@@ -480,10 +478,9 @@ def append_record(
                 if unknown is not None:
                     check_leaf(sr, "series/", unknown, _LABEL_ATTRS)
                     check_text(sr, "series/series/", unknown)
-                sr_id_str = sr.get("id")
                 r_series.append(
                     (
-                        int(sr_id_str) if sr_id_str else None,
+                        parse_int("series id", sr.get("id")),
                         sr.get("name"),
                         sr.get("catno"),
                     )
@@ -529,8 +526,7 @@ def append_record(
                 if unknown is not None:
                     check_attrs(vid, "videos/video/", unknown, VIDEO_ATTRS)
                     check_text(vid, "videos/video/", unknown)
-                dur_str = vid.get("duration")
-                vid_dur = None if dur_str is None else int(dur_str)
+                vid_dur = parse_int("duration", vid.get("duration"))
                 vid_embed = parse_bool("embed", vid.get("embed"))
                 vid_title = None
                 vid_desc = None
@@ -600,7 +596,7 @@ def append_record(
                         check_leaf(cch, "companies/company/", unknown)
                 r_companies.append(
                     (
-                        int(cid_text) if cid_text else None,
+                        parse_int("company id", cid_text),
                         cname,
                         ccatno,
                         cetype,
@@ -655,6 +651,9 @@ def append_record(
                         track_idx += 1
         elif unknown is not None:
             unknown.add(tag)
+
+    # Parsed after the loop, as an artist credit's <id> is, so a second copy fails first, even after an empty one.
+    master_id = parse_int("master id", master_id_text)
 
     # -- Append to accumulators --
 

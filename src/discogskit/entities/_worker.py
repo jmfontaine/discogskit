@@ -218,7 +218,9 @@ def _snippet(text: str) -> str:
 def _to_batch(
     args: ChunkArgs, columns: dict[str, list], name: str, schema: pa.Schema
 ) -> pa.RecordBatch:
-    """Convert one table's column lists to a RecordBatch, naming the table and chunk when a value doesn't fit."""
+    """Convert one table's column lists to a RecordBatch, naming the table and chunk when a value doesn't fit.
+
+    ``parse_int`` already rejects out-of-range integers, which then fail their record, so this is only a fallback."""
     try:
         return pa.RecordBatch.from_pydict(columns, schema=schema)
     except (OverflowError, pa.ArrowInvalid) as exc:
