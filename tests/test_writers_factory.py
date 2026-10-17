@@ -235,6 +235,49 @@ class TestGetWriter:
             get_writer(dsn)
         assert f"Unsupported database DSN: {shown!r}." in str(excinfo.value)
 
+    @pytest.mark.parametrize(
+        "dsn, shown",
+        [
+            # A bare "%" in the password: libpq quotes the token it can't decode.
+            (
+                "postgresql://user:s3%zzcr3t@localhost/discogs",
+                "postgresql://user:***@localhost/discogs",
+            ),
+            # A malformed host: libpq quotes the whole URI.
+            (
+                "postgresql://user:s3cr3t@[::1]x/discogs",
+                "postgresql://user:***@[::1]x/discogs",
+            ),
+            (
+                "postgres://user:s3cr3t@[::1/discogs",
+                "postgres://user:***@[::1/discogs",
+            ),
+            # A bare "%" in a password given as a parameter: the query string is hidden whole.
+            (
+                "postgresql://localhost/discogs?password=s3%zzcr3t",
+                "postgresql://localhost/discogs?***",
+            ),
+            # libpq reads "#" and "?" as part of the user name.
+            (
+                "postgresql://us#er:s3%zzcr3t@localhost/discogs",
+                "postgresql://us#er:***@localhost/discogs",
+            ),
+            (
+                "postgresql://us?er:s3cr3t@[::1]x/discogs",
+                "postgresql://us?***",
+            ),
+        ],
+    )
+    def test_malformed_postgresql_dsn_error_hides_the_password(self, dsn, shown):
+        with pytest.raises(ValueError) as excinfo:
+            get_writer(dsn)
+        assert str(excinfo.value).startswith(f"Invalid PostgreSQL DSN: {shown!r}.")
+        exc: BaseException | None = excinfo.value
+        while exc is not None:
+            assert "s3" not in str(exc)
+            assert "cr3t" not in str(exc)
+            exc = exc.__cause__ or exc.__context__
+
 
 _ARTISTS_XML = (
     b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n"

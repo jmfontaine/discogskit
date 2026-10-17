@@ -361,14 +361,15 @@ server that doesn't answer the cancel request at all can still hold the load unt
 | SQLite | 3.x |
 | PostgreSQL | 14+ |
 
-`--dsn` accepts `postgresql://` or `postgres://` (both work identically) for PostgreSQL. For SQLite, it accepts
-`sqlite:///<path>` (`sqlite:///discogs.db` is relative to the current directory, `sqlite:////data/discogs.db` is
-absolute) or a plain path ending in `.db`, `.sqlite`, or `.sqlite3`. Other `sqlite:` forms, paths containing `?`
-(SQLite URI parameters such as `?mode=ro` aren't supported) and in-memory databases (`sqlite:///:memory:`,
-`file::memory:`), which would discard the load when the run ends, are rejected before any file is created. A
-database file that doesn't exist yet is created only once the input has been decompressed and checked, so a run that
-fails before that, such as on a truncated `.xml.gz` or Ctrl+C during decompression, leaves none; the run still fails
-before any work if the file's directory can't hold it.
+`--dsn` accepts `postgresql://` or `postgres://` (both work identically) for PostgreSQL. One libpq can't parse, such as
+one with an unencoded `%` in the password (write it `%25`), is rejected before connecting, with an error that shows the
+DSN with its password and query string hidden. For SQLite, it accepts `sqlite:///<path>` (`sqlite:///discogs.db` is
+relative to the current directory, `sqlite:////data/discogs.db` is absolute) or a plain path ending in `.db`, `.sqlite`,
+or `.sqlite3`. Other `sqlite:` forms, paths containing `?` (SQLite URI parameters such as `?mode=ro` aren't supported)
+and in-memory databases (`sqlite:///:memory:`, `file::memory:`), which would discard the load when the run ends, are
+rejected before any file is created. A database file that doesn't exist yet is created only once the input has been
+decompressed and checked, so a run that fails before that, such as on a truncated `.xml.gz` or Ctrl+C during
+decompression, leaves none; the run still fails before any work if the file's directory can't hold it.
 
 <details>
 <summary>Full command help</summary>
