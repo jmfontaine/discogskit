@@ -321,6 +321,31 @@ escaped as `\u2028`, `\u2029` and `\u0085`, which decode to the same text. gzip 
 file name in its header, so the same rows in the same order give the same bytes. Rows are written in the order the
 parse workers finish their chunks.
 
+DuckDB and Polars read uncompressed and gzipped JSONL, but not bzip2: on a `.jsonl.bz2` file, DuckDB fails with
+`Malformed JSON` and Polars with `stream did not contain valid UTF-8`. `jq` reads one through `bzip2 -dc`; for DuckDB
+and Polars, decompress it first, or convert with `--compression gzip`. Both infer column types from the data: Polars
+from the first 100 lines, which fails on sparse columns such as `release_tracks.parent_idx`, and both mistype a column
+with no value in the whole file, such as `releases.status` in the 2026-10-01 dump (Polars as `Null`, DuckDB as
+`JSON`). Pass the types instead: the agent skill's
+[example queries](src/discogskit/skills/core/references/queries.md#jsonl) show how.
+
+JSONL is much slower to write than Parquet. One writer thread serializes, and compresses, every row, so the parse
+workers wait on it: with `gzip` at level 6 they were blocked for 2,622 of the run's 2,986 s. Converting the
+2026-10-01 releases dump (19,492,392 records) on a quiet Apple M3, before the compact separators described above
+(which made the uncompressed labels file of the same dump 6.5% smaller):
+
+| Codec (level) | Run time | Output |
+|---|---:|---:|
+| `none` | 2,142–2,248 s | 71,879 MiB |
+| `gzip` (1) | 2,477 s | 13,136 MiB |
+| `gzip` (6, default) | 2,986 s | 11,141 MiB |
+| `gzip` (9) | 4,828 s | 10,675 MiB |
+| `bzip2` (9, default) | 9,085 s | 7,507 MiB |
+
+Peak memory was about 4 GiB summed over the processes, 5.7 GiB with `--strict`. Parquet with `zstd` took 840 s on
+the same dump (see above), so prefer Parquet for large dumps. For JSONL, prefer `gzip` at level 1 to 6 over `bzip2`
+unless size matters most: `bzip2` takes three times as long as `gzip` at level 6, and DuckDB and Polars can't read it.
+
 #### Examples
 
 ```shell
