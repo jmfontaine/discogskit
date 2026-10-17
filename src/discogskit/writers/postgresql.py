@@ -28,11 +28,13 @@ from contextlib import suppress
 from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING, Protocol
 
+import psycopg
 import pyarrow as pa
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from discogskit._console import status
+from discogskit.writers import OutputExistsError
 
 if TYPE_CHECKING:
     from discogskit.entities import EntityDef
@@ -174,8 +176,6 @@ _CANCEL_INTERVAL = 0.5
 
 def _create_indexes(dsn: str, tables: list[str], column: str, workers: int) -> None:
     """Index *column* on each of *tables*, *workers* at a time, each on its own connection."""
-    import psycopg
-
     aborted = False
     lock = Lock()
     running: set[psycopg.Connection] = set()
@@ -319,8 +319,6 @@ class PostgreSQLWriter:
         self._unlogged = unlogged
         self._write_workers = write_workers
 
-        import psycopg
-
         self._conn = psycopg.connect(dsn, autocommit=True)
 
         if schema is not None:
@@ -440,8 +438,6 @@ class PostgreSQLWriter:
     def check(self, entity: EntityDef) -> None:
         """Raise ``OutputExistsError`` if any of ``entity``'s tables exists in the current schema and overwrite is
         off."""
-        from discogskit.writers import OutputExistsError
-
         if self._overwrite:
             return
         # Only the current schema counts: a same-named table elsewhere on search_path is never ours.
@@ -465,9 +461,6 @@ class PostgreSQLWriter:
     def setup(self, entity: EntityDef) -> None:
         """Open the ADBC write connections, then drop/create tables in the current schema."""
         import adbc_driver_postgresql.dbapi as adbc_pg
-        import psycopg
-
-        from discogskit.writers import OutputExistsError
 
         # Unqualified CREATE TABLE lands in current_schema(); every check and drop
         # names it explicitly, so a same-named table elsewhere on search_path is
