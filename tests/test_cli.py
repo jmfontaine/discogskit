@@ -1070,7 +1070,7 @@ class TestStrict:
 
     _TARGETS: ClassVar[list[str]] = ["jsonl", "parquet", "sqlite"]
     _UNHANDLED: ClassVar[str] = (
-        "<artist><id>99</id><name>X</name><new_tag/><other_tag/></artist>\n"
+        '<artist foo="x"><id>99</id><name>X</name>TAIL<new_tag/></artist>\n'
     )
 
     @staticmethod
@@ -1131,9 +1131,10 @@ class TestStrict:
         lines = [line.strip() for line in output.splitlines()]
         reported = [line for line in lines if line.startswith(("Strict", "Error"))]
         assert reported == [
+            "Strict         unhandled XML attribute <@foo> in <artist>",
             "Strict         unhandled XML element <new_tag> in <artist>",
-            "Strict         unhandled XML element <other_tag> in <artist>",
-            "Error: --strict: 2 unhandled XML element paths in <artist>; see the Strict lines above",
+            "Strict         unhandled XML text <text()> in <artist>",
+            "Error: --strict: 3 unhandled XML paths in <artist>; see the Strict lines above",
         ]
         assert not self._published(target, tmp_path)
 

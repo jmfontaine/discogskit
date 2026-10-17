@@ -322,7 +322,9 @@ def convert(
     ] = True,
     strict: Annotated[
         bool,
-        typer.Option(help="Fail on unhandled XML elements, after listing them all"),
+        typer.Option(
+            help="Fail on unhandled XML elements, attributes and text, after listing them all"
+        ),
     ] = False,
 ) -> None:
     """Convert Discogs XML dumps into flat files (Parquet or JSONL)."""
@@ -412,7 +414,9 @@ def load(
     ] = True,
     strict: Annotated[
         bool,
-        typer.Option(help="Fail on unhandled XML elements, after listing them all"),
+        typer.Option(
+            help="Fail on unhandled XML elements, attributes and text, after listing them all"
+        ),
     ] = False,
     # PostgreSQL options
     pg_create_schema: Annotated[

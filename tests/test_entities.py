@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import itertools
 
 import pytest
 
@@ -60,6 +61,26 @@ class TestEntities:
     )
     def test_fk_columns(self, name, fk_column):
         assert ENTITIES[name].fk_column == fk_column
+
+    @pytest.mark.parametrize(
+        "table, schema",
+        [
+            pytest.param(table, schema, id=table)
+            for entity in ENTITIES.values()
+            for table, schema in entity.schemas.items()
+        ],
+    )
+    def test_key_columns_then_the_rest_alphabetically(self, table, schema):
+        """The schema order is the Parquet field order, the JSONL key order and the CREATE TABLE order: key columns
+        such as id, release_id and track_idx come first, then the rest alphabetically (#221)."""
+        names = schema.names
+        keys = list(
+            itertools.takewhile(
+                lambda name: name == "id" or name.endswith(("_id", "_idx")), names
+            )
+        )
+        rest = names[len(keys) :]
+        assert rest == sorted(rest)
 
     @pytest.mark.parametrize(
         "name, n_tables",
