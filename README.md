@@ -633,8 +633,10 @@ if __name__ == "__main__":
 ```
 
 Decompression and the parse workers run in separate processes started with `spawn`, which imports the calling script
-again in each one: keep the code that calls `run()` under `if __name__ == "__main__":`. Without it, the run fails
-after 60 seconds because the decompression process didn't start.
+again in each one: keep the code that calls `run()` under `if __name__ == "__main__":`. Without it, the first of those
+processes calls `run()` again, which raises a `RuntimeError` there, so the run fails at once, whether or not the XML is
+already decompressed, with an error that names this requirement: a `RuntimeError` when decompression runs, or a
+`BrokenProcessPool` when the XML is already decompressed and a parse worker starts first.
 
 `run()` prints the status and progress lines the CLI shows during a run, to stdout by default. Pass a
 [Rich](https://rich.readthedocs.io/) `Console` as `console` to change that: `Console(quiet=True)` prints nothing, and
