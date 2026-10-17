@@ -72,6 +72,8 @@ class ParquetWriter:
         """Raise ``OutputExistsError`` if ``entity``'s directory holds Parquet files and overwrite is off, or
         ``OSError`` if the output directory can't take the files.
         """
+        # First, so an entity directory that can't be listed either fails with the probe's error.
+        check_output_dir(self._output_dir, entity.name)
         entity_dir = self._output_dir / entity.name
 
         if not self._overwrite and entity_dir.exists():
@@ -83,7 +85,6 @@ class ParquetWriter:
                     f"Output files already exist in {entity_dir} "
                     f"(e.g. {existing[0]}). Use --overwrite to replace them."
                 )
-        check_output_dir(self._output_dir, entity.name)
 
     def setup(self, entity: EntityDef) -> None:
         # Checked again here: output can appear after the caller's own check().

@@ -571,15 +571,16 @@ class TestUnwritableOutputCheckedUpFront:
 
     @needs_permissions
     @pytest.mark.parametrize("fmt", ["jsonl", "parquet"])
+    @pytest.mark.parametrize("mode", [0o500, 0o100], ids=["readable", "unreadable"])
     def test_unwritable_entity_dir(
-        self, monkeypatch: pytest.MonkeyPatch, fmt: str, tmp_path: Path
+        self, mode: int, monkeypatch: pytest.MonkeyPatch, fmt: str, tmp_path: Path
     ) -> None:
         """A writable output directory isn't enough when the existing ``<output>/<entity>/`` isn't writable."""
         _widen_console(monkeypatch)
         out = tmp_path / "out"
         entity_dir = out / "artists"
         entity_dir.mkdir(parents=True)
-        entity_dir.chmod(0o500)
+        entity_dir.chmod(mode)
         try:
             self._assert_fails_before_decompressing(fmt, out, entity_dir, tmp_path)
         finally:
