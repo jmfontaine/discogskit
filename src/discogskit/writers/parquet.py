@@ -15,6 +15,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from discogskit._console import status
+from discogskit.writers import OutputExistsError
 from discogskit.writers._compression import check_compression, check_compression_level
 from discogskit.writers._staging import StagedFiles, check_output_dir
 
@@ -79,8 +80,6 @@ class ParquetWriter:
         if not self._overwrite and entity_dir.exists():
             existing = [f.name for f in entity_dir.iterdir() if f.suffix == ".parquet"]
             if existing:
-                from discogskit.writers import OutputExistsError
-
                 raise OutputExistsError(
                     f"Output files already exist in {entity_dir} "
                     f"(e.g. {existing[0]}). Use --overwrite to replace them."

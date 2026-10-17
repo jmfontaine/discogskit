@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 
 from discogskit._console import status
+from discogskit.writers import OutputExistsError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -234,8 +235,6 @@ class SQLiteWriter:
         }
         conflict = existing & {t.lower() for t in entity.table_order}
         if conflict:
-            from discogskit.writers import OutputExistsError
-
             example = min(conflict)
             raise OutputExistsError(
                 f"Tables already exist in {self._path} "

@@ -11,6 +11,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -163,7 +164,7 @@ class ToolDef:
     """Definition of a benchmarkable tool."""
 
     name: str
-    build_cmd: Any  # Callable[[Path, Path], list[str]]
+    build_cmd: Callable[[Path, Path], list[str]]
     default_runs: int = 1
     version_cmd: list[str] | None = None
 
