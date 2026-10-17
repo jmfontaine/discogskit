@@ -8,6 +8,8 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from functools import partial
 
 import pytest
@@ -27,6 +29,32 @@ def find_splits(request, monkeypatch):
         # there finds what one uninterrupted scan finds, errors included.
         monkeypatch.setattr(_split, "_REMAP_BYTES", 1)
     return partial(find_split_points, tag="item", container="items")
+
+
+@contextmanager
+def _time_limit(seconds: float, what: str) -> Iterator[None]:
+    """Fail the test when the block runs longer than ``seconds``. The regex engine checks for signals while it
+    matches, so a regex that backtracks too much fails here instead of hanging."""
+
+    def on_alarm(signum, frame):
+        raise TimeoutError
+
+    previous_handler = signal.signal(signal.SIGALRM, on_alarm)
+    started = time.monotonic()
+    previous_delay, previous_interval = signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    except TimeoutError:
+        pytest.fail(f"{what} took over {seconds} s")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_delay:
+            # Re-arm a timer someone else set; one that expired meanwhile fires right away instead of never.
+            remaining = previous_delay - (time.monotonic() - started)
+            signal.setitimer(
+                signal.ITIMER_REAL, max(remaining, 1e-6), previous_interval
+            )
 
 
 def _rss_bytes() -> int:
@@ -611,27 +639,11 @@ class TestSplitFinderStrictValidation:
         f = tmp_path / "test.xml"
         f.write_bytes(b"<items>\n<item>1</item>" + b"\n" * 10_000 + tail)
 
-        def on_alarm(signum, frame):
-            raise TimeoutError
-
-        # The regex engine checks for signals while it matches, so a regression fails here instead of hanging.
-        previous_handler = signal.signal(signal.SIGALRM, on_alarm)
-        started = time.monotonic()
-        previous_delay, previous_interval = signal.setitimer(signal.ITIMER_REAL, 1.0)
-        try:
-            with pytest.raises(ValueError, match="Expected </items>"):
-                find_splits(str(f), 64)
-        except TimeoutError:
-            pytest.fail("the trailing-content check took over 1 s")
-        finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, previous_handler)
-            if previous_delay:
-                # Re-arm a timer someone else set; one that expired meanwhile fires right away instead of never.
-                remaining = previous_delay - (time.monotonic() - started)
-                signal.setitimer(
-                    signal.ITIMER_REAL, max(remaining, 1e-6), previous_interval
-                )
+        with (
+            _time_limit(1.0, "the trailing-content check"),
+            pytest.raises(ValueError, match="Expected </items>"),
+        ):
+            find_splits(str(f), 64)
 
     @pytest.mark.parametrize(
         "tail",
@@ -721,6 +733,29 @@ class TestSplitFinderStrictValidation:
 
         assert (
             f"Malformed or unterminated markup at byte {content.index(bad)}: "
+            in str(info.value)
+        )
+
+    @pytest.mark.parametrize("tail", [b"[", b""], ids=["unterminated-subset", "eof"])
+    def test_long_whitespace_run_in_doctype_fails_fast(
+        self, tmp_path, find_splits, tail
+    ):
+        """An unterminated DOCTYPE whose name is followed by a long whitespace run must be rejected in linear time.
+        Whitespace matched both the run before the internal subset and the one before ``>``, so the regex tried
+        every way to split the run before failing: 100,000 spaces took minutes (#210).
+        """
+        content = b"<items>\n<item>1</item><!DOCTYPE" + b" " * 100_000 + tail
+        f = tmp_path / "test.xml"
+        f.write_bytes(content)
+
+        with (
+            _time_limit(1.0, "the markup scan"),
+            pytest.raises(ValueError) as info,
+        ):
+            find_splits(str(f), 64)
+
+        assert (
+            f"Malformed or unterminated markup at byte {content.index(b'<!DOCTYPE')}: "
             in str(info.value)
         )
 
