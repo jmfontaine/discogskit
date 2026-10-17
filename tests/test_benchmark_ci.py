@@ -1,4 +1,4 @@
-"""Tests for benchmarks/ci.py: what a run prints and stores about its PostgreSQL DSN."""
+"""Tests for benchmarks/ci.py: what a run prints, stores and passes on about its PostgreSQL DSN."""
 
 import json
 from pathlib import Path
@@ -26,7 +26,11 @@ runner = CliRunner()
 
 @pytest.fixture
 def harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
-    """Arguments for ``main`` on a one-file subset, with the cgroup check and target resets stubbed out."""
+    """Arguments for ``main`` on a one-file subset, with the cgroup check and target resets stubbed out.
+
+    The DSN comes from ``DATABASE_URL``, as the benchmark workflow passes it.
+    """
+    monkeypatch.setenv("DATABASE_URL", DSN)
     monkeypatch.setattr(ci, "_check_cgroup", lambda cgroup: None)
     monkeypatch.setattr(ci, "_reset", lambda target, work, dsn: None)
     subset = tmp_path / "subset"
@@ -51,8 +55,6 @@ def harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
     return [
         "--cgroup",
         str(cgroup),
-        "--dsn",
-        DSN,
         "--output",
         str(tmp_path / "output"),
         "--repeats",
@@ -64,6 +66,30 @@ def harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
         "--work",
         str(tmp_path / "work"),
     ]
+
+
+@pytest.mark.parametrize("target", ["postgresql", "sqlite"])
+def test_runs_get_their_database_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, harness: list[str], tmp_path: Path, target: str
+) -> None:
+    """No run's command line names its database, which ``ps`` would show: it gets it in ``DATABASE_URL``."""
+    database = DSN if target == "postgresql" else str(tmp_path / "work" / "discogs.db")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def call(args: list[str], **kwargs: object) -> int:
+        calls.append((args, kwargs))
+        return 1
+
+    monkeypatch.setattr(ci.subprocess, "call", call)
+    # The last --targets wins over the fixture's.
+    result = runner.invoke(ci.app, [*harness, "--targets", target])
+    assert result.exit_code == 1
+    [(args, kwargs)] = calls
+    assert "--dsn" not in args
+    assert not any(database in arg or PASSWORD in arg for arg in args)
+    env = kwargs["env"]
+    assert isinstance(env, dict)
+    assert env["DATABASE_URL"] == database
 
 
 def test_failed_run_does_not_print_the_password(
