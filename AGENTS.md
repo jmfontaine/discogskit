@@ -16,7 +16,7 @@ just test               # All tests
 just test-unit          # Unit tests only (no Docker needed)
 just test-integration   # Integration tests (needs Docker for PostgreSQL)
 just test-cov           # Tests with coverage
-just test -- -k "test_name"  # Run a single test by name
+just test -k "test_name"  # Run a single test by name
 just format             # Auto-format (ruff + pyproject-fmt)
 just lint-fix           # Lint and auto-fix (ruff)
 just type-check         # Type check (ty)

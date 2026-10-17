@@ -298,17 +298,33 @@ class TestGetWriter:
                 "postgresql://us?er:s3cr3t@[::1]x/discogs",
                 "postgresql://us?***",
             ),
+            # A percent-escape that isn't UTF-8: psycopg raises UnicodeDecodeError, whose .object is the password.
+            (
+                "postgresql://user:s3%ffcr3t@localhost/discogs",
+                "postgresql://user:***@localhost/discogs",
+            ),
+            (
+                "postgresql://localhost/discogs?password=s3%ffcr3t",
+                "postgresql://localhost/discogs?***",
+            ),
+            # A lone surrogate, as an undecodable byte in DATABASE_URL becomes: UnicodeEncodeError, whose .object is
+            # the whole DSN.
+            (
+                "postgresql://user:s3\udcffcr3t@localhost/discogs",
+                "postgresql://user:***@localhost/discogs",
+            ),
         ],
     )
     def test_malformed_postgresql_dsn_error_hides_the_password(self, dsn, shown):
         with pytest.raises(ValueError) as excinfo:
             get_writer(dsn)
         assert str(excinfo.value).startswith(f"Invalid PostgreSQL DSN: {shown!r}.")
-        exc: BaseException | None = excinfo.value
-        while exc is not None:
-            assert "s3" not in str(exc)
-            assert "cr3t" not in str(exc)
-            exc = exc.__cause__ or exc.__context__
+        assert excinfo.value.__cause__ is None
+        assert excinfo.value.__context__ is None
+        # A UnicodeDecodeError's message omits the bytes it failed on, but its .object holds them.
+        assert "cr3t" not in repr(getattr(excinfo.value, "object", None))
+        assert "s3" not in str(excinfo.value)
+        assert "cr3t" not in str(excinfo.value)
 
 
 _ARTISTS_XML = (
