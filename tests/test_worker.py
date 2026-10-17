@@ -259,8 +259,21 @@ def test_strict_reports_unhandled_element_path(tmp_path, entity_name, level):
             '<release id="1"><extraartists><artist><id>2</id>TAIL</artist></extraartists></release>',
             ["extraartists/artist/text()"],
         ),
+        # A text element's reader keeps its text up to its first child; the text after a child is dropped.
+        (
+            "artists",
+            "<artist><id>1</id><name>A<x/>LOST</name></artist>",
+            ["name/text()", "name/x"],
+        ),
+        (
+            "releases",
+            '<release id="1"><artists><artist><id>2</id><name>A<x/>LOST</name></artist></artists></release>',
+            ["artists/artist/name/text()", "artists/artist/name/x"],
+        ),
+        ("labels", "<label><id>1<x/>2</id></label>", ["id/text()", "id/x"]),
         # Text a parser reads, and whitespace, are not reported.
         ("artists", "<artist>\n\t <id>1</id>\r\n <name>A</name> </artist>", []),
+        ("artists", "<artist><id>1</id><name>A<x/>\n </name></artist>", ["name/x"]),
         (
             "releases",
             '<release id="1"><master_id is_main_release="true">2</master_id></release>',
@@ -270,8 +283,8 @@ def test_strict_reports_unhandled_element_path(tmp_path, entity_name, level):
 )
 @pytest.mark.parametrize("strict", [True, False])
 def test_strict_reports_unread_text(tmp_path, entity_name, record, paths, strict):
-    """--strict reports text in an element whose text no parser reads, before its first child or after any; without
-    --strict the record still loads and nothing is reported."""
+    """--strict reports text in an element whose text no parser reads, before its first child or after any, and text
+    after a child in one whose text is read; without --strict the record still loads and nothing is reported."""
     f = tmp_path / "chunk.xml"
     f.write_text(record + "\n")
     args = ChunkArgs(
