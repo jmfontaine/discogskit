@@ -742,7 +742,8 @@ class TestSplitFinderStrictValidation:
     ):
         """An unterminated DOCTYPE whose name is followed by a long whitespace run must be rejected in linear time.
         Whitespace matched both the run before the internal subset and the one before ``>``, so the regex tried
-        every way to split the run before failing: 100,000 spaces took minutes (#210).
+        every way to split the run before failing: 100,000 spaces took over 1 s, and the time grew quadratically with
+        the run's length (#210).
         """
         content = b"<items>\n<item>1</item><!DOCTYPE" + b" " * 100_000 + tail
         f = tmp_path / "test.xml"
