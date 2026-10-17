@@ -18,6 +18,7 @@ from discogskit.entities._def import (
     child_elements,
     leaf_text,
     leaf_texts,
+    parse_int,
     second_copy,
 )
 
@@ -60,7 +61,7 @@ def append_record(
     id_text = record_id(elem)
     if not id_text:
         raise ValueError("missing or empty id")
-    label_id = int(id_text)
+    label_id = parse_int("id", id_text)
     if unknown is not None:
         # <label> records carry no attributes.
         check_attrs(elem, "", unknown)
@@ -99,8 +100,7 @@ def append_record(
         elif tag == "parentLabel":
             if parent_label_name is not None:
                 raise second_copy(child)
-            pl_id_str = child.get("id")
-            parent_label_id = int(pl_id_str) if pl_id_str else None
+            parent_label_id = parse_int("parent label id", child.get("id"))
             parent_label_name = child.text or ""
             if unknown is not None:
                 check_leaf(child, "", unknown, ID_ATTR)
@@ -110,8 +110,7 @@ def append_record(
             profile = leaf_text(child, "", unknown)
         elif tag == "sublabels":
             for sub in child_elements(child, "label", "", unknown):
-                sub_id_str = sub.get("id")
-                sub_id = int(sub_id_str) if sub_id_str else None
+                sub_id = parse_int("sublabel id", sub.get("id"))
                 sub_name = sub.text or ""
                 if unknown is not None:
                     check_leaf(sub, "sublabels/", unknown, ID_ATTR)

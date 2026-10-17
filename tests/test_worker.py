@@ -147,9 +147,13 @@ _RECORDS = {
 }
 
 
+# Text elements holding an integer, which can't be empty (#216).
+_INT_LEAVES = {"id", "main_release", "master_id", "year"}
+
+
 def _injected(entity_name: str, level: str) -> str:
     """One record whose element at ``level``, nested in its ancestors, has the attribute new_attr="x" and <new_tag/>
-    as its only child.
+    as its only child, after the text 1 if it holds an integer.
 
     An artist's or label's <id> level is the record's own <id>: a second <id> would fail the record (#205).
     """
@@ -162,8 +166,9 @@ def _injected(entity_name: str, level: str) -> str:
             ""
         )
     *ancestors, tag = level.split("/")
+    text = "1" if tag in _INT_LEAVES else ""
     inner = "".join(f"<{ancestor}>" for ancestor in ancestors)
-    inner += f'<{tag} new_attr="x"><new_tag/></{tag}>'
+    inner += f'<{tag} new_attr="x">{text}<new_tag/></{tag}>'
     inner += "".join(f"</{ancestor}>" for ancestor in reversed(ancestors))
     return record.format(inner)
 
@@ -557,7 +562,7 @@ class TestRecordErrorContext:
         file, start, end, message = _extract_error(tmp_path, entity, chunk)
         assert message == (
             f"Invalid <{tag}> record in {file} at chunk line 4 (chunk bytes {start}-{end}, id='abc'):"
-            " invalid literal for int() with base 10: 'abc'"
+            " invalid id 'abc', expected an integer from -2147483648 to 2147483647"
         )
 
     def test_line_past_libxml2_limit(self, tmp_path):
@@ -607,6 +612,195 @@ class TestRecordErrorContext:
         )
 
 
+# Every integer field, with "{}" where its value goes and the name its error gives it.
+_INT_FIELDS = [
+    ("artists", "<artist><id>{}</id></artist>", "id"),
+    (
+        "artists",
+        '<artist><id>1</id><aliases><name id="{}">A</name></aliases></artist>',
+        "alias id",
+    ),
+    (
+        "artists",
+        '<artist><id>1</id><groups><name id="{}">A</name></groups></artist>',
+        "group id",
+    ),
+    (
+        "artists",
+        '<artist><id>1</id><members><name id="{}">A</name></members></artist>',
+        "member id",
+    ),
+    ("labels", "<label><id>{}</id></label>", "id"),
+    (
+        "labels",
+        '<label><id>1</id><parentLabel id="{}">P</parentLabel></label>',
+        "parent label id",
+    ),
+    (
+        "labels",
+        '<label><id>1</id><sublabels><label id="{}">S</label></sublabels></label>',
+        "sublabel id",
+    ),
+    ("masters", '<master id="{}"/>', "id"),
+    (
+        "masters",
+        '<master id="1"><main_release>{}</main_release></master>',
+        "main release",
+    ),
+    ("masters", '<master id="1"><year>{}</year></master>', "year"),
+    (
+        "masters",
+        '<master id="1"><artists><artist><id>{}</id></artist></artists></master>',
+        "artist id",
+    ),
+    (
+        "masters",
+        '<master id="1"><videos><video duration="{}"/></videos></master>',
+        "duration",
+    ),
+    ("releases", '<release id="{}"/>', "id"),
+    ("releases", '<release id="1"><master_id>{}</master_id></release>', "master id"),
+    (
+        "releases",
+        '<release id="1"><artists><artist><id>{}</id></artist></artists></release>',
+        "artist id",
+    ),
+    (
+        "releases",
+        '<release id="1"><extraartists><artist><id>{}</id></artist></extraartists></release>',
+        "extra artist id",
+    ),
+    (
+        "releases",
+        (
+            '<release id="1"><tracklist><track><artists><artist><id>{}</id></artist></artists></track>'
+            "</tracklist></release>"
+        ),
+        "artist id",
+    ),
+    (
+        "releases",
+        (
+            '<release id="1"><tracklist><track><sub_tracks><track><extraartists><artist><id>{}</id></artist>'
+            "</extraartists></track></sub_tracks></track></tracklist></release>"
+        ),
+        "extra artist id",
+    ),
+    (
+        "releases",
+        '<release id="1"><labels><label id="{}"/></labels></release>',
+        "label id",
+    ),
+    (
+        "releases",
+        '<release id="1"><series><series id="{}"/></series></release>',
+        "series id",
+    ),
+    (
+        "releases",
+        '<release id="1"><companies><company><id>{}</id></company></companies></release>',
+        "company id",
+    ),
+    (
+        "releases",
+        '<release id="1"><videos><video duration="{}"/></videos></release>',
+        "duration",
+    ),
+]
+
+
+# Values that aren't an int32 as written, several of which int() took.
+_NON_INTEGERS = {
+    "above-int32": str(2**31),
+    "above-int64": str(2**70),
+    "arabic-indic": "\u0663",
+    "below-int32": str(-(2**31) - 1),
+    "decimal": "1.5",
+    "empty": "",
+    "fullwidth": "\uff11\uff12",
+    "leading-space": " 5",
+    "letter": "x",
+    "plus": "+7",
+    "thousands-of-digits": "1" * 5000,
+    "trailing-space": "5 ",
+    "underscore": "1_0",
+}
+
+
+class TestIntegerValues:
+    """int() coerced what isn't an integer as written, most fields skipped it for an empty value to store NULL, and
+    values out of range failed only when the table was built, naming no field or record (#216)."""
+
+    @pytest.mark.parametrize(
+        ("entity", "record", "name"),
+        [
+            (
+                "masters",
+                '<master id="1"><artists><artist><id/></artist></artists></master>',
+                "artist id",
+            ),
+            ("masters", '<master id="1"><year/></master>', "year"),
+            (
+                "releases",
+                '<release id="1"><companies><company><id/></company></companies></release>',
+                "company id",
+            ),
+        ],
+    )
+    def test_empty_element_fails_like_empty_text(self, tmp_path, entity, record, name):
+        """lxml gives <id/> no text at all, as it does a missing element's; it's still empty, not missing."""
+        _, _, _, message = _extract_error(tmp_path, entity, (record + "\n").encode())
+        assert message.endswith(
+            f": invalid {name} '', expected an integer from -2147483648 to 2147483647"
+        )
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("-2147483648", -(2**31)),
+            ("2147483647", 2**31 - 1),
+            ("0", 0),
+            ("-0", 0),
+            ("007", 7),
+        ],
+    )
+    def test_integer_in_range_loads(self, tmp_path, value, expected):
+        f = tmp_path / "artists.xml"
+        f.write_text(
+            f'<artist><id>1</id><aliases><name id="{value}">A</name></aliases></artist>\n'
+        )
+        tables = extract_chunk_to_ipc(
+            ChunkArgs(
+                end=os.path.getsize(f), entity="artists", file_path=str(f), start=0
+            )
+        ).tables
+        assert ipc_to_tables(tables, SCHEMAS)["artist_aliases"].column(
+            "alias_id"
+        ).to_pylist() == [expected]
+
+    @pytest.mark.parametrize(
+        ("entity", "template", "name", "value"),
+        [
+            pytest.param(entity, template, name, value, id=f"{entity}-{name}-{case}")
+            for entity, template, name in _INT_FIELDS
+            for case, value in _NON_INTEGERS.items()
+            # An empty record id fails as a missing one, tested with each entity.
+            if not (name == "id" and value == "")
+        ],
+    )
+    def test_non_integer_fails_naming_field_and_record(
+        self, tmp_path, entity, template, name, value
+    ):
+        record_id = value if name == "id" else "1"
+        tag = entity[:-1]
+        chunk = (template.format(value) + "\n").encode()
+        file, start, end, message = _extract_error(tmp_path, entity, chunk)
+        assert message == (
+            f"Invalid <{tag}> record in {file} at chunk line 1 (chunk bytes {start}-{end}, id={record_id!r}):"
+            f" invalid {name} {value!r}, expected an integer from -2147483648 to 2147483647"
+        )
+
+
 class TestMalformedXmlError:
     def test_reports_first_fatal_error(self, tmp_path):
         """libxml2 logs an undeclared entity, then a bogus follow-on error at the envelope's footer; the first is the
@@ -637,27 +831,24 @@ class TestMalformedXmlError:
 
 
 class TestTableErrorContext:
+    """parse_int keeps the parsed integers in range (#216), so a value that doesn't fit its column only reaches
+    ``_to_batch`` through a bug; its error must still name the file, chunk and table."""
+
     @pytest.mark.parametrize(
-        "chunk, table, detail",
+        "value, detail",
         [
-            (
-                b"<artist>\n  <id>3000000000</id>\n</artist>\n",
-                "artists",
-                "Value 3000000000 too large to fit in C integer type",
-            ),
-            (
-                b"<artist>\n  <id>2</id>\n  <aliases>\n"
-                b'    <name id="%d">A</name>\n  </aliases>\n</artist>\n' % 2**70,
-                "artist_aliases",
-                "Python int too large to convert to C long",
-            ),
+            (3_000_000_000, "Value 3000000000 too large to fit in C integer type"),
+            (2**70, "Python int too large to convert to C long"),
         ],
         ids=["int32-overflow", "int64-overflow"],
     )
-    def test_out_of_range_id_names_file_chunk_and_table(
-        self, tmp_path, chunk, table, detail
-    ):
-        file, start, end, message = _extract_error(tmp_path, "artists", chunk)
-        assert message == (
-            f"Invalid {table} table values in {file} (chunk bytes {start}-{end}): {detail}"
+    def test_out_of_range_value_names_file_chunk_and_table(self, value, detail):
+        args = ChunkArgs(end=80, entity="artists", file_path="artists.xml", start=32)
+        columns = {"alias_id": [value], "artist_id": [1], "name": ["A"]}
+        with pytest.raises(ValueError) as info:
+            _worker._to_batch(
+                args, columns, "artist_aliases", SCHEMAS["artist_aliases"]
+            )
+        assert str(info.value) == (
+            f"Invalid artist_aliases table values in artists.xml (chunk bytes 32-80): {detail}"
         )

@@ -128,20 +128,22 @@ them. In two conversions of the 2026-10-01 releases dump to Parquet, each file's
 different order (10 positions differed), and the first run's weren't in id order. The artists, labels and masters
 outputs weren't checked for id order.
 
-A value discogskit can't store, such as a non-numeric id or one too large for its column, stops the run, and so do a
-record with a missing or empty id, a release sub-track with `<sub_tracks>` of its own (discogskit reads one level
-of sub-tracks), a non-empty `<tracks>` in a track's or sub-track's extra artist (only release-level extra artists
-have a `tracks` column) and a second copy of an element discogskit reads one of, such as two `<title>` in a record,
-two `<artists>` in a track or two `<name>` in an artist credit (keeping one would drop the other); the 2026-10-01
-dumps repeat none of them. A repeated `<labels>`, `<series>`, `<formats>`, `<identifiers>`, `<videos>` or
-`<companies>` in a release, `<aliases>`, `<groups>` or `<members>` in an artist, `<sublabels>` in a label, or
-`<artists>` or `<videos>` in a master is read in full instead, its items added to the others'. Typed attributes are
-never coerced: a video `duration` must be an integer, and `embed` and `is_main_release` must be `true` or `false`; a
-missing one is `NULL`, and any other value, including an empty one, stops the run. The error names the `.xml` file
-and the byte range of the chunk being parsed, plus either the table the value was meant for, or the record's line,
-counted from the chunk's first byte, and its id when it has one. When the record fails for one of the elements above
-(a repeated one, a nested `<sub_tracks>` or a track-level `<tracks>` value), the error adds that element's line, or
-`unknown` when it can't be found.
+A record with a missing or empty id stops the run, and so do a release sub-track with `<sub_tracks>` of its own
+(discogskit reads one level of sub-tracks), a non-empty `<tracks>` in a track's or sub-track's extra artist (only
+release-level extra artists have a `tracks` column) and a second copy of an element discogskit reads one of, such as
+two `<title>` in a record, two `<artists>` in a track or two `<name>` in an artist credit (keeping one would drop the
+other); the 2026-10-01 dumps repeat none of them. A repeated `<labels>`, `<series>`, `<formats>`, `<identifiers>`,
+`<videos>` or `<companies>` in a release, `<aliases>`, `<groups>` or `<members>` in an artist, `<sublabels>` in a label,
+or `<artists>` or `<videos>` in a master is read in full instead, its items added to the others'. Typed values are never
+coerced: every id, a master's `main_release` and `year`, a release's `master_id` and a video's `duration` must be an
+integer from -2147483648 to 2147483647 written in ASCII digits with an optional leading `-`, so a `+`, an underscore,
+whitespace or another script's digits fail; `embed` and `is_main_release` must be `true` or `false`. A missing value
+is `NULL`, except a record's id, and any other value, including an empty one (`<year/>` or `id=""`), stops the run.
+The error names the `.xml` file, the byte range of the chunk being parsed, the record's line, counted from the
+chunk's first byte, its id when it has one, and the value's field, as in `invalid alias id '+7', expected an integer
+from -2147483648 to 2147483647`. When the record fails for one of the elements above (a repeated one, a nested
+`<sub_tracks>` or a track-level `<tracks>` value), the error adds that element's line, or `unknown` when it can't be
+found.
 
 Only records and whitespace may appear directly in a dump's container (`<artists>`, `<labels>`, `<masters>` or
 `<releases>`), plus comments and processing instructions after the first record, which are skipped as they are inside

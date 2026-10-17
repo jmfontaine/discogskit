@@ -18,6 +18,7 @@ from discogskit.entities._def import (
     child_elements,
     leaf_text,
     leaf_texts,
+    parse_int,
     second_copy,
 )
 
@@ -85,10 +86,10 @@ def _parse_refs(
     """Parse artist ref children (aliases, groups, members)."""
     row = cols[table]
     ref_field = _REF_ID_FIELD[table]
+    ref_name = ref_field.replace("_", " ")
     path = f"{parent.tag}/"
     for name_elem in child_elements(parent, "name", "", unknown):
-        ref_id_str = name_elem.get("id")
-        ref_id = int(ref_id_str) if ref_id_str else None
+        ref_id = parse_int(ref_name, name_elem.get("id"))
         name = name_elem.text or ""
         if unknown is not None:
             check_leaf(name_elem, path, unknown, ID_ATTR)
@@ -104,7 +105,7 @@ def append_record(
     id_text = record_id(elem)
     if not id_text:
         raise ValueError("missing or empty id")
-    artist_id = int(id_text)
+    artist_id = parse_int("id", id_text)
     if unknown is not None:
         # <artist> records carry no attributes.
         check_attrs(elem, "", unknown)

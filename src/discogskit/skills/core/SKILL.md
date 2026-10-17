@@ -61,8 +61,9 @@ table and column, with its types per format: [references/schemas.md](references/
 
 - **Values are as the dump has them.** A value missing from the XML is `NULL` (`null` in JSONL); a text value
   present but empty is `""`. A list column is `NULL` without its element (no `<genres>`), an empty list for an
-  empty one (`<genres/>`), and keeps an empty item as `""` (`<genre/>`). Typed values are never coerced: a
-  non-numeric id, or a video `duration` or `embed` that isn't an integer or `true`/`false` (an empty one
+  empty one (`<genres/>`), and keeps an empty item as `""` (`<genre/>`). Typed values are never coerced: an id,
+  `main_release`, `year`, `master_id` or video `duration` that isn't an int32 in ASCII digits with an optional `-`
+  (`+7`, ` 5`, `1_0` and `""` all fail), or an `embed` or `is_main_release` that isn't `true`/`false` (an empty one
   included), stops the run. So does a second copy of an element read once, such as two `<title>` in a release
   (nothing is dropped to keep one), and anything but whitespace, comments and processing instructions between two
   records, such as `<other/>` or text.
