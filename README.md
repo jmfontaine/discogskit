@@ -249,9 +249,8 @@ with one run per level and that much spread between runs, what the higher levels
 │                                                                     none. Default: JSONL     │
 │                                                                     gzip uses level 6        │
 │                                                                     (faster, slightly larger │
-│                                                                     output than 9; measured  │
-│                                                                     in #32); every other     │
-│                                                                     codec uses its own       │
+│                                                                     output than 9); every    │
+│                                                                     other codec uses its own │
 │                                                                     library default.         │
 │ --format             -f                    <jsonl|parquet>          Output format            │
 │                                                                     [default: parquet]       │

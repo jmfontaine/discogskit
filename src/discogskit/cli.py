@@ -271,7 +271,7 @@ def convert(
             help=(
                 "Compression level for codecs that support one: JSONL gzip/bzip2, Parquet brotli/gzip/zstd. "
                 "Rejected for snappy and none. Default: JSONL gzip uses level 6 (faster, slightly "
-                "larger output than 9; measured in #32); every other codec uses its own library default."
+                "larger output than 9); every other codec uses its own library default."
             )
         ),
     ] = None,
