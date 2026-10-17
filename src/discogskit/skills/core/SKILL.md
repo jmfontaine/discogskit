@@ -63,8 +63,9 @@ table and column, with its types per format: [references/schemas.md](references/
   present but empty is `""`. A list column is `NULL` without its element (no `<genres>`), an empty list for an
   empty one (`<genres/>`), and keeps an empty item as `""` (`<genre/>`). Typed values are never coerced: a
   non-numeric id, or a video `duration` or `embed` that isn't an integer or `true`/`false` (an empty one
-  included), stops the run. So does a second copy of an element read once, such as two `<title>` in a release:
-  nothing is dropped to keep one.
+  included), stops the run. So does a second copy of an element read once, such as two `<title>` in a release
+  (nothing is dropped to keep one), and anything but whitespace, comments and processing instructions between two
+  records, such as `<other/>` or text.
 - **Placeholders are kept, not cleaned.** Seen in real dumps, with likely meanings Discogs doesn't document: `0` in
   `releases.master_id` (no master), `0` in `masters.year` (unknown year), `0` as `artist_id` in
   `release_extraartists`, `release_track_artists` and `release_track_extraartists` (no linked entity; the
@@ -134,8 +135,8 @@ Tuning: `--parse-workers` (default half the CPU count) parses chunks in parallel
 `--write-queue` bounds how far parsing runs ahead of writing. All three set peak memory: loading releases on macOS
 with the defaults peaked at about 3.9-4.4 GiB across discogskit's processes, `--chunk-mb 64` at about 1.7 GiB and
 `--write-queue 8` at about 5.2 GiB. `--profile` prints a per-table timing
-breakdown. `--strict` lists the XML elements no parser handled, which discogskit would otherwise drop, then fails the
-run: use it to check a new dump after Discogs changes the format.
+breakdown. `--strict` lists the XML elements, attributes and text no parser handled, which discogskit would otherwise
+drop, then fails the run: use it to check a new dump after Discogs changes the format.
 
 ## Troubleshooting
 
@@ -151,7 +152,8 @@ Errors print `Error: <message>` and exit 1; Ctrl+C exits 130.
 | `unsupported compression '<codec>' for <format>` | Parquet takes `zstd`, `snappy`, `gzip`, `brotli`, `none`; JSONL `gzip`, `bzip2`, `none` |
 | `--pg-... can only be used with PostgreSQL, not a SQLite DSN` | Drop the `--pg-*` flags for SQLite |
 | `Duplicate <entity> id: <n>` or another value error naming a chunk and line | The dump has a record discogskit can't store as is; nothing is coerced. Report it with the message |
-| `--strict: <n> unhandled XML element paths in <record>` | `--strict` found elements discogskit doesn't parse, listed on the `Strict` lines before it. Rerun without `--strict` to load anyway, dropping them, and report the paths |
+| `Unsupported <entity> XML in ...: element <x> on line <n>` (or `text '...'`) | The dump has something other than records between two records, which discogskit would drop. Report it with the message |
+| `--strict: <n> unhandled XML paths in <record>` | `--strict` found elements (`a/b`), attributes (`a/@b`) or text (`a/text()`) discogskit doesn't read, listed on the `Strict` lines before it. Rerun without `--strict` to load anyway, dropping them, and report the paths |
 
 After a failed or interrupted `load`, the tables are incomplete: run it again with `--overwrite`. With
 `--pg-write-workers` above 1, each table group commits separately, so a failed load can leave part of a chunk in some

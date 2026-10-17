@@ -72,11 +72,14 @@ any of them stops the run before anything is written.
 
 The progress bar shows only on a terminal. When output goes to a pipe, a file or CI, a run prints one line per chunk as
 it's written instead, as with `--no-progress`. With `--strict`, once an entity's records are parsed, the run prints a
-`Strict` line for each element path no parser handled, such as `unhandled XML element <videos/video/foo> in <master>`,
-then fails with `--strict: 1 unhandled XML element path in <master>; see the Strict lines above` and exits 1. Like any
-failed run, it stops before finishing that entity: `convert` doesn't move its files into the output directory, and
-`load` builds no indexes, though the rows it wrote stay in the tables. Entities earlier in the run are already done;
-later ones don't run. Without `--strict`, those elements are dropped silently.
+`Strict` line for each path no parser handled: an element, such as `unhandled XML element <videos/video/foo> in
+<master>`, an attribute, such as `unhandled XML attribute <videos/video/@foo> in <master>`, or text other than
+whitespace in an element whose text no parser reads, before its first child or after any, such as `unhandled XML text
+<urls/text()> in <artist>`. It then fails with `--strict: 1 unhandled XML path in <master>; see the Strict lines
+above` and exits 1. Like any failed run, it stops before finishing that entity: `convert` doesn't move its files into
+the output directory, and `load` builds no indexes, though the rows it wrote stay in the tables. Entities earlier in
+the run are already done; later ones don't run. Without `--strict`, those elements, attributes and text are dropped
+silently.
 
 Both commands decompress each `.xml.gz` to a `.xml` next to it, and delete the `.xml` after a successful run unless
 `--keep-xml` is set. A run that fails or is interrupted (including Ctrl+C) after decompression finished keeps the
@@ -139,6 +142,14 @@ and the byte range of the chunk being parsed, plus either the table the value wa
 counted from the chunk's first byte, and its id when it has one. When the record fails for one of the elements above
 (a repeated one, a nested `<sub_tracks>` or a track-level `<tracks>` value), the error adds that element's line, or
 `unknown` when it can't be found.
+
+Only records and whitespace may appear directly in a dump's container (`<artists>`, `<labels>`, `<masters>` or
+`<releases>`), plus comments and processing instructions after the first record, which are skipped as they are inside
+records. Anything else between two records, such as an element, text or a namespaced record like `<artist
+xmlns="urn:x">`, stops the run, since discogskit would drop it. The error names the `.xml` file, the byte range of the
+chunk being parsed and the content's line, counted from the chunk's first byte, e.g. `text 'STRAY' on line 120; only
+<artist> records may appear in <artists>`. Content before the first record, comments included, and such content after
+the last stop the run too, with its byte offset.
 
 ### Memory
 
@@ -286,8 +297,9 @@ with one run per level and that much spread between runs, what the higher levels
 │                                                                     output                   │
 │                                                                     [default: progress]      │
 │ --strict                 --no-strict                                Fail on unhandled XML    │
-│                                                                     elements, after listing  │
-│                                                                     them all                 │
+│                                                                     elements, attributes and │
+│                                                                     text, after listing them │
+│                                                                     all                      │
 │                                                                     [default: no-strict]     │
 │ --help                                                              Show this message and    │
 │                                                                     exit.                    │
@@ -416,7 +428,8 @@ before any work if the file's directory can't hold it.
 │                                                          per-chunk output                    │
 │                                                          [default: progress]                 │
 │ --strict           --no-strict                           Fail on unhandled XML elements,     │
-│                                                          after listing them all              │
+│                                                          attributes and text, after listing  │
+│                                                          them all                            │
 │                                                          [default: no-strict]                │
 │ --help                                                   Show this message and exit.         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -537,7 +550,7 @@ and name may change in any release.
 | `detect_entity(filename)` | The entity a Discogs dump file name holds, e.g. `artists` |
 | `OutputExistsError` | Raised when the output exists and the writer doesn't overwrite it |
 | `DecompressError` | Raised when a `.xml.gz` is truncated, corrupt or not gzip |
-| `UnhandledElementsError` | Raised by a `strict` run whose input has XML elements no parser handled, before the writer's `finalize()`; its `entity` and `paths` attributes name them |
+| `UnhandledElementsError` | Raised by a `strict` run whose input has XML elements, attributes or text no parser handled, before the writer's `finalize()`; its `entity` and `paths` attributes name them |
 
 `get_writer()` and `get_file_writer()` raise `ValueError` for an option they can't use, such as a codec the format
 doesn't support or a compression level that isn't an `int` or is out of the codec's range, before creating any file.

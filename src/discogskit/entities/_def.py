@@ -89,24 +89,71 @@ class EntityDef:
         )
 
 
-# With ``--strict``, the parsers add to ``unknown`` the path of every child element they don't handle, at every level
-# they walk, through the helpers below. A path is relative to the record (``videos/video/foo``); ``parent_path`` is the
-# path of ``elem``'s parent ending in ``/``, or ``""`` when that parent is the record itself. A text-only element's
-# children are unhandled too: reading only its text drops them. Loops over repeated items read text-only children
-# inline and call ``check_leaf`` only with ``--strict``, so a run without it makes no extra call per element.
+# With ``--strict``, the parsers add to ``unknown`` the path of everything they don't read, at every level they walk,
+# through the helpers below. A path is relative to the record (``videos/video/foo``); ``parent_path`` is the path of
+# ``elem``'s parent ending in ``/``, or ``""`` when that parent is the record itself. A text-only element's children
+# are unhandled too: reading only its text drops them. So are the attributes a parser doesn't read (``urls/url/@foo``,
+# or ``@foo`` on the record) and the text of an element the parser reads only the children or attributes of
+# (``urls/text()``, or ``text()`` directly in the record), whether before its first child or after any child. Loops
+# over repeated items read text-only children inline and call the checks only with ``--strict``, so a run without it
+# makes no extra call per element.
+
+# The attributes of an element whose only attribute is a Discogs id, such as an alias's <name id="...">.
+ID_ATTR = frozenset({"id"})
+# The attributes of a master's or release's <video>.
+VIDEO_ATTRS = frozenset({"duration", "embed", "src"})
+# XML's whitespace characters.
+XML_SPACE = " \t\n\r"
 
 
-def check_leaf(elem: etree._Element, parent_path: str, unknown: set[str]) -> None:
-    """Add the path of each child of ``elem``, an element the parser reads only the text and attributes of."""
+def check_attrs(
+    elem: etree._Element,
+    path: str,
+    unknown: set[str],
+    handled: frozenset[str] = frozenset(),
+) -> None:
+    """Add the path of each attribute of ``elem`` not in ``handled``; ``path`` is ``elem``'s own path ending in ``/``,
+    or ``""`` for the record."""
+    for name in elem.attrib:
+        if name not in handled:
+            unknown.add(f"{path}@{name}")
+
+
+def check_leaf(
+    elem: etree._Element,
+    parent_path: str,
+    unknown: set[str],
+    attrs: frozenset[str] = frozenset(),
+) -> None:
+    """Add the path of each child of ``elem``, an element the parser reads only the text and ``attrs`` of, and of each
+    of its other attributes."""
+    path = f"{parent_path}{elem.tag}/"
     for child in elem:
-        unknown.add(f"{parent_path}{elem.tag}/{child.tag}")
+        unknown.add(f"{path}{child.tag}")
+    if elem.attrib:
+        check_attrs(elem, path, unknown, attrs)
+
+
+def check_text(elem: etree._Element, path: str, unknown: set[str]) -> None:
+    """Add ``elem``'s text path when it holds text other than whitespace, before its first child or after any; for an
+    element the parser reads only the children or attributes of. ``path`` is as for ``check_attrs``."""
+    if has_text(elem.text) or any(has_text(child.tail) for child in elem):
+        unknown.add(f"{path}text()")
 
 
 def child_elements(
-    elem: etree._Element, tag: str, parent_path: str, unknown: set[str] | None
+    elem: etree._Element,
+    tag: str,
+    parent_path: str,
+    unknown: set[str] | None,
+    attrs: frozenset[str] = frozenset(),
 ) -> Iterator[etree._Element]:
-    """Yield ``elem``'s ``<tag>`` children and add the path of each other child; iterate to the end to check them
-    all."""
+    """Yield ``elem``'s ``<tag>`` children and add the path of each other child, of each attribute not in ``attrs``
+    and of its text; iterate to the end to check them all."""
+    if unknown is not None:
+        path = f"{parent_path}{elem.tag}/"
+        check_attrs(elem, path, unknown, attrs)
+        check_text(elem, path, unknown)
     for child in elem:
         if child.tag == tag:
             yield child
@@ -114,9 +161,15 @@ def child_elements(
             unknown.add(f"{parent_path}{elem.tag}/{child.tag}")
 
 
+def has_text(value: str | None) -> bool:
+    """Whether ``value``, an element's text or tail, holds more than XML's whitespace. Other spaces, such as U+00A0,
+    are text."""
+    return value is not None and bool(value.strip(XML_SPACE))
+
+
 def leaf_text(elem: etree._Element, parent_path: str, unknown: set[str] | None) -> str:
     """Return the text of ``elem``, a text-only element, or ``""`` when it has none, and add the path of each of its
-    children."""
+    children and attributes."""
     if unknown is not None:
         check_leaf(elem, parent_path, unknown)
     return elem.text or ""
@@ -125,8 +178,8 @@ def leaf_text(elem: etree._Element, parent_path: str, unknown: set[str] | None) 
 def leaf_texts(
     elem: etree._Element, tag: str, parent_path: str, unknown: set[str] | None
 ) -> list[str]:
-    """Return the texts of ``elem``'s ``<tag>`` children, as ``leaf_text`` does, and add the path of each other
-    child."""
+    """Return the texts of ``elem``'s ``<tag>`` children, as ``leaf_text`` does, and add the path of each other child
+    and of ``elem``'s attributes and text."""
     if unknown is None:
         return [child.text or "" for child in elem.findall(tag)]
     path = f"{parent_path}{elem.tag}/"

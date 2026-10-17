@@ -9,9 +9,12 @@ import pyarrow as pa
 from lxml import etree
 
 from discogskit.entities._def import (
+    ID_ATTR,
     Cols,
     EntityDef,
+    check_attrs,
     check_leaf,
+    check_text,
     child_elements,
     leaf_text,
     leaf_texts,
@@ -88,7 +91,7 @@ def _parse_refs(
         ref_id = int(ref_id_str) if ref_id_str else None
         name = name_elem.text or ""
         if unknown is not None:
-            check_leaf(name_elem, path, unknown)
+            check_leaf(name_elem, path, unknown, ID_ATTR)
         row["artist_id"].append(artist_id)
         row[ref_field].append(ref_id)
         row["name"].append(name)
@@ -102,6 +105,10 @@ def append_record(
     if not id_text:
         raise ValueError("missing or empty id")
     artist_id = int(id_text)
+    if unknown is not None:
+        # <artist> records carry no attributes.
+        check_attrs(elem, "", unknown)
+        check_text(elem, "", unknown)
 
     data_quality = None
     id_seen = False

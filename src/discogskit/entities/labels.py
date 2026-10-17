@@ -9,9 +9,12 @@ import pyarrow as pa
 from lxml import etree
 
 from discogskit.entities._def import (
+    ID_ATTR,
     Cols,
     EntityDef,
+    check_attrs,
     check_leaf,
+    check_text,
     child_elements,
     leaf_text,
     leaf_texts,
@@ -58,6 +61,10 @@ def append_record(
     if not id_text:
         raise ValueError("missing or empty id")
     label_id = int(id_text)
+    if unknown is not None:
+        # <label> records carry no attributes.
+        check_attrs(elem, "", unknown)
+        check_text(elem, "", unknown)
 
     contact_info = None
     data_quality = None
@@ -94,7 +101,9 @@ def append_record(
                 raise second_copy(child)
             pl_id_str = child.get("id")
             parent_label_id = int(pl_id_str) if pl_id_str else None
-            parent_label_name = leaf_text(child, "", unknown)
+            parent_label_name = child.text or ""
+            if unknown is not None:
+                check_leaf(child, "", unknown, ID_ATTR)
         elif tag == "profile":
             if profile is not None:
                 raise second_copy(child)
@@ -105,7 +114,7 @@ def append_record(
                 sub_id = int(sub_id_str) if sub_id_str else None
                 sub_name = sub.text or ""
                 if unknown is not None:
-                    check_leaf(sub, "sublabels/", unknown)
+                    check_leaf(sub, "sublabels/", unknown, ID_ATTR)
                 row = cols["label_sublabels"]
                 row["label_id"].append(label_id)
                 row["sublabel_id"].append(sub_id)
