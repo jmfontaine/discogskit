@@ -13,6 +13,12 @@ the speedup didn't reproduce beyond noise, since json.dumps() dominates,
 so write_chunk() still makes two write() calls per row (the JSON text,
 then the newline). Files are staged and only moved to their final names
 by ``finalize()``.
+
+Existing output means any file in the entity's directory with a JSONL
+extension of any codec, since a reader globbing ``*.jsonl*`` would read
+old files of another codec along with the new ones. For the same reason,
+``finalize()`` with overwrite deletes the entity's table files of the
+other codecs, and nothing else.
 """
 
 from __future__ import annotations
@@ -39,8 +45,14 @@ if TYPE_CHECKING:
 
 _COMPRESSED_EXT = {"bzip2": ".jsonl.bz2", "gzip": ".jsonl.gz"}
 
+# Every extension a JSONL table file has, whatever its codec.
+_EXTENSIONS = (".jsonl", *_COMPRESSED_EXT.values())
+
 # (min, max) compression level Python's own bz2/gzip modules accept.
 _LEVEL_RANGES = {"bzip2": (1, 9), "gzip": (0, 9)}
+
+# For a level without a codec: "none does not support a compression level" would name a codec the caller never passed.
+_DEFAULT_CODEC_LEVEL_ERROR = "JSONL output is uncompressed by default; --compression-level needs --compression gzip or bzip2."
 
 
 class JSONLWriter:
@@ -55,13 +67,16 @@ class JSONLWriter:
         overwrite: bool = False,
     ) -> None:
         """``compression`` None means uncompressed. Raises ``ValueError`` for a codec or level JSONL output can't use."""
-        compression = "none" if compression is None else compression
-        check_compression("jsonl", compression, [*_COMPRESSED_EXT, "none"])
+        codec = "none" if compression is None else compression
+        check_compression("jsonl", codec, [*_COMPRESSED_EXT, "none"])
         check_compression_level(
-            compression, compression_level, _LEVEL_RANGES.get(compression)
+            codec,
+            compression_level,
+            _LEVEL_RANGES.get(codec),
+            no_level_error=_DEFAULT_CODEC_LEVEL_ERROR if compression is None else None,
         )
         self._output_dir = Path(output_dir)
-        self._compression = compression
+        self._compression = codec
         self._compression_level = compression_level
         self._overwrite = overwrite
         self._files: dict[str, IO] = {}
@@ -71,16 +86,17 @@ class JSONLWriter:
         """Do nothing: a local file write can't stall the way a database server can."""
 
     def check(self, entity: EntityDef) -> None:
-        """Raise ``OutputExistsError`` if ``entity``'s directory holds JSONL files and overwrite is off, or
+        """Raise ``OutputExistsError`` if ``entity``'s directory holds JSONL files of any codec and overwrite is off, or
         ``OSError`` if the output directory can't take the files.
         """
         # First, so an entity directory that can't be listed either fails with the probe's error.
         check_output_dir(self._output_dir, entity.name)
         entity_dir = self._output_dir / entity.name
-        ext = _COMPRESSED_EXT.get(self._compression, ".jsonl")
 
         if not self._overwrite and entity_dir.exists():
-            existing = [f.name for f in entity_dir.iterdir() if f.name.endswith(ext)]
+            existing = [
+                f.name for f in entity_dir.iterdir() if f.name.endswith(_EXTENSIONS)
+            ]
             if existing:
                 from discogskit.writers import OutputExistsError
 
@@ -151,7 +167,12 @@ class JSONLWriter:
             f.close()
         self._files.clear()
         total_bytes = self._staged.commit()
+        entity_dir = self._staged.final_dir
         self._staged = None
+        if self._overwrite:
+            _remove_other_codecs(
+                entity_dir, entity, _COMPRESSED_EXT.get(self._compression, ".jsonl")
+            )
         total_mib = total_bytes / 2**20
         status("Output", f"{n_files} files, {total_mib:,.1f} MiB total")
 
@@ -166,3 +187,22 @@ class JSONLWriter:
         if self._staged is not None:
             self._staged.discard()
             self._staged = None
+
+
+def _remove_other_codecs(entity_dir: Path, entity: EntityDef, ext: str) -> None:
+    """Delete ``entity``'s table files in ``entity_dir`` whose JSONL extension isn't ``ext``.
+
+    Only names made of a table name and a JSONL extension: every other file stays.
+    """
+    for other in _EXTENSIONS:
+        if other == ext:
+            continue
+        for table_name in entity.table_order:
+            path = entity_dir / f"{table_name}{other}"
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise OSError(
+                    f"The new output is in {entity_dir}, but removing {path.name}, earlier output in another "
+                    f"compression, failed: {exc.strerror or exc}. Delete it before reading the directory."
+                ) from exc

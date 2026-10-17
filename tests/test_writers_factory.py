@@ -448,6 +448,16 @@ class TestGetFileWriter:
             discogskit.get_file_writer(out, output_format, compression=compression)
         assert not out.exists()
 
+    def test_rejects_level_for_jsonl_default_codec(self, tmp_path):
+        """The message names the default rather than a ``none`` the caller never passed (#248)."""
+        out = tmp_path / "out"
+        with pytest.raises(ValueError) as excinfo:
+            discogskit.get_file_writer(out, "jsonl", compression_level=5)
+        assert str(excinfo.value) == (
+            "JSONL output is uncompressed by default; --compression-level needs --compression gzip or bzip2."
+        )
+        assert not out.exists()
+
     @pytest.mark.parametrize("level", [1.5, "3", True], ids=["float", "str", "bool"])
     @pytest.mark.parametrize(
         "output_format, compression",

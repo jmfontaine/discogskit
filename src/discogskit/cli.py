@@ -25,17 +25,6 @@ class OutputFormat(str, Enum):
     PARQUET = "parquet"
 
 
-class Compression(str, Enum):
-    """Compression codec for `convert` output. Valid codecs depend on `--format`."""
-
-    BROTLI = "brotli"
-    BZIP2 = "bzip2"
-    GZIP = "gzip"
-    NONE = "none"
-    SNAPPY = "snappy"
-    ZSTD = "zstd"
-
-
 CPUS = os.cpu_count() or 1
 
 app: typer.Typer = typer.Typer(no_args_is_help=True)
@@ -259,10 +248,13 @@ def convert(
         typer.Argument(help="One or more .xml.gz files or directories containing them"),
     ],
     # Output
+    # A string, not a Choice: an unknown or wrongly cased codec then fails with the writers' own "unsupported
+    # compression" error (exit 1), like a codec the format can't use, rather than a usage error (exit 2).
     compression: Annotated[
-        Compression | None,
+        str | None,
         typer.Option(
-            help="Compression codec. Parquet: brotli, gzip, snappy, zstd (default), none. JSONL: bzip2, gzip, none (default)."
+            help="Compression codec. Parquet: brotli, gzip, snappy, zstd (default), none. JSONL: bzip2, gzip, none (default).",
+            metavar="<codec>",
         ),
     ] = None,
     compression_level: Annotated[
@@ -334,7 +326,7 @@ def convert(
         writer = get_file_writer(
             output,
             output_format.value,
-            compression=None if compression is None else compression.value,
+            compression=compression,
             compression_level=compression_level,
             overwrite=overwrite,
         )
