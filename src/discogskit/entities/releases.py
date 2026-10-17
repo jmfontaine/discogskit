@@ -143,8 +143,8 @@ SCHEMAS = {
             pa.field("release_id", pa.int32(), nullable=False),
             pa.field("company_id", pa.int32()),
             pa.field("catno", pa.utf8()),
-            pa.field("entity_type_name", pa.utf8()),
             pa.field("entity_type", pa.utf8()),
+            pa.field("entity_type_name", pa.utf8()),
             pa.field("name", pa.utf8()),
         ]
     ),
