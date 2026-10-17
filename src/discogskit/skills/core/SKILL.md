@@ -140,7 +140,8 @@ drop, then fails the run: use it to check a new dump after Discogs changes the f
 
 ## Troubleshooting
 
-Errors print `Error: <message>` and exit 1; Ctrl+C exits 130.
+Errors print `Error: <message>`, or the error's type such as `Error: MemoryError` when it has no message, and exit 1;
+Ctrl+C exits 130.
 
 | Message | Cause and fix |
 |---|---|
