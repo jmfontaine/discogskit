@@ -93,11 +93,11 @@ class EntityDef:
 # With ``--strict``, the parsers add to ``unknown`` the path of everything they don't read, at every level they walk,
 # through the helpers below. A path is relative to the record (``videos/video/foo``); ``parent_path`` is the path of
 # ``elem``'s parent ending in ``/``, or ``""`` when that parent is the record itself. A text-only element's children
-# are unhandled too: reading only its text drops them. So are the attributes a parser doesn't read (``urls/url/@foo``,
-# or ``@foo`` on the record) and the text of an element the parser reads only the children or attributes of
-# (``urls/text()``, or ``text()`` directly in the record), whether before its first child or after any child. Loops
-# over repeated items read text-only children inline and call the checks only with ``--strict``, so a run without it
-# makes no extra call per element.
+# are unhandled too: reading only its text drops them, and the text after them (``name/text()``). So are the
+# attributes a parser doesn't read (``urls/url/@foo``, or ``@foo`` on the record) and the text of an element the
+# parser reads only the children or attributes of (``urls/text()``, or ``text()`` directly in the record), whether
+# before its first child or after any child. Loops over repeated items read text-only children inline and call the
+# checks only with ``--strict``, so a run without it makes no extra call per element.
 
 # The attributes of an element whose only attribute is a Discogs id, such as an alias's <name id="...">.
 ID_ATTR = frozenset({"id"})
@@ -126,11 +126,14 @@ def check_leaf(
     unknown: set[str],
     attrs: frozenset[str] = frozenset(),
 ) -> None:
-    """Add the path of each child of ``elem``, an element the parser reads only the text and ``attrs`` of, and of each
-    of its other attributes."""
+    """Add the path of each child of ``elem``, an element the parser reads only the text and ``attrs`` of, of each of
+    its other attributes, and its text path when it holds text other than whitespace after a child: the parser reads
+    only the text before the first child."""
     path = f"{parent_path}{elem.tag}/"
     for child in elem:
         unknown.add(f"{path}{child.tag}")
+        if has_text(child.tail):
+            unknown.add(f"{path}text()")
     if elem.attrib:
         check_attrs(elem, path, unknown, attrs)
 

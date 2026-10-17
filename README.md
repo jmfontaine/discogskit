@@ -74,10 +74,11 @@ The progress bar shows only on a terminal. When output goes to a pipe, a file or
 it's written instead, as with `--no-progress`. With `--strict`, once an entity's records are parsed, the run prints a
 `Strict` line for each path no parser handled: an element, such as `unhandled XML element <videos/video/foo> in
 <master>`, an attribute, such as `unhandled XML attribute <videos/video/@foo> in <master>`, or text other than
-whitespace in an element whose text no parser reads, before its first child or after any, such as `unhandled XML text
-<urls/text()> in <artist>`. It then fails with `--strict: 1 unhandled XML path in <master>; see the Strict lines
-above` and exits 1. Like any failed run, it stops before finishing that entity: `convert` doesn't move its files into
-the output directory, and `load` builds no indexes, though the rows it wrote stay in the tables. Entities earlier in
+whitespace that no parser reads, such as `unhandled XML text <urls/text()> in <artist>`: any in an element whose text
+no parser reads, before its first child or after any, and any after a child in one whose text is read up to that child.
+It then fails with `--strict: 1 unhandled XML path in <master>; see the Strict lines above` and exits 1. Like any
+failed run, it stops before finishing that entity: `convert` doesn't move its files into the output directory, and
+`load` builds no indexes, though the rows it wrote stay in the tables. Entities earlier in
 the run are already done; later ones don't run. Without `--strict`, those elements, attributes and text are dropped
 silently.
 
