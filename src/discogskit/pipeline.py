@@ -81,6 +81,7 @@ Key design decisions
 from __future__ import annotations
 
 import multiprocessing
+import re
 import signal
 import socket
 import threading
@@ -208,8 +209,8 @@ class PipelineConfig:
     value out of these ranges before it decompresses the dump or touches the output. ``keep_xml`` keeps the
     decompressed XML after a successful run. ``profile`` fills ``PipelineResult.profile_data`` and prints per-chunk
     lines instead of a progress bar; ``progress`` shows a progress bar when the console is a terminal. ``strict``
-    reports the XML elements no parser handled and then fails the run with ``UnhandledElementsError``, before the
-    writer's ``finalize()``.
+    reports the XML elements, attributes and text no parser handled and then fails the run with
+    ``UnhandledElementsError``, before the writer's ``finalize()``.
     """
 
     chunk_mb: int
@@ -249,12 +250,14 @@ class PipelineResult:
 
 
 class UnhandledElementsError(Exception):
-    """Raised by a ``strict`` run whose input has XML elements no parser handled, which it would otherwise drop.
+    """Raised by a ``strict`` run whose input has XML elements, attributes or text no parser handled, which it would
+    otherwise drop.
 
     ``run()`` raises it once the entity's records are parsed and written and a ``Strict`` line is printed for each
     path, but before the writer's ``finalize()``: file writers publish nothing, and database writers build no indexes.
-    ``entity`` is the entity's name (``artists``); ``paths`` are the sorted element paths, relative to the record
-    (``videos/video/foo``).
+    ``entity`` is the entity's name (``artists``); ``paths`` are the sorted paths, relative to the record, of the
+    elements (``videos/video/foo``), attributes (``videos/video/@foo``) and text (``urls/text()``, text in an element
+    whose text no parser reads).
     """
 
     entity: str
@@ -263,11 +266,23 @@ class UnhandledElementsError(Exception):
     def __init__(self, entity: EntityDef, paths: list[str]) -> None:
         noun = "path" if len(paths) == 1 else "paths"
         super().__init__(
-            f"--strict: {len(paths)} unhandled XML element {noun} in <{entity.root_tag}>; "
+            f"--strict: {len(paths)} unhandled XML {noun} in <{entity.root_tag}>; "
             "see the Strict lines above"
         )
         self.entity = entity.name
         self.paths = paths
+
+
+# A namespaced name in a path is "{uri}name", and the URI can hold "/" or "@".
+_NAMESPACES = re.compile(r"\{[^}]*\}")
+
+
+def _kind(path: str) -> str:
+    """What ``path``, one of ``UnhandledElementsError.paths``, names."""
+    last = _NAMESPACES.sub("", path).rpartition("/")[2]
+    if last[:1] == "@":
+        return "attribute"
+    return "text" if last == "text()" else "element"
 
 
 class _DuplicateIdTracker:
@@ -630,8 +645,8 @@ def _parse_and_write(
     Returns ``put_blocked``: how long parse workers sat idle because the
     writer held the whole budget (measured only with ``profile``).  High
     put_blocked = write-bound pipeline.  See --profile output. Also returns the
-    sorted paths of the elements no parser handled, across all chunks (found
-    only with ``--strict``).
+    sorted paths of the elements, attributes and text no parser handled, across
+    all chunks (found only with ``--strict``).
     """
     budget = parse_workers + write_queue
     queued = deque(chunks)
@@ -867,7 +882,9 @@ def _run(config: PipelineConfig, writer: Writer) -> PipelineResult:
         # Reported here, once per run: each worker only sees its own chunks. All of them, so the user sees every
         # finding at once, then the run fails before finalize() publishes the output or builds indexes.
         for path in unknown:
-            status("Strict", f"unhandled XML element <{path}> in <{entity.root_tag}>")
+            status(
+                "Strict", f"unhandled XML {_kind(path)} <{path}> in <{entity.root_tag}>"
+            )
         if unknown:
             raise UnhandledElementsError(entity, unknown)
 

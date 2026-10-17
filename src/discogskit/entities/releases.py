@@ -11,14 +11,18 @@ import pyarrow as pa
 from lxml import etree
 
 from discogskit.entities._def import (
+    VIDEO_ATTRS,
     Cols,
     ElementValueError,
     EntityDef,
+    check_attrs,
     check_leaf,
+    check_text,
     child_elements,
     leaf_text,
     leaf_texts,
     parse_bool,
+    parse_int,
     second_copy,
 )
 
@@ -36,6 +40,12 @@ _TrackRec = tuple[
 ]
 # Track-level extra artists have no tracks column, so a <tracks> value there fails instead of vanishing (#202).
 _NO_TRACK_TRACKS = "only release-level extra artists have a tracks column"
+# The attributes each element the parsers read attributes of has; --strict reports any other.
+_FORMAT_ATTRS = frozenset({"name", "qty", "text"})
+_IDENTIFIER_ATTRS = frozenset({"description", "type", "value"})
+_LABEL_ATTRS = frozenset({"catno", "id", "name"})
+_MASTER_ID_ATTRS = frozenset({"is_main_release"})
+_RELEASE_ATTRS = frozenset({"id", "status"})
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Arrow schemas (single source of truth for column definitions; the first table is the root table)
@@ -133,8 +143,8 @@ SCHEMAS = {
             pa.field("release_id", pa.int32(), nullable=False),
             pa.field("company_id", pa.int32()),
             pa.field("catno", pa.utf8()),
-            pa.field("entity_type_name", pa.utf8()),
             pa.field("entity_type", pa.utf8()),
+            pa.field("entity_type_name", pa.utf8()),
             pa.field("name", pa.utf8()),
         ]
     ),
@@ -203,6 +213,9 @@ def _parse_artist_children(
     path = "" if unknown is None else f"{parent_path}{parent_elem.tag}/artist/"
     result = []
     for a in child_elements(parent_elem, "artist", parent_path, unknown):
+        if unknown is not None:
+            check_attrs(a, path, unknown)
+            check_text(a, path, unknown)
         aid_text = None
         name = None
         anv = None
@@ -232,7 +245,7 @@ def _parse_artist_children(
             # Every child handled above is text-only.
             if unknown is not None:
                 check_leaf(ch, path, unknown)
-        result.append((int(aid_text) if aid_text else None, name, anv, join_text))
+        result.append((parse_int("artist id", aid_text), name, anv, join_text))
     return result
 
 
@@ -248,6 +261,9 @@ def _parse_extraartist_children(
     result = []
     first_tracks = None
     for a in child_elements(parent_elem, "artist", parent_path, unknown):
+        if unknown is not None:
+            check_attrs(a, path, unknown)
+            check_text(a, path, unknown)
         aid_text = None
         name = None
         anv = None
@@ -285,7 +301,7 @@ def _parse_extraartist_children(
             if unknown is not None:
                 check_leaf(ch, path, unknown)
         result.append(
-            (int(aid_text) if aid_text else None, name, anv, role, tracks_text)
+            (parse_int("extra artist id", aid_text), name, anv, role, tracks_text)
         )
     return result, first_tracks
 
@@ -314,6 +330,9 @@ def _parse_single_track(
     extraartists: list[_ExtraArtistRec] | None = None
     sub_tracks_elem = None
     tracks_elem = None
+    if unknown is not None:
+        check_attrs(track_elem, path, unknown)
+        check_text(track_elem, path, unknown)
     for ch in track_elem:
         tag = ch.tag
         if tag == "position":
@@ -368,15 +387,17 @@ def append_record(
     id_text = record_id(elem)
     if not id_text:
         raise ValueError("missing or empty id")
-    rid = int(id_text)
+    rid = parse_int("id", id_text)
     status = elem.get("status")
+    if unknown is not None:
+        check_attrs(elem, "", unknown, _RELEASE_ATTRS)
+        check_text(elem, "", unknown)
 
     title = None
     country = None
     released = None
     notes = None
     data_quality = None
-    master_id = None
     master_id_text = None
     is_main_release = None
     genres = None
@@ -418,8 +439,9 @@ def append_record(
         elif tag == "master_id":
             if master_id_text is not None:
                 raise second_copy(child)
-            master_id_text = leaf_text(child, "", unknown)
-            master_id = int(master_id_text) if master_id_text else None
+            master_id_text = child.text or ""
+            if unknown is not None:
+                check_leaf(child, "", unknown, _MASTER_ID_ATTRS)
             is_main_release = parse_bool(
                 "is_main_release", child.get("is_main_release")
             )
@@ -442,11 +464,11 @@ def append_record(
         elif tag == "labels":
             for la in child_elements(child, "label", "", unknown):
                 if unknown is not None:
-                    check_leaf(la, "labels/", unknown)
-                la_id_str = la.get("id")
+                    check_leaf(la, "labels/", unknown, _LABEL_ATTRS)
+                    check_text(la, "labels/label/", unknown)
                 r_labels.append(
                     (
-                        int(la_id_str) if la_id_str else None,
+                        parse_int("label id", la.get("id")),
                         la.get("name"),
                         la.get("catno"),
                     )
@@ -454,11 +476,11 @@ def append_record(
         elif tag == "series":
             for sr in child_elements(child, "series", "", unknown):
                 if unknown is not None:
-                    check_leaf(sr, "series/", unknown)
-                sr_id_str = sr.get("id")
+                    check_leaf(sr, "series/", unknown, _LABEL_ATTRS)
+                    check_text(sr, "series/series/", unknown)
                 r_series.append(
                     (
-                        int(sr_id_str) if sr_id_str else None,
+                        parse_int("series id", sr.get("id")),
                         sr.get("name"),
                         sr.get("catno"),
                     )
@@ -466,7 +488,9 @@ def append_record(
         elif tag == "formats":
             for ff in child_elements(child, "format", "", unknown):
                 descs_elems = list(
-                    child_elements(ff, "descriptions", "formats/", unknown)
+                    child_elements(
+                        ff, "descriptions", "formats/", unknown, _FORMAT_ATTRS
+                    )
                 )
                 if len(descs_elems) > 1:
                     raise second_copy(descs_elems[1])
@@ -488,7 +512,8 @@ def append_record(
         elif tag == "identifiers":
             for ident in child_elements(child, "identifier", "", unknown):
                 if unknown is not None:
-                    check_leaf(ident, "identifiers/", unknown)
+                    check_leaf(ident, "identifiers/", unknown, _IDENTIFIER_ATTRS)
+                    check_text(ident, "identifiers/identifier/", unknown)
                 r_identifiers.append(
                     (
                         ident.get("type"),
@@ -498,8 +523,10 @@ def append_record(
                 )
         elif tag == "videos":
             for vid in child_elements(child, "video", "", unknown):
-                dur_str = vid.get("duration")
-                vid_dur = None if dur_str is None else int(dur_str)
+                if unknown is not None:
+                    check_attrs(vid, "videos/video/", unknown, VIDEO_ATTRS)
+                    check_text(vid, "videos/video/", unknown)
+                vid_dur = parse_int("duration", vid.get("duration"))
                 vid_embed = parse_bool("embed", vid.get("embed"))
                 vid_title = None
                 vid_desc = None
@@ -530,6 +557,9 @@ def append_record(
                 )
         elif tag == "companies":
             for co in child_elements(child, "company", "", unknown):
+                if unknown is not None:
+                    check_attrs(co, "companies/company/", unknown)
+                    check_text(co, "companies/company/", unknown)
                 cid_text = None
                 cname = None
                 ccatno = None
@@ -566,7 +596,7 @@ def append_record(
                         check_leaf(cch, "companies/company/", unknown)
                 r_companies.append(
                     (
-                        int(cid_text) if cid_text else None,
+                        parse_int("company id", cid_text),
                         cname,
                         ccatno,
                         cetype,
@@ -621,6 +651,9 @@ def append_record(
                         track_idx += 1
         elif unknown is not None:
             unknown.add(tag)
+
+    # Parsed after the loop, as an artist credit's <id> is, so a second copy fails first, even after an empty one.
+    master_id = parse_int("master id", master_id_text)
 
     # -- Append to accumulators --
 

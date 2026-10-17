@@ -491,11 +491,12 @@ class TestReleaseTypedValues:
         tables = self._release(tmp_path, "", attr)
         assert tables["release_videos"].column("embed").to_pylist() == [expected]
 
-    @pytest.mark.parametrize("value", ["abc", "", "1.5"])
+    @pytest.mark.parametrize("value", ["abc", "", "1.5", " 5", "+5"])
     def test_invalid_duration_fails(self, tmp_path, value):
         with pytest.raises(
             ValueError,
-            match=rf"^Invalid <release> record .*: invalid literal for int\(\) with base 10: {re.escape(repr(value))}$",
+            match=rf"^Invalid <release> record .*: invalid duration {re.escape(repr(value))}, expected an integer from"
+            r" -2147483648 to 2147483647$",
         ):
             self._release(tmp_path, "", f' duration="{value}"')
 

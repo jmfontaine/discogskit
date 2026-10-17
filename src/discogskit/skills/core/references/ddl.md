@@ -180,8 +180,8 @@ CREATE TABLE "release_companies" (
     "release_id" INTEGER NOT NULL,
     "company_id" INTEGER,
     "catno" TEXT,
-    "entity_type_name" TEXT,
     "entity_type" TEXT,
+    "entity_type_name" TEXT,
     "name" TEXT
 );
 CREATE TABLE "release_tracks" (
@@ -396,8 +396,8 @@ CREATE TABLE "release_companies" (
     "release_id"           INTEGER NOT NULL,  -- with --fk: REFERENCES "releases"("id")
     "company_id"           INTEGER,
     "catno"                TEXT,
-    "entity_type_name"     TEXT,
     "entity_type"          TEXT,
+    "entity_type_name"     TEXT,
     "name"                 TEXT
 );
 CREATE TABLE "release_tracks" (
