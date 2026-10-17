@@ -14,7 +14,7 @@ from rich.text import Text
 
 from discogskit import _skills, pipeline
 from discogskit._console import current, error, print_text, status
-from discogskit.entities import ENTITIES, detect_entity
+from discogskit.entities import ENTITIES, EntityDef, detect_entity
 from discogskit.writers import Writer, get_file_writer, get_writer
 
 
@@ -103,11 +103,10 @@ def _resolve_jobs(paths: list[Path]) -> list[tuple[Path, str]]:
 
 def _print_result(
     result: pipeline.PipelineResult,
-    entity_name: str,
-    entity_def,
+    entity: EntityDef,
     *,
     verb: str,
-    verbose: bool = False,
+    verbose: bool,
 ) -> None:
     """Print the summary and optional profile for a completed entity."""
     rate = (
@@ -116,7 +115,7 @@ def _print_result(
         else ""
     )
     current().print(
-        f"  [green]✓[/] {result.total_records:,} {entity_name} {verb} "
+        f"  [green]✓[/] {result.total_records:,} {entity.name} {verb} "
         f"[dim][{result.t_total:.2f}s][/]"
     )
 
@@ -152,9 +151,7 @@ def _print_result(
         tbl.add_column("Time", justify="right")
         tbl.add_column("%", justify="right", style="dim")
         # File writers have no commit step and record no "_commit" timing; only show it when present.
-        keys = entity_def.table_order + (
-            ["_commit"] if "_commit" in table_timings else []
-        )
+        keys = entity.table_order + (["_commit"] if "_commit" in table_timings else [])
         for key in keys:
             t = table_timings.get(key, 0.0)
             pct = t / flush_total * 100 if flush_total else 0
@@ -221,11 +218,9 @@ def _run_jobs(
             )
             result = pipeline.run(config, writer)
 
-            entity_def = ENTITIES[entity_name]
             _print_result(
                 result,
-                entity_name,
-                entity_def,
+                ENTITIES[entity_name],
                 verb=verb,
                 verbose=verbose,
             )
