@@ -412,6 +412,35 @@ class TestSQLiteWriter:
         assert conn.execute("SELECT COUNT(*) FROM artists").fetchone()[0] == 2
         conn.close()
 
+    def test_finalize_fails_while_another_connection_reads(
+        self, tmp_path, entity, ipc_dict
+    ):
+        """A reader holding a transaction blocks the WAL checkpoint: finalize() fails instead of reporting success,
+        and close()'s retry fails quietly, leaving the file in WAL mode for a rerun to inherit.
+        """
+        db_path = tmp_path / "test.db"
+        writer = SQLiteWriter(str(db_path))
+        writer.setup(entity)
+        writer.write_chunk(ipc_to_record_batches(ipc_dict))
+        # The checkpoint waits for the reader in finalize() and again in close(): 5 s each with the default timeout.
+        writer._connection().execute("PRAGMA busy_timeout=100")
+        reader = sqlite3.connect(db_path)
+        reader.execute("BEGIN")
+        reader.execute("SELECT count(*) FROM artists").fetchone()
+        try:
+            with pytest.raises(
+                sqlite3.OperationalError,
+                match="another connection is using the database",
+            ):
+                writer.finalize(entity)
+        finally:
+            writer.close()
+            reader.close()
+
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        conn.close()
+
     @needs_permissions
     def test_loaded_database_opens_from_read_only_dir(self, tmp_path, entity, ipc_dict):
         """A new file ends in rollback-journal mode, with no -wal/-shm files, so it opens read-only."""

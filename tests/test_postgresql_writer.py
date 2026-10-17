@@ -157,14 +157,55 @@ class TestPostgreSQLWriter:
             }
             assert any("artist_id" in idx for idx in indexes)
 
-    def test_close_without_finalize(self, pg_dsn, entity, ipc_dict):
-        """close() without finalize() should not error."""
+    @staticmethod
+    def _close_without_finalize(monkeypatch, pg_dsn, entity, ipc_dict, **options):
+        """Close a writer after a write but before finalize(); returns how many of its connections stay open."""
+        import adbc_driver_postgresql.dbapi as adbc_pg
+        import psycopg
+
         from discogskit.writers.postgresql import PostgreSQLWriter
 
-        writer = PostgreSQLWriter(pg_dsn, overwrite=True)
-        writer.setup(entity)
-        writer.write_chunk(ipc_to_record_batches(ipc_dict))
-        writer.close()
+        # Held until the count is taken, so a write connection close() leaves open
+        # stays open, instead of being closed when garbage collection frees it.
+        real_connect = adbc_pg.connect
+        opened = []
+
+        def recording_connect(*args, **kwargs):
+            opened.append(real_connect(*args, **kwargs))
+            return opened[-1]
+
+        monkeypatch.setattr(adbc_pg, "connect", recording_connect)
+        app_name = f"discogskit_{uuid.uuid4().hex[:8]}"
+        writer = PostgreSQLWriter(
+            f"{pg_dsn}?application_name={app_name}", overwrite=True, **options
+        )
+        try:
+            writer.setup(entity)
+            writer.write_chunk(ipc_to_record_batches(ipc_dict))
+        finally:
+            writer.close()
+        try:
+            # A closed connection's backend can take a moment to leave pg_stat_activity.
+            deadline = time.monotonic() + 5
+            with psycopg.connect(pg_dsn, autocommit=True) as conn:
+                while True:
+                    row = conn.execute(
+                        "SELECT COUNT(*) FROM pg_stat_activity "
+                        "WHERE application_name = %s",
+                        (app_name,),
+                    ).fetchone()
+                    open_conns = row[0] if row else None
+                    if open_conns == 0 or time.monotonic() > deadline:
+                        return open_conns
+                    time.sleep(0.05)
+        finally:
+            for adbc_conn in opened:
+                adbc_conn.close()
+
+    def test_close_without_finalize(self, monkeypatch, pg_dsn, entity, ipc_dict):
+        """close() without finalize() closes the DDL and write connections."""
+        open_conns = self._close_without_finalize(monkeypatch, pg_dsn, entity, ipc_dict)
+        assert open_conns == 0
 
     def test_multi_writer(self, pg_dsn, entity, ipc_dict):
         """Multi-writer mode distributes tables across write workers."""
@@ -199,14 +240,14 @@ class TestPostgreSQLWriter:
         assert set(timings) == set(entity.table_order) | {"_commit"}
         assert all(v >= 0 for v in timings.values())
 
-    def test_multi_writer_close_without_finalize(self, pg_dsn, entity, ipc_dict):
-        """Multi-writer close() without finalize() cleans up executor and connections."""
-        from discogskit.writers.postgresql import PostgreSQLWriter
-
-        writer = PostgreSQLWriter(pg_dsn, overwrite=True, write_workers=2)
-        writer.setup(entity)
-        writer.write_chunk(ipc_to_record_batches(ipc_dict))
-        writer.close()  # close without finalize
+    def test_multi_writer_close_without_finalize(
+        self, monkeypatch, pg_dsn, entity, ipc_dict
+    ):
+        """Multi-writer close() without finalize() closes every write connection."""
+        open_conns = self._close_without_finalize(
+            monkeypatch, pg_dsn, entity, ipc_dict, write_workers=2
+        )
+        assert open_conns == 0
 
     def test_fk_constraints(self, pg_dsn, entity, ipc_dict):
         from discogskit.writers.postgresql import PostgreSQLWriter
@@ -1332,6 +1373,59 @@ class TestPgSchema:
             with psycopg.connect(pg_dsn, autocommit=True) as conn:
                 conn.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
                 conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
+
+    def test_schema_without_usage_is_a_clear_error(self, pg_dsn):
+        """--pg-schema on a schema this role can't use fails clearly, before any work."""
+        import psycopg
+        from psycopg import sql
+
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        role = f"loader_{uuid.uuid4().hex[:8]}"
+        schema = f"no_usage_{uuid.uuid4().hex[:8]}"
+        parts = urlsplit(pg_dsn)
+        role_dsn = parts._replace(
+            netloc=f"{role}:pw@{parts.hostname}:{parts.port}"
+        ).geturl()
+        with psycopg.connect(pg_dsn, autocommit=True) as conn:
+            conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+            conn.execute(
+                sql.SQL("CREATE ROLE {} LOGIN PASSWORD 'pw'").format(
+                    sql.Identifier(role)
+                )
+            )
+        try:
+            with pytest.raises(
+                ValueError,
+                match=f"Can't target schema '{schema}': this role lacks USAGE",
+            ):
+                PostgreSQLWriter(role_dsn, schema=schema)
+        finally:
+            with psycopg.connect(pg_dsn, autocommit=True) as conn:
+                conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
+                conn.execute(
+                    sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+                )
+
+    def test_search_path_without_an_existing_schema_is_a_clear_error(
+        self, pg_dsn, entity
+    ):
+        """A DSN whose search_path names no existing schema fails check() and setup() before any table work."""
+        from discogskit.writers.postgresql import PostgreSQLWriter
+
+        missing = f"missing_{uuid.uuid4().hex[:8]}"
+        writer = PostgreSQLWriter(f"{pg_dsn}?options=-c%20search_path%3D{missing}")
+        try:
+            with pytest.raises(
+                ValueError, match="search_path names no existing schema"
+            ):
+                writer.check(entity)
+            with pytest.raises(
+                ValueError, match="search_path names no existing schema"
+            ):
+                writer.setup(entity)
+        finally:
+            writer.close()
 
     def test_create_schema_flag_works_without_database_create(
         self, pg_dsn, entity, ipc_dict
