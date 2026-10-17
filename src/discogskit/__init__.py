@@ -5,11 +5,12 @@ The names in ``__all__`` are the supported Python API; everything else may chang
 
 from __future__ import annotations
 
-from discogskit.decompress import DecompressError
+from discogskit.decompress import DecompressError, ForeignXmlError
 from discogskit.entities import ENTITIES, EntityDef, detect_entity
 from discogskit.pipeline import (
     PipelineConfig,
     PipelineResult,
+    ProfileData,
     UnhandledElementsError,
     run,
 )
@@ -19,9 +20,11 @@ __all__ = [
     "ENTITIES",
     "DecompressError",
     "EntityDef",
+    "ForeignXmlError",
     "OutputExistsError",
     "PipelineConfig",
     "PipelineResult",
+    "ProfileData",
     "UnhandledElementsError",
     "Writer",
     "detect_entity",

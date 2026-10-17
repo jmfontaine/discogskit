@@ -149,6 +149,31 @@ class TestNoTracebacks:
 
     @pytest.mark.parametrize("command", ["convert", "load"])
     @pytest.mark.parametrize(
+        ("exc", "message"),
+        [
+            (AssertionError(), "AssertionError"),
+            (MemoryError(), "MemoryError"),
+            (RuntimeError("boom"), "boom"),
+        ],
+        ids=["AssertionError", "MemoryError", "RuntimeError"],
+    )
+    def test_pipeline_error_without_message_names_its_type(
+        self, tmp_path: Path, command: str, exc: Exception, message: str
+    ) -> None:
+        """An exception whose str() is empty printed a bare ``Error: `` (#209)."""
+        gz = _make_gz(tmp_path)
+        with (
+            patch("discogskit.cli.pipeline.run", side_effect=exc),
+            patch("discogskit.cli.get_writer"),
+        ):
+            result = runner.invoke(app, [command, str(gz)])
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        assert type(result.exception) is SystemExit, repr(result.exception)
+        assert f"Error: {message}\n" in output
+
+    @pytest.mark.parametrize("command", ["convert", "load"])
+    @pytest.mark.parametrize(
         "exc",
         [
             RuntimeError("something broke"),
@@ -173,6 +198,21 @@ class TestNoTracebacks:
         assert type(result.exception) is SystemExit, repr(result.exception)
         assert f"Error: {exc}" in output
         assert "Traceback" not in output
+
+    def test_writer_construction_error_without_message_names_its_type(
+        self, tmp_path: Path
+    ) -> None:
+        gz = _make_gz(tmp_path)
+        with (
+            patch("discogskit.cli.pipeline.run") as run,
+            patch("discogskit.cli.get_writer", side_effect=MemoryError()),
+        ):
+            result = runner.invoke(app, ["load", str(gz)])
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        assert type(result.exception) is SystemExit, repr(result.exception)
+        assert "Error: MemoryError\n" in output
+        run.assert_not_called()
 
 
 class TestRecordErrorOutput:

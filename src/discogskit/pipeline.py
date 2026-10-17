@@ -22,14 +22,17 @@ bounded number of chunks in flight::
         |              v  at most parse_workers + write_queue chunks in flight
         |              |
         +---> [Stage 3b: Writer thread]  one-worker ThreadPoolExecutor
-                  Deserializes IPC, calls writer.write_chunk() which
-                  uses ADBC's COPY protocol under the hood.
+                  Deserializes IPC, calls writer.write_chunk() (ADBC
+                  COPY, SQLite executemany, or staged Parquet/JSONL
+                  files).
                        |
                        v
-                  Database tables (bare, no indexes)
+                  Database tables (no FK-column indexes yet) or staged
+                  files
                        |
                        v
-                  [Stage 4: Indexes]  PK + FK-column indexes (parallel)
+                  [Stage 4: Finalize]  indexes for databases, commit of
+                  staged files
                        |
                        v
                   [Stage 5: Cleanup]  delete XML unless --keep-xml
@@ -55,9 +58,10 @@ Key design decisions
   budget.  If the writer falls behind, parsed chunks wait for it and the
   workers go idle, so the main process never holds more than that many
   parsed chunks, however slow the writer is.
-- **Writer thread**: decouples parsing from database writes.  Without it,
-  the main process would sequentially consume an IPC dict and flush it,
-  leaving parse workers idle during flushes.
+- **Writer thread**: decouples parsing from writes (ADBC COPY, SQLite
+  executemany, or staged Parquet/JSONL files).  Without it, the main
+  process would sequentially consume an IPC dict and write it, leaving
+  parse workers idle during writes.
 - **Parse worker processes owned by the pipeline**: each worker has pipes
   of its own, and the main thread waits on the workers' result pipes, their
   process sentinels and the writes together. A worker holds the only write
@@ -68,9 +72,10 @@ Key design decisions
   as it happens. Writes queued behind a failed one are skipped.
 - **Stopping**: any failure (writer, parser, dead worker, Ctrl+C) kills the
   parse workers, drops queued writes and waits for the in-flight write, so
-  the writer is idle before the caller closes it. On Ctrl+C, the writer's
-  ``cancel()`` first cancels the in-flight write, which may otherwise wait
-  forever on a stalled database server.
+  the writer is idle before the caller closes it. On Ctrl+C, even one that
+  lands during that wait after another failure, the writer's ``cancel()``
+  first cancels the in-flight write, which may otherwise wait forever on a
+  stalled database server.
 """
 
 from __future__ import annotations
@@ -110,7 +115,13 @@ from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import ChunkResult, extract_chunk_to_ipc
 from discogskit.writers import Writer
 
-__all__ = ["PipelineConfig", "PipelineResult", "UnhandledElementsError", "run"]
+__all__ = [
+    "PipelineConfig",
+    "PipelineResult",
+    "ProfileData",
+    "UnhandledElementsError",
+    "run",
+]
 
 
 class _ElapsedEstTotalColumn(ProgressColumn):
@@ -742,16 +753,34 @@ def _parse_and_write(
                 worker.process.terminate()
         # Drop queued writes now, so none starts while the in-flight one stops.
         write_executor.shutdown(cancel_futures=True, wait=False)
-        if isinstance(exc, KeyboardInterrupt) and writer_done is not None:
-            # Cancel the in-flight write, which may otherwise wait forever on a
-            # stalled server: ADBC's own Ctrl+C handling only covers statements
-            # run on the main thread. After dropping the queued writes, so the
-            # thread exits once that write ends.
-            _cancel_until_done(chunk_writer.writer, writer_done)
-        # Wait for the in-flight write, so the writer is idle before the
-        # caller closes it.
-        write_executor.shutdown()
-        _stop_parse_workers(workers)
+        try:
+            if isinstance(exc, KeyboardInterrupt) and writer_done is not None:
+                # Cancel the in-flight write, which may otherwise wait forever on a
+                # stalled server: ADBC's own Ctrl+C handling only covers statements
+                # run on the main thread. After dropping the queued writes, so the
+                # thread exits once that write ends.
+                _cancel_until_done(chunk_writer.writer, writer_done)
+            elif writer_done is not None:
+                # Wait for the in-flight write, so the writer is idle before the
+                # caller closes it. On the watcher, not with join(): a Ctrl+C
+                # that interrupts join() before Python 3.13 marks the thread as
+                # stopped while it still runs (see _watch()).
+                try:
+                    writer_done.wait()
+                except KeyboardInterrupt:
+                    # That write may be the one blocked on a stalled server:
+                    # cancel it as above.
+                    current().print(
+                        "\n  [yellow]Interrupted — waiting for the in-flight write to stop …[/]"
+                    )
+                    _cancel_until_done(chunk_writer.writer, writer_done)
+                    raise
+        finally:
+            try:
+                # The writer thread has exited by now, or never ran a write.
+                write_executor.shutdown()
+            finally:
+                _stop_parse_workers(workers)
         raise
     finally:
         wake_r.close()
