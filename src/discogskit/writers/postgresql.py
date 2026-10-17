@@ -21,6 +21,7 @@ re-loaded quickly.
 
 from __future__ import annotations
 
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from contextlib import suppress
@@ -242,12 +243,17 @@ def _create_indexes(dsn: str, tables: list[str], column: str, workers: int) -> N
 
 
 def _dsn_with_schema(dsn: str, schema: str) -> str:
-    """Append ``-csearch_path=<schema>`` to the DSN's libpq ``options``, keeping existing ones."""
+    """Append ``-csearch_path=<schema>`` to the DSN's libpq ``options``, keeping existing ones.
+
+    Without ``options`` in the DSN, the existing ones are ``PGOPTIONS``'s: libpq reads that variable only when the
+    conninfo sets no ``options``, so setting them here would otherwise drop it.
+    """
     ident = '"' + schema.replace('"', '""') + '"'
     opt = "-csearch_path=" + "".join(
         f"\\{ch}" if ch.isspace() or ch == "\\" else ch for ch in ident
     )
-    existing = conninfo_to_dict(dsn).get("options")
+    params = conninfo_to_dict(dsn)
+    existing = params["options"] if "options" in params else os.environ.get("PGOPTIONS")
     return make_conninfo(dsn, options=f"{existing} {opt}" if existing else opt)
 
 
