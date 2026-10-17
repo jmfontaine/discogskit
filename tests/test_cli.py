@@ -1631,6 +1631,40 @@ class TestLoadRejectsInMemorySqlite:
         assert list(tmp_path.iterdir()) == [gz]
 
 
+class TestLoadHidesPasswordInMalformedPostgreSqlDsn:
+    @pytest.mark.parametrize(
+        "dsn, shown",
+        [
+            (
+                "postgresql://user:s3%zzcr3t@localhost/discogs",
+                "postgresql://user:***@localhost/discogs",
+            ),
+            (
+                "postgresql://user:s3cr3t@[::1]x/discogs",
+                "postgresql://user:***@[::1]x/discogs",
+            ),
+            (
+                "postgresql://us#er:s3cr3t@[::1]x/discogs",
+                "postgresql://us#er:***@[::1]x/discogs",
+            ),
+        ],
+    )
+    def test_fails_without_printing_the_password(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dsn: str, shown: str
+    ) -> None:
+        """libpq quotes the token it can't parse, or the whole URI, in its error (#207)."""
+        _widen_console(monkeypatch)
+        gz = _make_gz(tmp_path)
+        with patch("discogskit.cli.pipeline.run") as run:
+            result = runner.invoke(app, ["load", str(gz), "--dsn", dsn])
+        output = _unstyle(result.output)
+        assert result.exit_code == 1, output
+        assert f"Invalid PostgreSQL DSN: {shown!r}." in output
+        assert "s3" not in output
+        assert "cr3t" not in output
+        run.assert_not_called()
+
+
 class TestConsoleScriptEntryPoint:
     def test_loads_in_a_fresh_interpreter(self) -> None:
         """Tools that load console scripts through importlib.metadata must get the Typer app.

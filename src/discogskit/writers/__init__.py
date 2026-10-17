@@ -131,6 +131,14 @@ def get_writer(
     For Parquet or JSONL output, use ``get_file_writer``.
     """
     if dsn.startswith(("postgresql://", "postgres://")):
+        if not _parses_as_conninfo(dsn):
+            # Raised outside any except block, so the original error, which can hold the password, isn't chained.
+            raise ValueError(
+                f"Invalid PostgreSQL DSN: {_redact_dsn(dsn)!r}. libpq can't parse it, or a value in it isn't valid "
+                "UTF-8: check the host and port, and percent-encode special characters in the user name, password and "
+                "database name ('%' as %25)."
+            )
+
         from discogskit.writers.postgresql import PostgreSQLWriter
 
         return PostgreSQLWriter(
@@ -171,6 +179,23 @@ def get_writer(
         f"Unsupported database DSN: {_redact_dsn(dsn)!r}. "
         f"Expected postgresql://, postgres:// or a SQLite path ({'/'.join(_SQLITE_SUFFIXES)})."
     )
+
+
+def _parses_as_conninfo(dsn: str) -> bool:
+    """Whether libpq can parse ``dsn`` and psycopg can decode its values. libpq's parse errors quote the token they
+    reject, or the whole URI, password included, so ``get_writer`` checks first and reports the DSN redacted instead.
+    psycopg raises ``UnicodeError`` instead for a value that isn't UTF-8: ``UnicodeDecodeError`` for a percent-escape
+    such as ``%ff``, whose ``object`` holds the value's bytes, or ``UnicodeEncodeError`` for a lone surrogate (an
+    environment variable's undecodable byte), whose ``object`` is the whole DSN.
+    """
+    from psycopg import ProgrammingError
+    from psycopg.conninfo import conninfo_to_dict
+
+    try:
+        conninfo_to_dict(dsn)
+    except (ProgrammingError, UnicodeError):
+        return False
+    return True
 
 
 _SQLITE_PREFIX = "sqlite:///"
@@ -223,8 +248,9 @@ def _is_in_memory(path: str) -> bool:
 # A URL's scheme, at the start: "://" inside a keyword/value DSN (e.g. in a password) doesn't make it a URL.
 _URL_SCHEME = r"\s*[A-Za-z][A-Za-z0-9+.-]*://"
 # A URL's userinfo password: from the colon after the user name to the last "@", so an unencoded "@", "/" or "?" in
-# the password is still covered (at worst, more than the password is hidden).
-_URL_PASSWORD = re.compile(rf"^({_URL_SCHEME}[^:@/?#]*:).*@", re.DOTALL)
+# the password is still covered (at worst, more than the password is hidden). The user name may hold "?" or "#", as
+# libpq reads it: only ":", "@" and "/" end it.
+_URL_PASSWORD = re.compile(rf"^({_URL_SCHEME}[^:@/]*:).*@", re.DOTALL)
 # A URL's query string, hidden whole: a password parameter can be spelled many ways (e.g. ``%70assword``).
 _URL_QUERY = re.compile(r"\?.*", re.DOTALL)
 # One libpq keyword/value pair, lexed as libpq does: the keyword, "=", then a single-quoted value or an unquoted one up

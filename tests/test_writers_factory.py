@@ -235,6 +235,65 @@ class TestGetWriter:
             get_writer(dsn)
         assert f"Unsupported database DSN: {shown!r}." in str(excinfo.value)
 
+    @pytest.mark.parametrize(
+        "dsn, shown",
+        [
+            # A bare "%" in the password: libpq quotes the token it can't decode.
+            (
+                "postgresql://user:s3%zzcr3t@localhost/discogs",
+                "postgresql://user:***@localhost/discogs",
+            ),
+            # A malformed host: libpq quotes the whole URI.
+            (
+                "postgresql://user:s3cr3t@[::1]x/discogs",
+                "postgresql://user:***@[::1]x/discogs",
+            ),
+            (
+                "postgres://user:s3cr3t@[::1/discogs",
+                "postgres://user:***@[::1/discogs",
+            ),
+            # A bare "%" in a password given as a parameter: the query string is hidden whole.
+            (
+                "postgresql://localhost/discogs?password=s3%zzcr3t",
+                "postgresql://localhost/discogs?***",
+            ),
+            # libpq reads "#" and "?" as part of the user name.
+            (
+                "postgresql://us#er:s3%zzcr3t@localhost/discogs",
+                "postgresql://us#er:***@localhost/discogs",
+            ),
+            (
+                "postgresql://us?er:s3cr3t@[::1]x/discogs",
+                "postgresql://us?***",
+            ),
+            # A percent-escape that isn't UTF-8: psycopg raises UnicodeDecodeError, whose .object is the password.
+            (
+                "postgresql://user:s3%ffcr3t@localhost/discogs",
+                "postgresql://user:***@localhost/discogs",
+            ),
+            (
+                "postgresql://localhost/discogs?password=s3%ffcr3t",
+                "postgresql://localhost/discogs?***",
+            ),
+            # A lone surrogate, as an undecodable byte in DATABASE_URL becomes: UnicodeEncodeError, whose .object is
+            # the whole DSN.
+            (
+                "postgresql://user:s3\udcffcr3t@localhost/discogs",
+                "postgresql://user:***@localhost/discogs",
+            ),
+        ],
+    )
+    def test_malformed_postgresql_dsn_error_hides_the_password(self, dsn, shown):
+        with pytest.raises(ValueError) as excinfo:
+            get_writer(dsn)
+        assert str(excinfo.value).startswith(f"Invalid PostgreSQL DSN: {shown!r}.")
+        assert excinfo.value.__cause__ is None
+        assert excinfo.value.__context__ is None
+        # A UnicodeDecodeError's message omits the bytes it failed on, but its .object holds them.
+        assert "cr3t" not in repr(getattr(excinfo.value, "object", None))
+        assert "s3" not in str(excinfo.value)
+        assert "cr3t" not in str(excinfo.value)
+
 
 _ARTISTS_XML = (
     b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n"
