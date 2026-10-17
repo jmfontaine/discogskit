@@ -72,11 +72,15 @@ any of them stops the run before anything is written.
 
 The progress bar shows only on a terminal. When output goes to a pipe, a file or CI, a run prints one line per chunk as
 it's written instead, as with `--no-progress`. With `--strict`, once an entity's records are parsed, the run prints a
-`Strict` line for each element path no parser handled, such as `unhandled XML element <videos/video/foo> in <master>`,
-then fails with `--strict: 1 unhandled XML element path in <master>; see the Strict lines above` and exits 1. Like any
+`Strict` line for each path no parser handled: an element, such as `unhandled XML element <videos/video/foo> in
+<master>`, an attribute, such as `unhandled XML attribute <videos/video/@foo> in <master>`, or text other than
+whitespace that no parser reads, such as `unhandled XML text <urls/text()> in <artist>`: any in an element whose text
+no parser reads, before its first child or after any, and any after a child in one whose text is read up to that child.
+It then fails with `--strict: 1 unhandled XML path in <master>; see the Strict lines above` and exits 1. Like any
 failed run, it stops before finishing that entity: `convert` doesn't move its files into the output directory, and
-`load` builds no indexes, though the rows it wrote stay in the tables. Entities earlier in the run are already done;
-later ones don't run. Without `--strict`, those elements are dropped silently.
+`load` builds no indexes, though the rows it wrote stay in the tables. Entities earlier in
+the run are already done; later ones don't run. Without `--strict`, those elements, attributes and text are dropped
+silently.
 
 Both commands decompress each `.xml.gz` to a `.xml` next to it, and delete the `.xml` after a successful run unless
 `--keep-xml` is set. A run that fails or is interrupted (including Ctrl+C) after decompression finished keeps the
@@ -125,20 +129,30 @@ them. In two conversions of the 2026-10-01 releases dump to Parquet, each file's
 different order (10 positions differed), and the first run's weren't in id order. The artists, labels and masters
 outputs weren't checked for id order.
 
-A value discogskit can't store, such as a non-numeric id or one too large for its column, stops the run, and so do a
-record with a missing or empty id, a release sub-track with `<sub_tracks>` of its own (discogskit reads one level
-of sub-tracks), a non-empty `<tracks>` in a track's or sub-track's extra artist (only release-level extra artists
-have a `tracks` column) and a second copy of an element discogskit reads one of, such as two `<title>` in a record,
-two `<artists>` in a track or two `<name>` in an artist credit (keeping one would drop the other); the 2026-10-01
-dumps repeat none of them. A repeated `<labels>`, `<series>`, `<formats>`, `<identifiers>`, `<videos>` or
-`<companies>` in a release, `<aliases>`, `<groups>` or `<members>` in an artist, `<sublabels>` in a label, or
-`<artists>` or `<videos>` in a master is read in full instead, its items added to the others'. Typed attributes are
-never coerced: a video `duration` must be an integer, and `embed` and `is_main_release` must be `true` or `false`; a
-missing one is `NULL`, and any other value, including an empty one, stops the run. The error names the `.xml` file
-and the byte range of the chunk being parsed, plus either the table the value was meant for, or the record's line,
-counted from the chunk's first byte, and its id when it has one. When the record fails for one of the elements above
-(a repeated one, a nested `<sub_tracks>` or a track-level `<tracks>` value), the error adds that element's line, or
-`unknown` when it can't be found.
+A record with a missing or empty id stops the run, and so do a release sub-track with `<sub_tracks>` of its own
+(discogskit reads one level of sub-tracks), a non-empty `<tracks>` in a track's or sub-track's extra artist (only
+release-level extra artists have a `tracks` column) and a second copy of an element discogskit reads one of, such as
+two `<title>` in a record, two `<artists>` in a track or two `<name>` in an artist credit (keeping one would drop the
+other); the 2026-10-01 dumps repeat none of them. A repeated `<labels>`, `<series>`, `<formats>`, `<identifiers>`,
+`<videos>` or `<companies>` in a release, `<aliases>`, `<groups>` or `<members>` in an artist, `<sublabels>` in a label,
+or `<artists>` or `<videos>` in a master is read in full instead, its items added to the others'. Typed values are never
+coerced: every id, a master's `main_release` and `year`, a release's `master_id` and a video's `duration` must be an
+integer from -2147483648 to 2147483647 written in ASCII digits with an optional leading `-`, so a `+`, an underscore,
+whitespace or another script's digits fail; `embed` and `is_main_release` must be `true` or `false`. A missing value
+is `NULL`, except a record's id, and any other value, including an empty one (`<year/>` or `id=""`), stops the run.
+The error names the `.xml` file, the byte range of the chunk being parsed, the record's line, counted from the
+chunk's first byte, its id when it has one, and the value's field, as in `invalid alias id '+7', expected an integer
+from -2147483648 to 2147483647`. When the record fails for one of the elements above (a repeated one, a nested
+`<sub_tracks>` or a track-level `<tracks>` value), the error adds that element's line, or `unknown` when it can't be
+found.
+
+Only records and whitespace may appear directly in a dump's container (`<artists>`, `<labels>`, `<masters>` or
+`<releases>`), plus comments and processing instructions after the first record, which are skipped as they are inside
+records. Anything else between two records, such as an element, text or a namespaced record like `<artist
+xmlns="urn:x">`, stops the run, since discogskit would drop it. The error names the `.xml` file, the byte range of the
+chunk being parsed and the content's line, counted from the chunk's first byte, e.g. `text 'STRAY' on line 120; only
+<artist> records may appear in <artists>`. Content before the first record, comments included, and such content after
+the last stop the run too, with its byte offset.
 
 ### Memory
 
@@ -286,8 +300,9 @@ with one run per level and that much spread between runs, what the higher levels
 │                                                                     output                   │
 │                                                                     [default: progress]      │
 │ --strict                 --no-strict                                Fail on unhandled XML    │
-│                                                                     elements, after listing  │
-│                                                                     them all                 │
+│                                                                     elements, attributes and │
+│                                                                     text, after listing them │
+│                                                                     all                      │
 │                                                                     [default: no-strict]     │
 │ --help                                                              Show this message and    │
 │                                                                     exit.                    │
@@ -420,7 +435,8 @@ fails before any work if the file's directory can't hold it.
 │                                                          per-chunk output                    │
 │                                                          [default: progress]                 │
 │ --strict           --no-strict                           Fail on unhandled XML elements,     │
-│                                                          after listing them all              │
+│                                                          attributes and text, after listing  │
+│                                                          them all                            │
 │                                                          [default: no-strict]                │
 │ --help                                                   Show this message and exit.         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -543,7 +559,7 @@ and name may change in any release.
 | `OutputExistsError` | Raised when the output exists and the writer doesn't overwrite it |
 | `DecompressError` | Raised when a `.xml.gz` is truncated, corrupt or not gzip |
 | `ForeignXmlError` | Raised when the `.xml` next to the dump wasn't written by discogskit; move or delete it |
-| `UnhandledElementsError` | Raised by a `strict` run whose input has XML elements no parser handled, before the writer's `finalize()`; its `entity` and `paths` attributes name them |
+| `UnhandledElementsError` | Raised by a `strict` run whose input has XML elements, attributes or text no parser handled, before the writer's `finalize()`; its `entity` and `paths` attributes name them |
 
 `get_writer()` and `get_file_writer()` raise `ValueError` for an option they can't use, such as a codec the format
 doesn't support, a compression level that isn't an `int` or is out of the codec's range, a `write_workers` below 1 or

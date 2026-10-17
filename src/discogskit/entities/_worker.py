@@ -14,7 +14,7 @@ the end of each chunk. This is faster than appending to Arrow arrays incremental
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import NamedTuple, TypeVar, cast
+from typing import NamedTuple, NoReturn, Protocol, TypeVar, cast
 from xml.parsers import expat
 
 import pyarrow as pa
@@ -22,7 +22,13 @@ from lxml import etree
 
 from discogskit._ipc import serialize_batch
 from discogskit.entities import ENTITIES
-from discogskit.entities._def import ChunkArgs, Cols, ElementValueError
+from discogskit.entities._def import (
+    XML_SPACE,
+    ChunkArgs,
+    Cols,
+    ElementValueError,
+    has_text,
+)
 
 # Bytes of the chunk read and fed to the parser at a time. Reading the whole chunk and wrapping it in its container
 # held a copy of it for the whole parse, and two while wrapping: 256 MiB each at the default chunk size (issue #30).
@@ -37,27 +43,49 @@ class ChunkResult(NamedTuple):
 
     # Table name -> one serialized RecordBatch, in the entity's table order.
     tables: dict[str, pa.Buffer]
-    # Sorted paths of the elements no parser handled, relative to the record (e.g. ``videos/video/foo``); only
-    # collected with ``--strict``.
+    # Sorted paths of the elements, attributes and text no parser handled, relative to the record (e.g.
+    # ``videos/video/foo``, ``videos/video/@foo``, ``urls/text()``); only collected with ``--strict``.
     unknown: list[str]
+
+
+class _Clearable(Protocol):
+    """``etree._Element.clear``, whose ``keep_tail`` argument lxml's stubs leave out."""
+
+    def clear(self, keep_tail: bool = False) -> None: ...
 
 
 class _ScanResult(Exception):
     """Carries a visitor's result out of ``_scan_lines``."""
 
 
-def _first_namespaced_child_line(xml_data: bytes) -> int | None:
-    """Line where the container's first namespaced direct child starts, or None if expat finds none or rejects the chunk.
+def _first_stray(xml_data: bytes, root_tag: str) -> tuple[str, str, int] | None:
+    """The container's first direct content that isn't a ``<root_tag>`` record, or None if expat finds none or rejects
+    the chunk: ``("element", its name as lxml writes it, the line its start tag begins on)`` or ``("text", its first
+    line, the line that is on)``.
 
-    lxml's ``sourceline`` gives the line where an element's start tag ends, and past line 65535 only an estimate; see
-    ``_scan_lines``.
+    lxml's ``sourceline`` gives the line where an element's start tag ends, past line 65535 only an estimate, and no
+    line for text; see ``_scan_lines``.
     """
 
-    def on_start(name: str, line: int, ancestors: list[str]) -> int | None:
-        # Only the container is open above a direct child; a namespaced name contains the separator.
-        return line if len(ancestors) == 1 and " " in name else None
+    def on_start(
+        name: str, line: int, ancestors: list[str]
+    ) -> tuple[str, str, int] | None:
+        # Only the container is open above a direct child. A namespaced name is "<uri> <local name>".
+        if len(ancestors) != 1 or name == root_tag:
+            return None
+        uri, _, local = name.rpartition(" ")
+        return "element", f"{{{uri}}}{local}" if uri else local, line
 
-    return _scan_lines(xml_data, on_start)
+    def on_text(
+        data: str, line: int, ancestors: list[str]
+    ) -> tuple[str, str, int] | None:
+        if len(ancestors) != 1 or not (text := data.strip(XML_SPACE)):
+            return None
+        # expat can hand over the line breaks before the text in the same piece.
+        leading = data[: len(data) - len(data.lstrip(XML_SPACE))]
+        return "text", _snippet(text), line + leading.count("\n")
+
+    return _scan_lines(xml_data, on_start, on_text=on_text)
 
 
 def _line(element: etree._Element) -> str:
@@ -134,13 +162,16 @@ def _scan_lines(
     xml_data: bytes,
     on_start: Callable[[str, int, list[str]], _T | None],
     on_end: Callable[[str, list[str]], _T | None] | None = None,
+    *,
+    on_text: Callable[[str, int, list[str]], _T | None] | None = None,
 ) -> _T | None:
     """Re-read the chunk with expat, which counts lines exactly, until a visitor returns a value; return that value.
 
     lxml's ``sourceline`` can't be used for this: libxml2 stores element lines in 16 bits, so past line 65535 it only
     estimates, and a chunk can run to millions of lines. ``on_start`` gets each element's name, the line where its
-    start tag begins and the names of its open ancestors; ``on_end`` gets the name and the ancestors. Names of
-    namespaced elements are "<uri> <local name>", so they never equal a bare tag, just as lxml's never do.
+    start tag begins and the names of its open ancestors; ``on_end`` gets the name and the ancestors; ``on_text`` gets
+    a piece of character data, the line where it begins and the names of the elements it's in. Names of namespaced
+    elements are "<uri> <local name>", so they never equal a bare tag, just as lxml's never do.
 
     Returns None when no visitor returns a value, or when expat rejects the chunk: it accepts fewer names than libxml2
     (e.g. U+0370), so it can fail on a chunk lxml parsed. This re-reads the whole chunk, so it's for failure paths only.
@@ -160,6 +191,16 @@ def _scan_lines(
 
     parser.EndElementHandler = end
     parser.StartElementHandler = start
+    if on_text is not None:
+        visit_text = on_text
+
+        def text(data: str) -> None:
+            if (
+                result := visit_text(data, parser.CurrentLineNumber, ancestors)
+            ) is not None:
+                raise _ScanResult(result)
+
+        parser.CharacterDataHandler = text
     try:
         parser.Parse(xml_data, True)
     except _ScanResult as found:
@@ -169,10 +210,17 @@ def _scan_lines(
     return None
 
 
+def _snippet(text: str) -> str:
+    """The start of ``text``, stray text, short enough for an error message."""
+    return text.strip(XML_SPACE).splitlines()[0][:40]
+
+
 def _to_batch(
     args: ChunkArgs, columns: dict[str, list], name: str, schema: pa.Schema
 ) -> pa.RecordBatch:
-    """Convert one table's column lists to a RecordBatch, naming the table and chunk when a value doesn't fit."""
+    """Convert one table's column lists to a RecordBatch, naming the table and chunk when a value doesn't fit.
+
+    ``parse_int`` already rejects out-of-range integers, which then fail their record, so this is only a fallback."""
     try:
         return pa.RecordBatch.from_pydict(columns, schema=schema)
     except (OverflowError, pa.ArrowInvalid) as exc:
@@ -192,8 +240,9 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
     """Parse one chunk of ``<root_tag>`` records into one serialized RecordBatch per table.
 
     Feeds the byte range from the decompressed XML to lxml's pull parser, wrapped in the ``<name>`` container so it is
-    a valid document, ``_FEED_BYTES`` at a time. With ``args.strict``, also returns the paths of the elements no parser
-    handled; the main process reports them once per run, so workers print nothing.
+    a valid document, ``_FEED_BYTES`` at a time. Fails on anything but records and whitespace directly in the
+    container. With ``args.strict``, also returns the paths of the elements, attributes and text no parser handled;
+    the main process reports them once per run, so workers print nothing.
     """
     entity = ENTITIES[args.entity]
     container = entity.name.encode()
@@ -207,21 +256,42 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
     }
     unknown: set[str] | None = set() if args.strict else None
 
-    def reject_namespaced(child: etree._Element) -> None:
+    def reject_stray(kind: str, value: str, near: etree._Element) -> NoReturn:
         # The tag filter below only matches records without a namespace (lxml names <artist xmlns="urn:x"> as
-        # "{urn:x}artist"), so any namespaced direct child of the container would be dropped silently. Its meaning
-        # can't be guessed, so fail instead.
-        if child.tag[:1] == "{":
-            # Direct children are checked in document order, so this is the first namespaced one.
-            line = _first_namespaced_child_line(_chunk_xml(args, header, footer))
-            where = (
-                f"near line {child.sourceline}" if line is None else f"on line {line}"
-            )
+        # "{urn:x}artist"), so any other direct child of the container, and any text between records, would be
+        # dropped silently. Its meaning can't be guessed, so fail instead. lxml found ``value``, an element's name or
+        # text, near ``near``; expat finds the chunk's first such content and its exact line.
+        where = f"near line {_line(near)}"
+        found = _first_stray(_chunk_xml(args, header, footer), entity.root_tag)
+        if found is not None:
+            kind, value, line = found
+            where = f"on line {line}"
+        prefix = (
+            f"Unsupported {entity.name} XML in {args.file_path}, chunk at bytes {args.start}-{args.end}"
+            f" (line numbers count from byte {args.start}): "
+        )
+        if kind == "text":
+            content = f"text {value!r}"
+        elif value[:1] == "{" and value.endswith("}" + entity.root_tag):
             raise ValueError(
-                f"Unsupported {entity.name} XML in {args.file_path}, chunk at bytes {args.start}-{args.end}"
-                f" (line numbers count from byte {args.start}): namespaced record element <{child.tag}>"
-                f" {where}; namespaces aren't supported"
+                f"{prefix}namespaced record element <{value}> {where}; namespaces aren't supported"
             )
+        else:
+            content = f"element <{value}>"
+        raise ValueError(
+            f"{prefix}{content} {where}; only <{entity.root_tag}> records may appear in <{entity.name}>"
+        )
+
+    def check_top_level(child: etree._Element) -> None:
+        if child.tag != entity.root_tag:
+            reject_stray("element", child.tag, child)
+        if (tail := child.tail) is not None and has_text(tail):
+            reject_stray("text", _snippet(tail), child)
+
+    def check_top_text(root: etree._Element) -> None:
+        # Text before the container's first child; the text after each child is that child's tail.
+        if (text := root.text) is not None and has_text(text):
+            reject_stray("text", _snippet(text), root[0] if len(root) else root)
 
     ordinal = 0
 
@@ -259,16 +329,23 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
             ordinal += 1
             # Standard lxml memory optimization for incremental parsing: free each element after processing to
             # prevent the entire tree from accumulating. Without this, a 256 MiB chunk would build a multi-GB tree.
-            elem.clear()
-            # Each child of the container before this record is checked and deleted here, in document order; those
-            # after the chunk's last record are checked once parsing ends. A nested element named like the container
-            # isn't the container, so its children aren't checked.
+            # Keeping the tail, the text up to the next record, lets the loop below check it: by this end event the
+            # parser has usually read it already, and clear() alone would delete it.
+            cast(_Clearable, elem).clear(keep_tail=True)
+            # Each child of the container before this record is checked and deleted here, in document order, with
+            # the text after it; those after the chunk's last record are checked once parsing ends. A nested element
+            # named like the container isn't the container, so its children aren't checked.
             top_level = parent.getparent() is None
+            if top_level:
+                check_top_text(parent)
             while elem.getprevious() is not None:
                 if top_level:
-                    reject_namespaced(parent[0])
+                    check_top_level(parent[0])
                 del parent[0]
 
+    # libxml2's error log is shared by every parser in the thread, and a syntax error copies it whole: cleared here,
+    # the copy holds only this chunk's errors.
+    etree.clear_error_log()
     # Comments and processing instructions aren't elements; kept, their callable .tag would reach the parsers'
     # unknown-element checks. The other options are lxml's hardening, passed explicitly because the defaults vary by
     # lxml version (6.0.x still resolves entities).
@@ -302,8 +379,9 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
         parser.feed(footer)
         root = parser.close()
         parse_records(parser)
+        check_top_text(root)
         for child in root:
-            reject_namespaced(child)
+            check_top_level(child)
     except etree.XMLSyntaxError as exc:
         # The slice that holds the malformed XML may also end records before it, whose events feed() queued before
         # raising. Handle them first, so the error reported is the first one in the document, whatever the slices.
@@ -311,7 +389,14 @@ def extract_chunk_to_ipc(args: ChunkArgs) -> ChunkResult:
         # XMLSyntaxError carries an error log that can't be pickled, so the main process would only report "cannot
         # pickle '_ListErrorLog'" and the real error would be lost (#60). Re-raise as a plain ValueError with the location.
         # Only parsing raises it; errors from append_record get their own context above.
-        detail = exc.msg
+        # exc.msg is the last error libxml2 logged, which can be a follow-on of the first, e.g. at the envelope's
+        # footer after an undeclared entity. The first fatal error is the cause. lxml leaves the column out when it's 0.
+        first = next(iter(exc.error_log.filter_from_fatals()), None)
+        if first is None:
+            detail = exc.msg
+        else:
+            column = f", column {first.column}" if first.column else ""
+            detail = f"{first.message}, line {first.line}{column}"
         raise ValueError(
             f"Malformed {entity.name} XML in {args.file_path}, chunk at bytes {args.start}-{args.end}"
             f" (line numbers count from byte {args.start}): {detail}"
