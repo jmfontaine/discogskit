@@ -305,6 +305,14 @@ class PostgreSQLWriter:
         unlogged: bool = False,
         write_workers: int = 1,
     ) -> None:
+        # Checked before connecting: an unusable value would otherwise fail only in setup(), after decompressing and
+        # splitting the dump, or be ignored.
+        if create_schema and not schema:
+            raise ValueError(
+                "create_schema requires schema (--pg-create-schema requires --pg-schema)."
+            )
+        if write_workers < 1:
+            raise ValueError(f"write_workers must be at least 1, got {write_workers}")
         self._fk = fk
         self._index_workers = index_workers
         self._overwrite = overwrite

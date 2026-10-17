@@ -203,13 +203,14 @@ class PipelineConfig:
     """Settings for one ``run()``: one dump of one entity.
 
     ``entity`` is a key of ``ENTITIES`` and must match the dump at ``gz_path`` (``detect_entity()`` reads it from a
-    Discogs dump file name). ``chunk_mb`` sets the rough size, in MiB, of the chunks the XML is split into, and
-    ``parse_workers`` the number of parse processes, at least 1. At most ``parse_workers + write_queue`` chunks are
-    being parsed or waiting to be written at once. ``keep_xml`` keeps the decompressed XML after a successful run.
-    ``profile`` fills ``PipelineResult.profile_data`` and prints per-chunk lines instead of a progress bar;
-    ``progress`` shows a progress bar when the console is a terminal. ``strict`` reports the XML elements, attributes
-    and text no parser handled and then fails the run with ``UnhandledElementsError``, before the writer's
-    ``finalize()``.
+    Discogs dump file name). ``chunk_mb`` sets the rough size, in MiB, of the chunks the XML is split into, at least 1,
+    and ``parse_workers`` the number of parse processes, at least 1. At most ``parse_workers + write_queue`` chunks are
+    being parsed or waiting to be written at once; ``write_queue`` is at least 0. ``run()`` raises ``ValueError`` for a
+    value out of these ranges before it decompresses the dump or touches the output. ``keep_xml`` keeps the
+    decompressed XML after a successful run. ``profile`` fills ``PipelineResult.profile_data`` and prints per-chunk
+    lines instead of a progress bar; ``progress`` shows a progress bar when the console is a terminal. ``strict``
+    reports the XML elements, attributes and text no parser handled and then fails the run with
+    ``UnhandledElementsError``, before the writer's ``finalize()``.
     """
 
     chunk_mb: int
@@ -808,11 +809,17 @@ def run(
 
 def _run(config: PipelineConfig, writer: Writer) -> PipelineResult:
     entity = ENTITIES[config.entity]
-    # Fail before touching the XML or the output: no worker would parse anything.
+    # Fail before touching the XML or the output. Without a parse worker no chunk would be parsed and the run would
+    # publish empty output, as it would with a negative write_queue that leaves no chunk in flight (parse_workers +
+    # write_queue < 1); a chunk_mb below 1 would only fail at the split, after decompressing.
     if config.parse_workers < 1:
         raise ValueError(
             f"parse_workers must be at least 1, got {config.parse_workers}"
         )
+    if config.write_queue < 0:
+        raise ValueError(f"write_queue must be at least 0, got {config.write_queue}")
+    if config.chunk_mb < 1:
+        raise ValueError(f"chunk_mb must be at least 1, got {config.chunk_mb}")
 
     gz_path = config.gz_path
     xml_path = gz_path.with_suffix("")
