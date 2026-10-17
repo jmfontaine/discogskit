@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import gzip
 import os
 import re
 import sys
@@ -11,6 +12,7 @@ from typing import NoReturn, cast
 
 import pyarrow as pa
 import pytest
+from rich.text import Text
 
 from discogskit._ipc import deserialize_batch
 from discogskit.entities import ENTITIES
@@ -47,14 +49,36 @@ def empty_ipc(entity: str) -> dict[str, pa.Buffer]:
     ).tables
 
 
+def parse_file(path: Path, entity: str) -> dict[str, pa.Buffer]:
+    """Parse the whole file at ``path`` as one ``entity`` chunk into an IPC dict."""
+    return extract_chunk_to_ipc(
+        ChunkArgs(
+            end=os.path.getsize(path), entity=entity, file_path=str(path), start=0
+        )
+    ).tables
+
+
 def parse_records(tmp_path: Path, entity: str, xml: str) -> dict[str, pa.Table]:
     """Parse raw ``entity`` records (no envelope) into Arrow Tables keyed by table name."""
     f = tmp_path / f"{entity}.xml"
     f.write_text(xml)
-    ipc_dict = extract_chunk_to_ipc(
-        ChunkArgs(end=os.path.getsize(f), entity=entity, file_path=str(f), start=0)
-    ).tables
-    return ipc_to_tables(ipc_dict, ENTITIES[entity].schemas)
+    return ipc_to_tables(parse_file(f, entity), ENTITIES[entity].schemas)
+
+
+def write_dump(
+    path: Path, entity: str, records: str | bytes, *, compresslevel: int = 9
+) -> Path:
+    """Write a gzipped ``entity`` dump to ``path``: the XML declaration, ``<entity>``, ``records``, ``</entity>``."""
+    with gzip.open(path, "wb", compresslevel=compresslevel) as f:
+        f.write(f"<?xml version='1.0' encoding='UTF-8'?>\n<{entity}>\n".encode())
+        f.write(records.encode() if isinstance(records, str) else records)
+        f.write(f"</{entity}>".encode())
+    return path
+
+
+def unstyle(output: str) -> str:
+    """Strip ANSI styling from CLI output (Typer colors its error panels when it detects CI)."""
+    return Text.from_ansi(output).plain
 
 
 def assert_second_copy_fails(
@@ -80,9 +104,7 @@ def assert_second_copy_fails(
         + re.escape(f"second <{tag}> in <{parent}>; discogskit reads only one")
         + " at chunk line 4$",
     ):
-        extract_chunk_to_ipc(
-            ChunkArgs(end=os.path.getsize(f), entity=entity, file_path=str(f), start=0)
-        )
+        parse_file(f, entity)
 
 
 # Root ignores directory permissions, and Windows doesn't apply POSIX modes to directories.
@@ -90,6 +112,13 @@ needs_permissions = pytest.mark.skipif(
     sys.platform == "win32" or os.geteuid() == 0,
     reason="needs directory permissions that apply to the test process",
 )
+
+
+def require_or_skip(reason: str, env: str = "DISCOGSKIT_REQUIRE_DOCKER") -> NoReturn:
+    """Skip the test, or fail it when ``env`` is ``1``, as CI sets it where the test must run."""
+    if os.environ.get(env) == "1":
+        pytest.fail(f"{reason}, but {env}=1 requires it")
+    pytest.skip(reason)
 
 
 def fail_after_first_move(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -392,22 +421,12 @@ def entity():
 
 @pytest.fixture()
 def ipc_dict(artists_xml_file):
-    size = os.path.getsize(artists_xml_file)
-    return extract_chunk_to_ipc(
-        ChunkArgs(end=size, entity="artists", file_path=str(artists_xml_file), start=0)
-    ).tables
+    return parse_file(artists_xml_file, "artists")
 
 
 # ------------------------------------------------------------------------------------------------------------------------
 # PostgreSQL testcontainer fixtures
 # ------------------------------------------------------------------------------------------------------------------------
-
-
-def _docker_unavailable(reason: str) -> NoReturn:
-    """Skip a PostgreSQL test, or fail it when ``DISCOGSKIT_REQUIRE_DOCKER=1`` (set in CI)."""
-    if os.environ.get("DISCOGSKIT_REQUIRE_DOCKER") == "1":
-        pytest.fail(f"{reason}, but DISCOGSKIT_REQUIRE_DOCKER=1 requires it")
-    pytest.skip(reason)
 
 
 @pytest.fixture(scope="session")
@@ -416,7 +435,7 @@ def pg_container():
     import subprocess
 
     if importlib.util.find_spec("testcontainers") is None:
-        _docker_unavailable("testcontainers not installed")
+        require_or_skip("testcontainers not installed")
 
     # Check Docker is available
     try:
@@ -431,7 +450,7 @@ def pg_container():
         subprocess.CalledProcessError,
         subprocess.TimeoutExpired,
     ):
-        _docker_unavailable("Docker not available")
+        require_or_skip("Docker not available")
 
     from testcontainers.postgres import PostgresContainer
 

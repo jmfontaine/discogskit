@@ -2,24 +2,20 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
-from discogskit.entities._def import ChunkArgs
-from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.entities.labels import SCHEMAS
-from tests.conftest import assert_second_copy_fails, ipc_to_tables, parse_records
+from tests.conftest import (
+    assert_second_copy_fails,
+    ipc_to_tables,
+    parse_file,
+    parse_records,
+)
 
 
 class TestLabelsParsing:
     def test_extract_chunk(self, labels_xml_file):
-        size = os.path.getsize(labels_xml_file)
-        ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=size, entity="labels", file_path=str(labels_xml_file), start=0
-            )
-        ).tables
+        ipc_dict = parse_file(labels_xml_file, "labels")
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         labels = tables["labels"]
@@ -36,12 +32,7 @@ class TestLabelsParsing:
         ]
 
     def test_sublabels(self, labels_xml_file):
-        size = os.path.getsize(labels_xml_file)
-        ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=size, entity="labels", file_path=str(labels_xml_file), start=0
-            )
-        ).tables
+        ipc_dict = parse_file(labels_xml_file, "labels")
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         subs = tables["label_sublabels"]
@@ -51,12 +42,7 @@ class TestLabelsParsing:
         assert subs.column("name").to_pylist() == ["Sub Label One", "Sub Label Two"]
 
     def test_schema_matches(self, labels_xml_file):
-        size = os.path.getsize(labels_xml_file)
-        ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=size, entity="labels", file_path=str(labels_xml_file), start=0
-            )
-        ).tables
+        ipc_dict = parse_file(labels_xml_file, "labels")
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         for name, table in tables.items():
@@ -76,11 +62,7 @@ class TestLabelsParsing:
             ValueError,
             match=r"^Invalid <label> record in .* at chunk line 2 .*: missing or empty id$",
         ):
-            extract_chunk_to_ipc(
-                ChunkArgs(
-                    end=os.path.getsize(f), entity="labels", file_path=str(f), start=0
-                )
-            )
+            parse_file(f, "labels")
 
 
 _LABEL = ("<label><id>7</id>", "</label>")

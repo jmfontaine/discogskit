@@ -36,15 +36,13 @@ from discogskit.pipeline import (
     _kind,
     _parse_worker,
 )
-from tests.conftest import ARTISTS_XML, LABELS_XML
+from tests.conftest import ARTISTS_XML, LABELS_XML, write_dump
 
 # ------------------------------------------------------------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------------------------------------------------------------
 
-_ARTISTS_GZ_XML = (
-    b"<?xml version='1.0' encoding='UTF-8'?>\n"
-    b"<artists>\n"
+_ARTISTS_RECORDS = (
     b"<artist>\n"
     b"  <id>1</id>\n"
     b"  <name>Test</name>\n"
@@ -55,35 +53,26 @@ _ARTISTS_GZ_XML = (
     b"  <name>Other</name>\n"
     b"  <data_quality>Correct</data_quality>\n"
     b"</artist>\n"
-    b"</artists>"
 )
 
 
 @pytest.fixture()
 def artists_gz(tmp_path):
     """Create a small artists .xml.gz file."""
-    gz_path = tmp_path / "artists.xml.gz"
-    with gzip.open(gz_path, "wb") as f:
-        f.write(_ARTISTS_GZ_XML)
-    return gz_path
+    return write_dump(tmp_path / "artists.xml.gz", "artists", _ARTISTS_RECORDS)
 
 
 @pytest.fixture()
 def duplicate_artists_gz(tmp_path):
     """Two <artist> elements with the same id, in the same chunk."""
-    xml = (
-        b"<?xml version='1.0' encoding='UTF-8'?>\n"
-        b"<artists>\n"
+    records = (
         b"<artist>\n  <id>1</id>\n  <name>Test</name>\n"
         b"  <data_quality>Correct</data_quality>\n</artist>\n"
         b"<artist>\n  <id>1</id>\n  <name>Duplicate</name>\n"
         b"  <data_quality>Correct</data_quality>\n</artist>\n"
-        b"</artists>"
     )
     gz_path = tmp_path / "artists.xml.gz"
-    with gzip.open(gz_path, "wb") as f:
-        f.write(xml)
-    return gz_path
+    return write_dump(gz_path, "artists", records)
 
 
 # Enough artists for several 1 MB chunks, so more chunks exist than can be in
@@ -106,10 +95,7 @@ def _many_artists_gz(gz_path, bad_id_at=None, bad_close_at=None, n=_MANY_ARTISTS
     )
     # 1 MB chunks: need more than _multi_chunk_config's 2 workers + write_queue 2.
     assert len(body) > 4 * 1024 * 1024
-    with gzip.open(gz_path, "wb", compresslevel=1) as f:
-        f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
-        f.write(body)
-        f.write(b"</artists>")
+    write_dump(gz_path, "artists", body, compresslevel=1)
     return gz_path
 
 
@@ -533,8 +519,7 @@ class TestPipelineRunInputValidation:
 
         empty_gz = tmp_path / "empty" / "artists.xml.gz"
         empty_gz.parent.mkdir()
-        with gzip.open(empty_gz, "wb") as f:
-            f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n</artists>")
+        write_dump(empty_gz, "artists", b"")
 
         with pytest.raises(ValueError, match="No <artist> elements found"):
             _run_and_close(
@@ -624,7 +609,9 @@ class TestPipelineRunXmlCleanup:
         with pytest.raises(error):
             _run_and_close(config, FailingWriter())
 
-        assert artists_gz.with_suffix("").read_bytes() == _ARTISTS_GZ_XML
+        assert artists_gz.with_suffix("").read_bytes() == gzip.decompress(
+            artists_gz.read_bytes()
+        )
 
 
 # ------------------------------------------------------------------------------------------------------------------------
@@ -859,16 +846,12 @@ class TestPipelineRun:
         from discogskit.entities import ENTITIES
         from discogskit.writers.postgresql import PostgreSQLWriter
 
-        labels_xml = (
-            b"<?xml version='1.0' encoding='UTF-8'?>\n"
-            b"<labels>\n"
+        labels_gz = write_dump(
+            tmp_path / "labels.xml.gz",
+            "labels",
             b"<label>\n  <id>100</id>\n  <name>Test Label</name>\n"
-            b"  <data_quality>Correct</data_quality>\n</label>\n"
-            b"</labels>"
+            b"  <data_quality>Correct</data_quality>\n</label>\n",
         )
-        labels_gz = tmp_path / "labels.xml.gz"
-        with gzip.open(labels_gz, "wb") as f:
-            f.write(labels_xml)
 
         writer = PostgreSQLWriter(pg_dsn, overwrite=True, write_workers=2)
         try:
@@ -921,10 +904,7 @@ class TestPipelineRun:
         try:
             for entity, records in (("artists", ARTISTS_XML), ("labels", LABELS_XML)):
                 gz_path = tmp_path / f"{entity}.xml.gz"
-                with gzip.open(gz_path, "wt", encoding="utf-8") as f:
-                    f.write(
-                        f"<?xml version='1.0' encoding='UTF-8'?>\n<{entity}>\n{records}</{entity}>"
-                    )
+                write_dump(gz_path, entity, records)
                 config = dataclasses.replace(
                     _single_chunk_config(gz_path), entity=entity
                 )
@@ -1016,15 +996,13 @@ class TestStrictReport:
 
         n = _MANY_ARTISTS
         gz_path = tmp_path / "artists.xml.gz"
-        with gzip.open(gz_path, "wb", compresslevel=1) as f:
-            f.write(b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n")
-            for i in range(1, n + 1):
-                rare = b"<rare_tag/>" if i % 10_000 == 0 else b""
-                f.write(
-                    b"<artist>\n  <id>%d</id>\n  <name>Artist %d</name>\n"
-                    b"  <new_tag/>%s\n</artist>\n" % (i, i, rare)
-                )
-            f.write(b"</artists>")
+        records = b"".join(
+            b"<artist>\n  <id>%d</id>\n  <name>Artist %d</name>\n"
+            b"  <new_tag/>%s\n</artist>\n"
+            % (i, i, b"<rare_tag/>" if i % 10_000 == 0 else b"")
+            for i in range(1, n + 1)
+        )
+        write_dump(gz_path, "artists", records, compresslevel=1)
         config = dataclasses.replace(_multi_chunk_config(gz_path), strict=True)
         assert config.parse_workers >= 2
 
@@ -1052,11 +1030,7 @@ class TestStrictReport:
         from discogskit.writers.jsonl import JSONLWriter
 
         gz_path = tmp_path / "artists.xml.gz"
-        with gzip.open(gz_path, "wb") as f:
-            f.write(
-                b"<?xml version='1.0' encoding='UTF-8'?>\n<artists>\n"
-                b"<artist><id>1</id><new_tag/></artist>\n</artists>"
-            )
+        write_dump(gz_path, "artists", b"<artist><id>1</id><new_tag/></artist>\n")
         config = dataclasses.replace(_single_chunk_config(gz_path), strict=True)
 
         with pytest.raises(

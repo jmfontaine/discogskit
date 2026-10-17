@@ -9,17 +9,17 @@ import pytest
 from discogskit.entities._def import ChunkArgs
 from discogskit.entities._worker import extract_chunk_to_ipc
 from discogskit.entities.artists import SCHEMAS
-from tests.conftest import assert_second_copy_fails, ipc_to_tables, parse_records
+from tests.conftest import (
+    assert_second_copy_fails,
+    ipc_to_tables,
+    parse_file,
+    parse_records,
+)
 
 
 class TestArtistsParsing:
     def test_extract_chunk(self, artists_xml_file):
-        size = os.path.getsize(artists_xml_file)
-        ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=size, entity="artists", file_path=str(artists_xml_file), start=0
-            )
-        ).tables
+        ipc_dict = parse_file(artists_xml_file, "artists")
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         # 2 artists
@@ -34,12 +34,7 @@ class TestArtistsParsing:
         assert artists.column("urls").to_pylist() == [["https://example.com"], None]
 
     def test_aliases(self, artists_xml_file):
-        size = os.path.getsize(artists_xml_file)
-        ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=size, entity="artists", file_path=str(artists_xml_file), start=0
-            )
-        ).tables
+        ipc_dict = parse_file(artists_xml_file, "artists")
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         aliases = tables["artist_aliases"]
@@ -49,12 +44,7 @@ class TestArtistsParsing:
         assert aliases.column("name").to_pylist() == ["Alias One"]
 
     def test_groups(self, artists_xml_file):
-        size = os.path.getsize(artists_xml_file)
-        ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=size, entity="artists", file_path=str(artists_xml_file), start=0
-            )
-        ).tables
+        ipc_dict = parse_file(artists_xml_file, "artists")
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         groups = tables["artist_groups"]
@@ -63,12 +53,7 @@ class TestArtistsParsing:
         assert groups.column("group_id").to_pylist() == [20]
 
     def test_members(self, artists_xml_file):
-        size = os.path.getsize(artists_xml_file)
-        ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=size, entity="artists", file_path=str(artists_xml_file), start=0
-            )
-        ).tables
+        ipc_dict = parse_file(artists_xml_file, "artists")
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         members = tables["artist_members"]
@@ -77,12 +62,7 @@ class TestArtistsParsing:
         assert members.column("member_id").to_pylist() == [30, 31]
 
     def test_schema_matches(self, artists_xml_file):
-        size = os.path.getsize(artists_xml_file)
-        ipc_dict = extract_chunk_to_ipc(
-            ChunkArgs(
-                end=size, entity="artists", file_path=str(artists_xml_file), start=0
-            )
-        ).tables
+        ipc_dict = parse_file(artists_xml_file, "artists")
         tables = ipc_to_tables(ipc_dict, SCHEMAS)
 
         for name, table in tables.items():
@@ -102,11 +82,7 @@ class TestArtistsParsing:
             ValueError,
             match=r"^Invalid <artist> record in .* at chunk line 2 .*: missing or empty id$",
         ):
-            extract_chunk_to_ipc(
-                ChunkArgs(
-                    end=os.path.getsize(f), entity="artists", file_path=str(f), start=0
-                )
-            )
+            parse_file(f, "artists")
 
     def test_strict_ignores_comments_and_pis(self, tmp_path):
         """Comments and processing instructions inside a record aren't elements: strict mode reports only the unknown
