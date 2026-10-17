@@ -186,11 +186,12 @@ class TestMasterVideoTypedValues:
     def test_embed(self, tmp_path, attr, expected):
         assert self._video(tmp_path, attr)["embed"] is expected
 
-    @pytest.mark.parametrize("value", ["abc", "", "1.5"])
+    @pytest.mark.parametrize("value", ["abc", "", "1.5", " 5", "+5"])
     def test_invalid_duration_fails(self, tmp_path, value):
         with pytest.raises(
             ValueError,
-            match=rf"^Invalid <master> record .*: invalid literal for int\(\) with base 10: {re.escape(repr(value))}$",
+            match=rf"^Invalid <master> record .*: invalid duration {re.escape(repr(value))}, expected an integer from"
+            r" -2147483648 to 2147483647$",
         ):
             self._video(tmp_path, f' duration="{value}"')
 

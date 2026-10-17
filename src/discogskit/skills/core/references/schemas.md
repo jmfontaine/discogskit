@@ -211,8 +211,8 @@ Every other table links each row to its record through `release_id` (= `releases
 | `release_id` | `int32` | `INTEGER` | `INTEGER` | no |
 | `company_id` | `int32` | `INTEGER` | `INTEGER` | yes |
 | `catno` | `string` | `TEXT` | `TEXT` | yes |
-| `entity_type_name` | `string` | `TEXT` | `TEXT` | yes |
 | `entity_type` | `string` | `TEXT` | `TEXT` | yes |
+| `entity_type_name` | `string` | `TEXT` | `TEXT` | yes |
 | `name` | `string` | `TEXT` | `TEXT` | yes |
 
 ### release_tracks

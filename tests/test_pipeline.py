@@ -31,6 +31,7 @@ from discogskit.pipeline import (
     _DuplicateIdTracker,
     _ElapsedEstTotalColumn,
     _fmt_time,
+    _kind,
     _parse_worker,
 )
 from tests.conftest import ARTISTS_XML, LABELS_XML
@@ -759,7 +760,7 @@ class TestPipelineRun:
         gz_path = _many_artists_gz(tmp_path / "artists.xml.gz", bad_id_at=_MANY_ARTISTS)
         writer = SlowTrackingWriter()
 
-        with pytest.raises(ValueError, match="invalid literal for int"):
+        with pytest.raises(ValueError, match="invalid id .*, expected an integer"):
             try:
                 _run_or_fail_on_hang(_multi_chunk_config(gz_path), writer)
             finally:
@@ -996,7 +997,7 @@ class TestStrictReport:
         assert info.value.entity == "artists"
         assert info.value.paths == ["new_tag", "rare_tag"]
         assert str(info.value) == (
-            "--strict: 2 unhandled XML element paths in <artist>; see the Strict lines above"
+            "--strict: 2 unhandled XML paths in <artist>; see the Strict lines above"
         )
         assert not (tmp_path / "out" / "artists").exists()
         out, err = capfd.readouterr()
@@ -1023,9 +1024,24 @@ class TestStrictReport:
 
         with pytest.raises(
             UnhandledElementsError,
-            match=r"^--strict: 1 unhandled XML element path in <artist>; ",
+            match=r"^--strict: 1 unhandled XML path in <artist>; ",
         ):
             _run_and_close(config, JSONLWriter(str(tmp_path / "out")))
+
+    @pytest.mark.parametrize(
+        ("path", "kind"),
+        [
+            ("videos/video/foo", "element"),
+            ("@foo", "attribute"),
+            ("videos/video/@foo", "attribute"),
+            ("urls/text()", "text"),
+            # A namespace URI can hold "/" and "@".
+            ("@{http://www.w3.org/XML/1998/namespace}lang", "attribute"),
+            ("urls/{http://example.com/a@b}url", "element"),
+        ],
+    )
+    def test_strict_line_names_what_the_path_is(self, path, kind):
+        assert _kind(path) == kind
 
 
 class TestPipelineRunParseWorkers:
