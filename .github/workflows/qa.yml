@@ -26,6 +26,9 @@ permissions:
 #
 # Every job sets UV_PYTHON: uv otherwise takes the version from the tracked .python-version, which
 # outranks any interpreter a job installs.
+#
+# Every setup-uv step pins uv's version, which otherwise is the latest uv at run time. Bump it
+# deliberately, in every workflow at once.
 
 jobs:
   lint:
@@ -38,6 +41,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.1"
 
       - name: Set up Python
         run: uv python install "$UV_PYTHON"
@@ -71,6 +76,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.1"
 
       - name: Set up Python
         run: uv python install "$UV_PYTHON"
@@ -96,6 +103,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.1"
 
       - name: Set up Python
         run: uv python install "$UV_PYTHON"
@@ -126,6 +135,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.1"
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install "$UV_PYTHON"
