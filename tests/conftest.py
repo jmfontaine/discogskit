@@ -77,8 +77,11 @@ def write_dump(
 
 
 def unstyle(output: str) -> str:
-    """Strip ANSI styling from CLI output (Typer colors its error panels when it detects CI)."""
-    return Text.from_ansi(output).plain
+    """Strip ANSI styling from CLI output (Typer colors its error panels when it detects CI).
+
+    Decodes line by line because ``Text.from_ansi`` drops a final newline before rich 15.
+    """
+    return "\n".join(Text.from_ansi(line).plain for line in output.split("\n"))
 
 
 def assert_second_copy_fails(
