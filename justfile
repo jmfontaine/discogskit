@@ -245,7 +245,7 @@ release-prepare *args: _require-main
     fi
     "{{ just_executable() }}" --justfile "{{ justfile() }}" --working-directory "$PWD" _version-pr \
         "chore/release-v$release" "$release" \
-        "chore(release): v$release" \
+        "chore: release v$release" \
         "Sets the release version. Merging this pull request is the go/no-go point for v$release: then run \`just release\` on an up-to-date main to tag it." \
         "$dry_run"
 
