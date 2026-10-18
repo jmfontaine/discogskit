@@ -89,3 +89,14 @@ Before finishing a change, run `just format && just lint-fix && just type-check 
 - **Alphabetical ordering** for: class attributes, CLI options, database columns, dict keys, enum members, function definitions in a class, imports, just recipes, keyword arguments. Exception: `id` always comes first in DB tables.
 - **No `# type: ignore`** — Use `cast()`, `TypeGuard`, or `Protocol` instead.
 - **Comment tags**: `TODO` (planned work), `FIXME` (known bug), `HACK` (temporary workaround), `KLUDGE` (intentional deviation with documented reason — not temporary, include why and a reference).
+
+## Shared workflow
+
+This repository follows the shared workflow: the `github-workflow` skill's repository
+setup describes its GitHub settings, rulesets, labels and templates. Those settings are
+managed as code outside this repository; change them there, never with `gh api` or the
+GitHub web UI.
+
+### Deviations from the shared workflow
+
+None.
