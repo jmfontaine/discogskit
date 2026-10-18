@@ -473,7 +473,7 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=23.0.1" },
     { name = "rapidgzip", specifier = ">=0.16.0" },
     { name = "rich", specifier = ">=14.3.3" },
-    { name = "typer", specifier = ">=0.24.1" },
+    { name = "typer", specifier = ">=0.26.1" },
 ]
 
 [package.metadata.requires-dev]

@@ -1,7 +1,10 @@
 version: 2
 updates:
-  - package-ecosystem: "pip"
+  - package-ecosystem: "uv"
     directory: "/"
+    # Update uv.lock only, never the requirements in pyproject.toml: those are
+    # the floors the published package declares, and they move by hand.
+    versioning-strategy: "lockfile-only"
     schedule:
       interval: "weekly"
       day: "monday"

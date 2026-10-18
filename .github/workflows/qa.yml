@@ -148,3 +148,33 @@ jobs:
 
       - name: Run tests
         run: uv run pytest --cov -rs
+
+  # The oldest dependency versions pyproject.toml allows, on the oldest Python. Dependabot moves only uv.lock, so
+  # without this job nothing tests the minimums the published package declares. Deprecations are fatal here, so an old
+  # dependency calling a deprecated API fails now rather than when that API is removed.
+  test-lowest:
+    name: Test (lowest dependencies)
+    runs-on: ubuntu-latest
+    env:
+      DISCOGSKIT_REQUIRE_DOCKER: "1"
+      DISCOGSKIT_REQUIRE_GNU_TIME: "1"
+      UV_PYTHON: "3.10"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.1"
+
+      - name: Set up Python
+        run: uv python install "$UV_PYTHON"
+
+      # --isolated installs into a throwaway environment, resolved afresh rather than from uv.lock. The skill reference
+      # check is left out: references/commands.md is generated from the help text of the locked Typer, which older Typer
+      # versions format differently.
+      - name: Run tests
+        run: >-
+          uv run --isolated --resolution lowest-direct
+          pytest -rs -W error::DeprecationWarning -W error::PendingDeprecationWarning
+          --deselect tests/test_skills.py::test_generated_reference_is_current
