@@ -9,7 +9,7 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from functools import partial
 
@@ -33,7 +33,7 @@ def find_splits(request, monkeypatch):
 
 
 @contextmanager
-def _time_limit(seconds: float, what: str) -> Iterator[None]:
+def _time_limit(seconds: float, what: str) -> Generator[None, None, None]:
     """Fail the test when the block runs longer than ``seconds``. The regex engine checks for signals while it
     matches, so a regex that backtracks too much fails here instead of hanging."""
 
