@@ -39,7 +39,7 @@ from discogskit._console import status
 from discogskit.writers import OutputExistsError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Generator
 
     from discogskit.entities import EntityDef
 
@@ -122,7 +122,9 @@ def _references_into(conn: sqlite3.Connection, tables: list[str]) -> list[str]:
 
 
 @contextmanager
-def _interruptible(conn: sqlite3.Connection) -> Iterator[Callable[[], None]]:
+def _interruptible(
+    conn: sqlite3.Connection,
+) -> Generator[Callable[[], None], None, None]:
     """On the main thread, make Ctrl+C stop the statement running on ``conn`` and raise ``KeyboardInterrupt``.
 
     ``sqlite3`` runs a statement with the GIL released, and Python runs a signal handler only between bytecodes on the
