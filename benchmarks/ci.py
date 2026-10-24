@@ -26,7 +26,7 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated
@@ -351,7 +351,7 @@ def main(
                     )
                     runs.setdefault(key, []).append(run)
         results = {
-            "created": datetime.now(timezone.utc).isoformat(),
+            "created": datetime.now(UTC).isoformat(),
             "environment": _environment(names, dsn),
             "repeats": repeats,
             "results": [

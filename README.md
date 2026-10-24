@@ -14,7 +14,7 @@ and PostgreSQL.
 
 ## Installation
 
-Requires Python 3.10+. Tested on Linux and macOS; Windows support is untested.
+Requires Python 3.11+. Tested on Linux and macOS; Windows support is untested.
 
 ```bash
 pipx install discogskit

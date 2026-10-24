@@ -82,7 +82,7 @@ Before finishing a change, run `just format && just lint-fix && just type-check 
 
 ## Conventions
 
-- Python 3.10+ (developed on 3.13)
+- Python 3.11+ (developed on 3.13)
 - Type annotations throughout; `py.typed` marker for PEP 561
 - `ty` is the primary type checker; `pyright` is used only for `--verifytypes`
 - `rapidgzip` has no type stubs — it's in `allowed-unresolved-imports`

@@ -14,7 +14,7 @@ import json
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from html.parser import HTMLParser
 from http.client import HTTPResponse
 from pathlib import Path
@@ -116,7 +116,7 @@ def _listing(year: int) -> dict[str, dict[str, str]]:
 def resolve(date: str, entities: list[str]) -> tuple[str, dict[str, str]]:
     """Return the dump date and each entity's download key; ``latest`` is the newest dump listing every entity."""
     if date == "latest":
-        year = datetime.now(timezone.utc).year
+        year = datetime.now(UTC).year
         # Early in January, the newest dump is still the previous year's December one.
         for candidate in (year, year - 1):
             dumps = _listing(candidate)
@@ -130,7 +130,7 @@ def resolve(date: str, entities: list[str]) -> tuple[str, dict[str, str]]:
         # The length check rejects unpadded fields such as 2026101, which strptime accepts.
         if len(date) != 8:
             raise ValueError(date)
-        year = datetime.strptime(date, "%Y%m%d").replace(tzinfo=timezone.utc).year
+        year = datetime.strptime(date, "%Y%m%d").replace(tzinfo=UTC).year
     except ValueError:
         raise SubsetError(
             f"invalid dump date {date!r}: expected YYYYMMDD or 'latest'"
