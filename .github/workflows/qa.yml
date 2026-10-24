@@ -125,7 +125,9 @@ jobs:
       fail-fast: false
       matrix:
         os: ${{ inputs.macos && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        # TODO: 3.15 builds rapidgzip and adbc-driver-manager from source until they publish cp315 wheels
+        # (mxmlnkn/rapidgzip#72, apache/arrow-adbc#4856), so it is not a required check yet (#266).
+        python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
     # macOS runners have no Docker or GNU time, so only Ubuntu jobs fail when the PostgreSQL or GNU time tests can't
     # run.
     env:
