@@ -13,7 +13,7 @@ import sys
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -464,7 +464,7 @@ def _save_results(
     """Save benchmark results as JSON and return the file path."""
     results_dir.mkdir(exist_ok=True, parents=True)
 
-    timestamp = datetime.now(timezone.utc)
+    timestamp = datetime.now(UTC)
     file_stem = input_path.stem.replace(".xml", "")
     filename = f"{timestamp.strftime('%Y%m%d_%H%M%S')}_{file_stem}.json"
     output_path = results_dir / filename
