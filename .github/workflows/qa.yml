@@ -21,7 +21,8 @@ on:
 permissions:
   contents: read
 
-# Linux job names must stay as they are: the main ruleset requires them by name.
+# Only the `CI passed` job is a required check, and it needs every other job, so jobs can be added, renamed or resized
+# without touching the ruleset. Keep its `needs` in step with the jobs.
 # Naming a job after matrix values also stops GitHub appending "(ubuntu-latest)".
 #
 # Every job sets UV_PYTHON: uv otherwise takes the version from the tracked .python-version, which
@@ -126,7 +127,7 @@ jobs:
       matrix:
         os: ${{ inputs.macos && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
         # TODO: 3.15 builds rapidgzip and adbc-driver-manager from source until they publish cp315 wheels
-        # (mxmlnkn/rapidgzip#72, apache/arrow-adbc#4856), so it is not a required check yet (#266).
+        # (mxmlnkn/rapidgzip#72, apache/arrow-adbc#4856).
         python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
     # macOS runners have no Docker or GNU time, so only Ubuntu jobs fail when the PostgreSQL or GNU time tests can't
     # run.
@@ -180,3 +181,13 @@ jobs:
           uv run --isolated --resolution lowest-direct
           pytest -rs -W error::DeprecationWarning -W error::PendingDeprecationWarning
           --deselect tests/test_skills.py::test_generated_reference_is_current
+
+  ci-passed:
+    name: CI passed
+    needs: [dead-code, lint, test, test-lowest, typecheck]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail unless every job passed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
