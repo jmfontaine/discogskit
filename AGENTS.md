@@ -73,6 +73,8 @@ A new entity module also needs its `ENTITY` added to the tuple in `entities/__in
 
 Before finishing a change, run `just format && just lint-fix && just type-check && just test-unit`. Pre-commit hooks run the same checks plus dead-code detection and deptry.
 
+`CI passed`, the `ci-passed` job in `.github/workflows/qa.yml`, is the only required status check. It needs every other job in that workflow, so a job added there must be added to its `needs`; no ruleset change is required.
+
 ## Design principles
 
 - **Never assume anything about Discogs data; always confirm** — The dumps are inconsistent in many surprising ways. Don't rely on any property of their content or formatting (line breaks, indentation, nesting, comments/CDATA, encoding, which fields are present, value types, unique IDs) unless it's confirmed against real dumps, and even then handle the other cases or fail loudly. Fixtures and generated samples only show which cases the code supports; they never confirm what real dumps contain. Mark an unconfirmed claim as an assumption; never base a design on one.
