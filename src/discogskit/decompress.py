@@ -11,12 +11,12 @@ output: decompression writes ``<name>.xml.partial`` and renames it into place
 once every byte is on disk.
 
 rapidgzip runs in a child process, which writes ``.partial`` and reports
-success or the exception that stopped it.  On some truncated input rapidgzip
-aborts the process or hangs, in native code: the parent raises
-``DecompressError`` when the child dies or exits non-zero, even after
-reporting success, or goes ``_STALL_TIMEOUT`` without reading a chunk, as it
-does for rapidgzip's exceptions.  The parent kills the child on every way
-out, Ctrl+C included.
+success or the exception that stopped it.  rapidgzip's native code can abort
+the process (0.16.0 did on some truncated input) or hang (it still does on
+some): the parent raises ``DecompressError`` when the child dies or exits
+non-zero, even after reporting success, or goes ``_STALL_TIMEOUT`` without
+reading a chunk, as it does for rapidgzip's exceptions.  The parent kills the
+child on every way out, Ctrl+C included.
 If the parent dies, the child stops before it starts writing or after its
 next chunk, so not while rapidgzip hangs.
 The child's stderr, where rapidgzip's native code prints, goes to a temporary
@@ -400,11 +400,12 @@ def _supervise_decompress_child(
 ) -> None:
     """Run ``_decompress_child`` in a new process, its stderr going to ``stderr_path``; raise what it reports.
 
-    On some truncated input, rapidgzip aborts the process or hangs, in native
-    code Python can't catch or interrupt.  In a child, an abort is the child
-    dying without a report, and a hang is the child going ``_STALL_TIMEOUT``
-    without reading a chunk: both raise ``DecompressError``, the child having
-    been killed, as on every other way out of here.
+    rapidgzip's native code can abort the process (0.16.0 did on some truncated
+    input) or hang (it still does on some), and Python can't catch or interrupt
+    either.  In a child, an abort is the child dying without a report, and a
+    hang is the child going ``_STALL_TIMEOUT`` without reading a chunk: both
+    raise ``DecompressError``, the child having been killed, as on every other
+    way out of here.
     """
     # Spawn, like the parse workers: forking a process that runs threads (the
     # writer, a library caller's) can copy a lock another thread holds.
