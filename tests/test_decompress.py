@@ -33,10 +33,11 @@ _HEADER_ZERO_EXTRA = bytes.fromhex("1f8b0804000000000000") + b"\x08\x00" + bytes
 # A gzip member header cut inside its file name ("test.xml").
 _HEADER_NAME_CUT = bytes.fromhex("1f8b0808000000000003") + b"test.x"
 
-# Where to cut _labels_gz() so rapidgzip 0.16.0's Linux wheels (ISA-L) abort
-# the interpreter: "The bit buffer should not contain more data than have been
-# read from the file!".  Its macOS wheels raise an exception instead.
-_ABORTING_CUTS = (88_082, 198_185, 616_578)
+# Where to cut _labels_gz() so rapidgzip's Linux wheels (ISA-L) fail mid-stream.
+# 0.16.0's aborted the interpreter: "The bit buffer should not contain more data
+# than have been read from the file!".  0.16.1's raise RuntimeError, as its macOS
+# wheels do.
+_ISAL_FAILING_CUTS = (88_082, 198_185, 616_578)
 
 
 @functools.cache
@@ -128,7 +129,7 @@ class _CompleteGzipReader(io.BytesIO):
 
 
 class _AbortingReader(_CompleteGzipReader):
-    """Aborts the process, as rapidgzip does on some truncated input."""
+    """Aborts the process, as rapidgzip 0.16.0 did on some truncated input."""
 
     def read(self, size=-1):
         os.abort()
@@ -521,6 +522,20 @@ class TestPartialFile:
         assert not xml_path.exists()
         assert not (tmp_path / "test.xml.partial").exists()
 
+    @pytest.mark.parametrize("cut", _ISAL_FAILING_CUTS)
+    def test_truncated_isal_cut_raises_decompress_error(self, tmp_path, cut):
+        gz_path = tmp_path / "test.xml.gz"
+        gz_path.write_bytes(_labels_gz()[:cut])
+        xml_path = tmp_path / "test.xml"
+
+        with pytest.raises(
+            DecompressError, match=r"truncated, corrupt, or not a gzip file"
+        ):
+            ensure_xml(gz_path, xml_path, workers=1)
+
+        assert not xml_path.exists()
+        assert not (tmp_path / "test.xml.partial").exists()
+
     @pytest.mark.parametrize(
         "cut",
         [
@@ -785,20 +800,6 @@ class TestNativeFailures:
         assert "exited with status 1 after reporting success" in str(
             excinfo.value.__cause__
         )
-        assert not xml_path.exists()
-        assert not (tmp_path / "test.xml.partial").exists()
-
-    @pytest.mark.parametrize("cut", _ABORTING_CUTS)
-    def test_rapidgzip_abort_raises_decompress_error(self, tmp_path, cut):
-        gz_path = tmp_path / "test.xml.gz"
-        gz_path.write_bytes(_labels_gz()[:cut])
-        xml_path = tmp_path / "test.xml"
-
-        with pytest.raises(
-            DecompressError, match=r"truncated, corrupt, or not a gzip file"
-        ):
-            ensure_xml(gz_path, xml_path, workers=1)
-
         assert not xml_path.exists()
         assert not (tmp_path / "test.xml.partial").exists()
 
