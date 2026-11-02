@@ -37,14 +37,11 @@ import gzip
 import io
 import json
 import time
-from contextlib import suppress
-from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
 from discogskit._console import status
-from discogskit.writers import OutputExistsError
 from discogskit.writers._compression import check_compression, check_compression_level
-from discogskit.writers._staging import StagedFiles, check_output_dir
+from discogskit.writers._files import _FileWriter
 
 if TYPE_CHECKING:
     import os
@@ -71,8 +68,10 @@ _LEVEL_RANGES = {"bzip2": (1, 9), "gzip": (0, 9)}
 _DEFAULT_CODEC_LEVEL_ERROR = "JSONL output is uncompressed by default; --compression-level needs --compression gzip or bzip2."
 
 
-class JSONLWriter:
+class JSONLWriter(_FileWriter):
     """Writer implementation that produces one .jsonl file per table."""
+
+    _output_exts = _EXTENSIONS
 
     def __init__(
         self,
@@ -91,50 +90,21 @@ class JSONLWriter:
             _LEVEL_RANGES.get(codec),
             no_level_error=_DEFAULT_CODEC_LEVEL_ERROR if compression is None else None,
         )
-        self._output_dir = Path(output_dir)
+        super().__init__(
+            output_dir, _COMPRESSED_EXT.get(codec, ".jsonl"), overwrite=overwrite
+        )
         self._compression = codec
         self._compression_level = compression_level
-        self._overwrite = overwrite
         self._files: dict[str, IO] = {}
         # The files under the gzip streams in _files, which don't close them.
         self._raw_files: list[IO[bytes]] = []
-        self._staged: StagedFiles | None = None
-
-    def cancel(self) -> None:
-        """Do nothing: a local file write can't stall the way a database server can."""
-
-    def check(self, entity: EntityDef) -> None:
-        """Raise ``OutputExistsError`` if ``entity``'s directory holds JSONL files of any codec and overwrite is off, or
-        ``OSError`` if the output directory can't take the files.
-        """
-        # First, so an entity directory that can't be listed either fails with the probe's error.
-        check_output_dir(self._output_dir, entity.name)
-        entity_dir = self._output_dir / entity.name
-
-        if not self._overwrite and entity_dir.exists():
-            existing = [
-                f.name for f in entity_dir.iterdir() if f.name.endswith(_EXTENSIONS)
-            ]
-            if existing:
-                raise OutputExistsError(
-                    f"Output files already exist in {entity_dir} "
-                    f"(e.g. {existing[0]}). Use --overwrite to replace them."
-                )
 
     def setup(self, entity: EntityDef) -> None:
-        # Checked again here: output can appear after the caller's own check().
-        self.check(entity)
-        ext = _COMPRESSED_EXT.get(self._compression, ".jsonl")
-
-        self._staged = StagedFiles(
-            self._output_dir,
-            entity.name,
-            [f"{table_name}{ext}" for table_name in entity.table_order],
-        )
+        staged = self._stage(entity)
 
         t0 = time.perf_counter()
         for table_name in entity.table_order:
-            path = self._staged.path(f"{table_name}{ext}")
+            path = staged.path(f"{table_name}{self._ext}")
             # File lifetime is managed by finalize()/close(), not a with-block. newline="\n": no "\r\n" on Windows.
             if self._compression == "gzip":
                 level = (
@@ -194,54 +164,11 @@ class JSONLWriter:
             timings[table_name] = time.perf_counter() - t0
         return timings
 
-    def finalize(self, entity: EntityDef) -> None:
-        assert self._staged is not None, "finalize() called before setup()"
-        n_files = len(self._files)
+    def _close_handles(self, *, ignore_errors: bool) -> None:
         for f in self._files.values():
-            f.close()
+            self._close(f, ignore_errors=ignore_errors)
         self._files.clear()
         # After the gzip streams above, whose close() writes their trailers here but leaves these open.
         for raw in self._raw_files:
-            raw.close()
+            self._close(raw, ignore_errors=ignore_errors)
         self._raw_files.clear()
-        total_bytes = self._staged.commit()
-        entity_dir = self._staged.final_dir
-        self._staged = None
-        if self._overwrite:
-            _remove_other_codecs(
-                entity_dir, entity, _COMPRESSED_EXT.get(self._compression, ".jsonl")
-            )
-        total_mib = total_bytes / 2**20
-        status("Output", f"{n_files} files, {total_mib:,.1f} MiB total")
-
-    def close(self) -> None:
-        """Release file handles; output not committed by ``finalize()`` is deleted, unless a failed commit kept it."""
-        for f in [*self._files.values(), *self._raw_files]:
-            # The file is discarded below, so a failing flush doesn't matter and
-            # must not replace the error that aborted the run.
-            with suppress(Exception):
-                f.close()
-        self._files.clear()
-        self._raw_files.clear()
-        if self._staged is not None:
-            self._staged.discard()
-            self._staged = None
-
-
-def _remove_other_codecs(entity_dir: Path, entity: EntityDef, ext: str) -> None:
-    """Delete ``entity``'s table files in ``entity_dir`` whose JSONL extension isn't ``ext``.
-
-    Only names made of a table name and a JSONL extension: every other file stays.
-    """
-    for other in _EXTENSIONS:
-        if other == ext:
-            continue
-        for table_name in entity.table_order:
-            path = entity_dir / f"{table_name}{other}"
-            try:
-                path.unlink(missing_ok=True)
-            except OSError as exc:
-                raise OSError(
-                    f"The new output is in {entity_dir}, but removing {path.name}, earlier output in another "
-                    f"compression, failed: {exc.strerror or exc}. Delete it before reading the directory."
-                ) from exc

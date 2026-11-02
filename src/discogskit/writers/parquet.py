@@ -7,17 +7,14 @@ Each chunk becomes a row group. Files are staged and only moved to their final n
 from __future__ import annotations
 
 import time
-from contextlib import suppress
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from discogskit._console import status
-from discogskit.writers import OutputExistsError
 from discogskit.writers._compression import check_compression, check_compression_level
-from discogskit.writers._staging import StagedFiles, check_output_dir
+from discogskit.writers._files import _FileWriter
 
 if TYPE_CHECKING:
     import os
@@ -42,8 +39,10 @@ def _level_range(compression: str) -> tuple[int, int] | None:
     )
 
 
-class ParquetWriter:
+class ParquetWriter(_FileWriter):
     """Writer implementation that produces one .parquet file per table."""
+
+    _output_exts = (".parquet",)
 
     def __init__(
         self,
@@ -59,45 +58,17 @@ class ParquetWriter:
         check_compression_level(
             compression, compression_level, _level_range(compression)
         )
-        self._output_dir = Path(output_dir)
+        super().__init__(output_dir, ".parquet", overwrite=overwrite)
         self._compression = compression
         self._compression_level = compression_level
-        self._overwrite = overwrite
-        self._staged: StagedFiles | None = None
         self._writers: dict[str, pq.ParquetWriter] = {}
 
-    def cancel(self) -> None:
-        """Do nothing: a local file write can't stall the way a database server can."""
-
-    def check(self, entity: EntityDef) -> None:
-        """Raise ``OutputExistsError`` if ``entity``'s directory holds Parquet files and overwrite is off, or
-        ``OSError`` if the output directory can't take the files.
-        """
-        # First, so an entity directory that can't be listed either fails with the probe's error.
-        check_output_dir(self._output_dir, entity.name)
-        entity_dir = self._output_dir / entity.name
-
-        if not self._overwrite and entity_dir.exists():
-            existing = [f.name for f in entity_dir.iterdir() if f.suffix == ".parquet"]
-            if existing:
-                raise OutputExistsError(
-                    f"Output files already exist in {entity_dir} "
-                    f"(e.g. {existing[0]}). Use --overwrite to replace them."
-                )
-
     def setup(self, entity: EntityDef) -> None:
-        # Checked again here: output can appear after the caller's own check().
-        self.check(entity)
-
-        self._staged = StagedFiles(
-            self._output_dir,
-            entity.name,
-            [f"{table_name}.parquet" for table_name in entity.table_order],
-        )
+        staged = self._stage(entity)
 
         t0 = time.perf_counter()
         for table_name in entity.table_order:
-            path = self._staged.path(f"{table_name}.parquet")
+            path = staged.path(f"{table_name}{self._ext}")
             schema: pa.Schema = entity.schemas[table_name]
             self._writers[table_name] = pq.ParquetWriter(
                 str(path),
@@ -120,25 +91,7 @@ class ParquetWriter:
             timings[table_name] = time.perf_counter() - t0
         return timings
 
-    def finalize(self, entity: EntityDef) -> None:
-        assert self._staged is not None, "finalize() called before setup()"
-        n_files = len(self._writers)
+    def _close_handles(self, *, ignore_errors: bool) -> None:
         for writer in self._writers.values():
-            writer.close()
+            self._close(writer, ignore_errors=ignore_errors)
         self._writers.clear()
-        total_bytes = self._staged.commit()
-        self._staged = None
-        total_mib = total_bytes / 2**20
-        status("Output", f"{n_files} files, {total_mib:,.1f} MiB total")
-
-    def close(self) -> None:
-        """Release file handles; output not committed by ``finalize()`` is deleted, unless a failed commit kept it."""
-        for writer in self._writers.values():
-            # The file is discarded below, so a failing footer write doesn't matter
-            # and must not replace the error that aborted the run.
-            with suppress(Exception):
-                writer.close()
-        self._writers.clear()
-        if self._staged is not None:
-            self._staged.discard()
-            self._staged = None

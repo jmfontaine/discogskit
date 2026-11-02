@@ -175,10 +175,9 @@ class TestRepeatedElements:
     @pytest.mark.parametrize(
         ("element", "table"),
         [
-            ("<artists><artist><id>1</id></artist></artists>", "master_artists"),
             ('<videos><video src="https://example.com"/></videos>', "master_videos"),
         ],
-        ids=["artists", "videos"],
+        ids=["videos"],
     )
     def test_appending_container_repeated(self, tmp_path, element, table):
         tables = parse_records(
@@ -200,6 +199,9 @@ class TestRepeatedElements:
             ),
             pytest.param(_MASTER, "<genres><genre>Rock</genre></genres>", id="genres"),
             pytest.param(_MASTER, "<styles><style>Punk</style></styles>", id="styles"),
+            pytest.param(
+                _MASTER, "<artists><artist><id>1</id></artist></artists>", id="artists"
+            ),
             pytest.param(_ARTIST, "<id>1</id>", id="artist-id"),
             pytest.param(_ARTIST, "<id/>", id="artist-id-empty"),
             pytest.param(_ARTIST, "<name>N</name>", id="artist-name"),

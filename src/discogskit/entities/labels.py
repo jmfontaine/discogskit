@@ -15,10 +15,10 @@ from discogskit.entities._def import (
     check_attrs,
     check_leaf,
     check_text,
-    child_elements,
     leaf_text,
     leaf_texts,
     parse_int,
+    parse_refs,
     second_copy,
 )
 
@@ -109,12 +109,10 @@ def append_record(
                 raise second_copy(child)
             profile = leaf_text(child, "", unknown)
         elif tag == "sublabels":
-            for sub in child_elements(child, "label", "", unknown):
-                sub_id = parse_int("sublabel id", sub.get("id"))
-                sub_name = sub.text or ""
-                if unknown is not None:
-                    check_leaf(sub, "sublabels/", unknown, ID_ATTR)
-                row = cols["label_sublabels"]
+            row = cols["label_sublabels"]
+            for sub_id, sub_name in parse_refs(
+                child, "label", "sublabel id", "", unknown
+            ):
                 row["label_id"].append(label_id)
                 row["sublabel_id"].append(sub_id)
                 row["name"].append(sub_name)
