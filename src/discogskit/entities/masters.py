@@ -10,17 +10,18 @@ from lxml import etree
 
 from discogskit.entities._def import (
     ID_ATTR,
-    VIDEO_ATTRS,
+    ArtistRec,
     Cols,
     EntityDef,
+    VideoRec,
     check_attrs,
-    check_leaf,
     check_text,
     child_elements,
     leaf_text,
     leaf_texts,
-    parse_bool,
+    parse_artist_children,
     parse_int,
+    parse_video,
     second_copy,
 )
 
@@ -89,49 +90,16 @@ def append_record(
     genres = None
     styles = None
 
+    # The artists container stays None until read, so a second copy is told apart from an empty first.
+    m_artists: list[ArtistRec] | None = None
+    m_videos: list[VideoRec] = []
+
     for child in elem:
         tag = child.tag
         if tag == "artists":
-            for artist_elem in child_elements(child, "artist", "", unknown):
-                if unknown is not None:
-                    check_attrs(artist_elem, "artists/artist/", unknown)
-                    check_text(artist_elem, "artists/artist/", unknown)
-                artist_id_text = None
-                anv = None
-                join_text = None
-                aname = None
-                for ac in artist_elem:
-                    at = ac.tag
-                    if at == "id":
-                        if artist_id_text is not None:
-                            raise second_copy(ac)
-                        artist_id_text = ac.text or ""
-                    elif at == "anv":
-                        if anv is not None:
-                            raise second_copy(ac)
-                        anv = ac.text or ""
-                    elif at == "join":
-                        if join_text is not None:
-                            raise second_copy(ac)
-                        join_text = ac.text or ""
-                    elif at == "name":
-                        if aname is not None:
-                            raise second_copy(ac)
-                        aname = ac.text or ""
-                    else:
-                        if unknown is not None:
-                            unknown.add(f"artists/artist/{at}")
-                        continue
-                    # Every child handled above is text-only.
-                    if unknown is not None:
-                        check_leaf(ac, "artists/artist/", unknown)
-                artist_id = parse_int("artist id", artist_id_text)
-                row = cols["master_artists"]
-                row["master_id"].append(master_id)
-                row["artist_id"].append(artist_id)
-                row["anv"].append(anv)
-                row["join"].append(join_text)
-                row["name"].append(aname)
+            if m_artists is not None:
+                raise second_copy(child)
+            m_artists = parse_artist_children(child, "", unknown)
         elif tag == "data_quality":
             if data_quality is not None:
                 raise second_copy(child)
@@ -158,37 +126,7 @@ def append_record(
             title = leaf_text(child, "", unknown)
         elif tag == "videos":
             for video in child_elements(child, "video", "", unknown):
-                if unknown is not None:
-                    check_attrs(video, "videos/video/", unknown, VIDEO_ATTRS)
-                    check_text(video, "videos/video/", unknown)
-                src = video.get("src")
-                duration = parse_int("duration", video.get("duration"))
-                embed = parse_bool("embed", video.get("embed"))
-                vdesc = None
-                vtitle = None
-                for vc in video:
-                    if vc.tag == "description":
-                        if vdesc is not None:
-                            raise second_copy(vc)
-                        vdesc = vc.text or ""
-                    elif vc.tag == "title":
-                        if vtitle is not None:
-                            raise second_copy(vc)
-                        vtitle = vc.text or ""
-                    else:
-                        if unknown is not None:
-                            unknown.add(f"videos/video/{vc.tag}")
-                        continue
-                    # Every child handled above is text-only.
-                    if unknown is not None:
-                        check_leaf(vc, "videos/video/", unknown)
-                row = cols["master_videos"]
-                row["master_id"].append(master_id)
-                row["description"].append(vdesc)
-                row["duration"].append(duration)
-                row["embed"].append(embed)
-                row["src"].append(src)
-                row["title"].append(vtitle)
+                m_videos.append(parse_video(video, "", unknown))
         elif tag == "year":
             if year_text is not None:
                 raise second_copy(child)
@@ -199,6 +137,21 @@ def append_record(
     # Parsed after the loop, as an artist credit's <id> is, so a second copy fails first, even after an empty one.
     main_release = parse_int("main release", main_release_text)
     year = parse_int("year", year_text)
+    row = cols["master_artists"]
+    for artist_id, name, anv, join_text in m_artists or ():
+        row["master_id"].append(master_id)
+        row["artist_id"].append(artist_id)
+        row["anv"].append(anv)
+        row["join"].append(join_text)
+        row["name"].append(name)
+    row = cols["master_videos"]
+    for src, duration, vtitle, description, embed in m_videos:
+        row["master_id"].append(master_id)
+        row["description"].append(description)
+        row["duration"].append(duration)
+        row["embed"].append(embed)
+        row["src"].append(src)
+        row["title"].append(vtitle)
     r = cols["masters"]
     r["id"].append(master_id)
     r["data_quality"].append(data_quality)

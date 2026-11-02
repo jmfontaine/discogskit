@@ -11,22 +11,24 @@ import pyarrow as pa
 from lxml import etree
 
 from discogskit.entities._def import (
-    VIDEO_ATTRS,
+    ArtistRec,
     Cols,
     ElementValueError,
     EntityDef,
+    VideoRec,
     check_attrs,
     check_leaf,
     check_text,
     child_elements,
     leaf_text,
     leaf_texts,
+    parse_artist_children,
     parse_bool,
     parse_int,
+    parse_video,
     second_copy,
 )
 
-_ArtistRec = tuple[int | None, str | None, str | None, str | None]
 _ExtraArtistRec = tuple[int | None, str | None, str | None, str | None, str | None]
 # track_idx, parent_idx, position, title, duration, artists, extra artists.
 _TrackRec = tuple[
@@ -35,7 +37,7 @@ _TrackRec = tuple[
     str | None,
     str | None,
     str | None,
-    list[_ArtistRec],
+    list[ArtistRec],
     list[_ExtraArtistRec],
 ]
 # Track-level extra artists have no tracks column, so a <tracks> value there fails instead of vanishing (#202).
@@ -206,49 +208,6 @@ TABLE_WEIGHTS = {
 # ------------------------------------------------------------------------------------------------------------------------
 
 
-def _parse_artist_children(
-    parent_elem: etree._Element, parent_path: str, unknown: set[str] | None
-) -> list[_ArtistRec]:
-    """Parse the <artist> children of an <artists> element; ``parent_path`` is that element's parent's path."""
-    path = "" if unknown is None else f"{parent_path}{parent_elem.tag}/artist/"
-    result = []
-    for a in child_elements(parent_elem, "artist", parent_path, unknown):
-        if unknown is not None:
-            check_attrs(a, path, unknown)
-            check_text(a, path, unknown)
-        aid_text = None
-        name = None
-        anv = None
-        join_text = None
-        for ch in a:
-            t = ch.tag
-            if t == "id":
-                if aid_text is not None:
-                    raise second_copy(ch)
-                aid_text = ch.text or ""
-            elif t == "name":
-                if name is not None:
-                    raise second_copy(ch)
-                name = ch.text or ""
-            elif t == "anv":
-                if anv is not None:
-                    raise second_copy(ch)
-                anv = ch.text or ""
-            elif t == "join":
-                if join_text is not None:
-                    raise second_copy(ch)
-                join_text = ch.text or ""
-            else:
-                if unknown is not None:
-                    unknown.add(f"{path}{t}")
-                continue
-            # Every child handled above is text-only.
-            if unknown is not None:
-                check_leaf(ch, path, unknown)
-        result.append((parse_int("artist id", aid_text), name, anv, join_text))
-    return result
-
-
 def _parse_extraartist_children(
     parent_elem: etree._Element, parent_path: str, unknown: set[str] | None
 ) -> tuple[list[_ExtraArtistRec], etree._Element | None]:
@@ -314,7 +273,7 @@ def _parse_single_track(
     str | None,
     str | None,
     str | None,
-    list[_ArtistRec],
+    list[ArtistRec],
     list[_ExtraArtistRec],
     etree._Element | None,
     etree._Element | None,
@@ -326,7 +285,7 @@ def _parse_single_track(
     position = None
     title = None
     duration = None
-    artists: list[_ArtistRec] | None = None
+    artists: list[ArtistRec] | None = None
     extraartists: list[_ExtraArtistRec] | None = None
     sub_tracks_elem = None
     tracks_elem = None
@@ -350,7 +309,7 @@ def _parse_single_track(
         elif tag == "artists":
             if artists is not None:
                 raise second_copy(ch)
-            artists = _parse_artist_children(ch, path, unknown)
+            artists = parse_artist_children(ch, path, unknown)
             continue
         elif tag == "extraartists":
             if extraartists is not None:
@@ -404,13 +363,13 @@ def append_record(
     styles = None
 
     # The containers a release holds one of stay None until read, so a second copy is told apart from an empty first.
-    r_artists: list[_ArtistRec] | None = None
+    r_artists: list[ArtistRec] | None = None
     r_extraartists: list[_ExtraArtistRec] | None = None
     r_labels = []
     r_series = []
     r_formats = []
     r_identifiers = []
-    r_videos = []
+    r_videos: list[VideoRec] = []
     r_companies = []
     r_tracks: list[_TrackRec] | None = None
 
@@ -456,7 +415,7 @@ def append_record(
         elif tag == "artists":
             if r_artists is not None:
                 raise second_copy(child)
-            r_artists = _parse_artist_children(child, "", unknown)
+            r_artists = parse_artist_children(child, "", unknown)
         elif tag == "extraartists":
             if r_extraartists is not None:
                 raise second_copy(child)
@@ -523,38 +482,7 @@ def append_record(
                 )
         elif tag == "videos":
             for vid in child_elements(child, "video", "", unknown):
-                if unknown is not None:
-                    check_attrs(vid, "videos/video/", unknown, VIDEO_ATTRS)
-                    check_text(vid, "videos/video/", unknown)
-                vid_dur = parse_int("duration", vid.get("duration"))
-                vid_embed = parse_bool("embed", vid.get("embed"))
-                vid_title = None
-                vid_desc = None
-                for vch in vid:
-                    if vch.tag == "title":
-                        if vid_title is not None:
-                            raise second_copy(vch)
-                        vid_title = vch.text or ""
-                    elif vch.tag == "description":
-                        if vid_desc is not None:
-                            raise second_copy(vch)
-                        vid_desc = vch.text or ""
-                    else:
-                        if unknown is not None:
-                            unknown.add(f"videos/video/{vch.tag}")
-                        continue
-                    # Every child handled above is text-only.
-                    if unknown is not None:
-                        check_leaf(vch, "videos/video/", unknown)
-                r_videos.append(
-                    (
-                        vid.get("src"),
-                        vid_dur,
-                        vid_title,
-                        vid_desc,
-                        vid_embed,
-                    )
-                )
+                r_videos.append(parse_video(vid, "", unknown))
         elif tag == "companies":
             for co in child_elements(child, "company", "", unknown):
                 if unknown is not None:

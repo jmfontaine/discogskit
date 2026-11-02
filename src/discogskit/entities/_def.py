@@ -23,6 +23,11 @@ if TYPE_CHECKING:
 # follows each column's Arrow type, so it differs per column: hence Any.
 Cols = dict[str, dict[str, list[Any]]]
 
+# One <artist> credit: (id, name, anv, join).
+ArtistRec = tuple[int | None, str | None, str | None, str | None]
+# One <video>: (src, duration, title, description, embed).
+VideoRec = tuple[str | None, int | None, str | None, str | None, bool | None]
+
 
 @dataclass(kw_only=True)
 class ChunkArgs:
@@ -193,6 +198,50 @@ def leaf_texts(
     ]
 
 
+def parse_artist_children(
+    parent: etree._Element, parent_path: str, unknown: set[str] | None
+) -> list[ArtistRec]:
+    """Parse the <artist> children of an <artists> element; ``parent_path`` is that element's parent's path. Returns
+    each credit as ``(id, name, anv, join)``."""
+    path = "" if unknown is None else f"{parent_path}{parent.tag}/artist/"
+    result = []
+    for a in child_elements(parent, "artist", parent_path, unknown):
+        if unknown is not None:
+            check_attrs(a, path, unknown)
+            check_text(a, path, unknown)
+        aid_text = None
+        name = None
+        anv = None
+        join_text = None
+        for ch in a:
+            t = ch.tag
+            if t == "id":
+                if aid_text is not None:
+                    raise second_copy(ch)
+                aid_text = ch.text or ""
+            elif t == "name":
+                if name is not None:
+                    raise second_copy(ch)
+                name = ch.text or ""
+            elif t == "anv":
+                if anv is not None:
+                    raise second_copy(ch)
+                anv = ch.text or ""
+            elif t == "join":
+                if join_text is not None:
+                    raise second_copy(ch)
+                join_text = ch.text or ""
+            else:
+                if unknown is not None:
+                    unknown.add(f"{path}{t}")
+                continue
+            # Every child handled above is text-only.
+            if unknown is not None:
+                check_leaf(ch, path, unknown)
+        result.append((parse_int("artist id", aid_text), name, anv, join_text))
+    return result
+
+
 # Only these literals are booleans; any other value fails instead of being read as False (#95).
 _BOOLEANS = {"false": False, "true": True}
 
@@ -238,3 +287,56 @@ def parse_int(name: str, value: str | None) -> int | None:
     raise ValueError(
         f"invalid {name} {value!r}, expected an integer from {_INT32_MIN} to {_INT32_MAX}"
     )
+
+
+def parse_refs(
+    parent: etree._Element,
+    tag: str,
+    id_name: str,
+    parent_path: str,
+    unknown: set[str] | None,
+) -> list[tuple[int | None, str]]:
+    """Parse the ``<tag id="...">text</tag>`` children of ``parent``, such as an artist's aliases or a label's
+    sublabels; ``parent_path`` is ``parent``'s parent's path and ``id_name`` names the id in an error. Returns each
+    as ``(id, text)``, the id ``None`` when the attribute is missing."""
+    path = f"{parent_path}{parent.tag}/"
+    result = []
+    for ref in child_elements(parent, tag, parent_path, unknown):
+        ref_id = parse_int(id_name, ref.get("id"))
+        text = ref.text or ""
+        if unknown is not None:
+            check_leaf(ref, path, unknown, ID_ATTR)
+        result.append((ref_id, text))
+    return result
+
+
+def parse_video(
+    video: etree._Element, parent_path: str, unknown: set[str] | None
+) -> VideoRec:
+    """Parse a <video> element of a <videos> container; ``parent_path`` is that container's parent's path. Returns
+    ``(src, duration, title, description, embed)``."""
+    path = f"{parent_path}videos/video/"
+    if unknown is not None:
+        check_attrs(video, path, unknown, VIDEO_ATTRS)
+        check_text(video, path, unknown)
+    duration = parse_int("duration", video.get("duration"))
+    embed = parse_bool("embed", video.get("embed"))
+    title = None
+    description = None
+    for vc in video:
+        if vc.tag == "title":
+            if title is not None:
+                raise second_copy(vc)
+            title = vc.text or ""
+        elif vc.tag == "description":
+            if description is not None:
+                raise second_copy(vc)
+            description = vc.text or ""
+        else:
+            if unknown is not None:
+                unknown.add(f"{path}{vc.tag}")
+            continue
+        # Every child handled above is text-only.
+        if unknown is not None:
+            check_leaf(vc, path, unknown)
+    return (video.get("src"), duration, title, description, embed)

@@ -9,16 +9,15 @@ import pyarrow as pa
 from lxml import etree
 
 from discogskit.entities._def import (
-    ID_ATTR,
     Cols,
     EntityDef,
     check_attrs,
     check_leaf,
     check_text,
-    child_elements,
     leaf_text,
     leaf_texts,
     parse_int,
+    parse_refs,
     second_copy,
 )
 
@@ -76,23 +75,19 @@ _REF_ID_FIELD = {
 }
 
 
-def _parse_refs(
+def _append_refs(
     cols: Cols,
     table: str,
     artist_id: int,
     parent: etree._Element,
     unknown: set[str] | None,
 ) -> None:
-    """Parse artist ref children (aliases, groups, members)."""
+    """Append the ref children (aliases, groups, members) of an <artist>."""
     row = cols[table]
     ref_field = _REF_ID_FIELD[table]
-    ref_name = ref_field.replace("_", " ")
-    path = f"{parent.tag}/"
-    for name_elem in child_elements(parent, "name", "", unknown):
-        ref_id = parse_int(ref_name, name_elem.get("id"))
-        name = name_elem.text or ""
-        if unknown is not None:
-            check_leaf(name_elem, path, unknown, ID_ATTR)
+    for ref_id, name in parse_refs(
+        parent, "name", ref_field.replace("_", " "), "", unknown
+    ):
         row["artist_id"].append(artist_id)
         row[ref_field].append(ref_id)
         row["name"].append(name)
@@ -129,15 +124,15 @@ def append_record(
             if unknown is not None:
                 check_leaf(child, "", unknown)
         elif tag == "aliases":
-            _parse_refs(cols, "artist_aliases", artist_id, child, unknown)
+            _append_refs(cols, "artist_aliases", artist_id, child, unknown)
         elif tag == "data_quality":
             if data_quality is not None:
                 raise second_copy(child)
             data_quality = leaf_text(child, "", unknown)
         elif tag == "groups":
-            _parse_refs(cols, "artist_groups", artist_id, child, unknown)
+            _append_refs(cols, "artist_groups", artist_id, child, unknown)
         elif tag == "members":
-            _parse_refs(cols, "artist_members", artist_id, child, unknown)
+            _append_refs(cols, "artist_members", artist_id, child, unknown)
         elif tag == "name":
             if name is not None:
                 raise second_copy(child)
