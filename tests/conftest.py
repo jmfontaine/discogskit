@@ -455,7 +455,7 @@ def pg_container():
     ):
         require_or_skip("Docker not available")
 
-    from testcontainers.postgres import PostgresContainer
+    from testcontainers.community.postgres import PostgresContainer
 
     with PostgresContainer("postgres:16") as pg:
         yield pg
