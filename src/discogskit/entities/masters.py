@@ -13,6 +13,7 @@ from discogskit.entities._def import (
     ArtistRec,
     Cols,
     EntityDef,
+    VideoRec,
     check_attrs,
     check_text,
     child_elements,
@@ -91,7 +92,7 @@ def append_record(
 
     # The artists container stays None until read, so a second copy is told apart from an empty first.
     m_artists: list[ArtistRec] | None = None
-    m_videos = []
+    m_videos: list[VideoRec] = []
 
     for child in elem:
         tag = child.tag

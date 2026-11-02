@@ -202,6 +202,7 @@ class TestRepeatedElements:
             pytest.param(
                 _MASTER, "<artists><artist><id>1</id></artist></artists>", id="artists"
             ),
+            pytest.param(_MASTER, "<artists/>", id="artists-empty"),
             pytest.param(_ARTIST, "<id>1</id>", id="artist-id"),
             pytest.param(_ARTIST, "<id/>", id="artist-id-empty"),
             pytest.param(_ARTIST, "<name>N</name>", id="artist-name"),
