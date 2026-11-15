@@ -93,13 +93,13 @@ Before finishing a change, run `just format && just lint-fix && just type-check 
 - **Annotate `@contextmanager` functions `-> Generator[T, None, None]`**, never `-> Iterator[T]`: `ty` reports the `Iterator` form as a deprecated overload and `ty check` exits 1 on that warning, which fails CI. Spell the `Generator` arguments out, as `_console.using()` and `_interruptible()` do
 - **Comment tags**: `TODO` (planned work), `FIXME` (known bug), `HACK` (temporary workaround), `KLUDGE` (intentional deviation with documented reason — not temporary, include why and a reference).
 
-## Shared workflow
+## Shared Workflow
 
 This repository follows the shared workflow: the `github-workflow` skill's repository
 setup describes its GitHub settings, rulesets, labels and templates. Those settings are
 managed as code outside this repository; change them there, never with `gh api` or the
 GitHub web UI.
 
-### Deviations from the shared workflow
+### Deviations From the Shared Workflow
 
 None.
