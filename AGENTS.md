@@ -90,6 +90,7 @@ Before finishing a change, run `just format && just lint-fix && just type-check 
 - `rapidgzip` has no type stubs — it's in `allowed-unresolved-imports`
 - **Alphabetical ordering** for: class attributes, CLI options, database columns, dict keys, enum members, function definitions in a class, imports, just recipes, keyword arguments. Exception: `id` always comes first in DB tables.
 - **No `# type: ignore`** — Use `cast()`, `TypeGuard`, or `Protocol` instead.
+- **Annotate `@contextmanager` functions `-> Generator[T, None, None]`**, never `-> Iterator[T]`: `ty` reports the `Iterator` form as a deprecated overload and `ty check` exits 1 on that warning, which fails CI. Spell the `Generator` arguments out, as `_console.using()` and `_interruptible()` do
 - **Comment tags**: `TODO` (planned work), `FIXME` (known bug), `HACK` (temporary workaround), `KLUDGE` (intentional deviation with documented reason — not temporary, include why and a reference).
 
 ## Shared workflow
