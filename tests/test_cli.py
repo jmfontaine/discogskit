@@ -981,9 +981,9 @@ class TestOptionMinimums:
             result = runner.invoke(app, [command, str(gz), option, value])
         assert result.exit_code == 2
         output = unstyle(result.output)
-        # Typer colors the error panel when it detects CI (GITHUB_ACTIONS).
-        assert option in output
-        assert "is not in the range x>=1" in output
+        # Typer colors the error panel when it detects CI (GITHUB_ACTIONS). The reason's
+        # wording depends on the Typer version (Click's range check before 0.29, Pydantic's after).
+        assert f"Invalid value for '{option}'" in output
         run.assert_not_called()
 
     @pytest.mark.parametrize(

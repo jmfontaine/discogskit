@@ -34,7 +34,7 @@ discogskit convert [OPTIONS] {paths}...
 
 Arguments:
 
-- `paths...`: One or more .xml.gz files or directories containing them [required]
+- `paths... <list[Path]>`: One or more .xml.gz files or directories containing them [required]
 
 Options:
 
@@ -61,7 +61,7 @@ discogskit load [OPTIONS] {paths}...
 
 Arguments:
 
-- `paths...`: One or more .xml.gz files or directories containing them [required]
+- `paths... <list[Path]>`: One or more .xml.gz files or directories containing them [required]
 
 Options:
 
@@ -108,7 +108,7 @@ discogskit skills get [OPTIONS] {name}
 
 Arguments:
 
-- `name`: Skill name [required]
+- `name <str>`: Skill name [required]
 
 Options:
 
@@ -132,4 +132,4 @@ discogskit skills path [OPTIONS] [name]
 
 Arguments:
 
-- `name`: Skill name; without it, the directory holding every skill
+- `name <str>`: Skill name; without it, the directory holding every skill
